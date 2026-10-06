@@ -467,12 +467,17 @@ def wait_online(
     instance_id: str,
     notice: str | None = None,
     since: datetime | None = None,
+    hint: str | None = None,
 ) -> None:
-    """SSM エージェントが Online と報告するまで待つ。since は is_online と同じ。"""
+    """SSM エージェントが Online と報告するまで待つ。since は is_online と同じ。
+
+    hint は、締め切りを過ぎたときに添える手がかり。
+    """
     _ = wait.until(
         LOGIN_DEADLINE,
         f"the SSM agent on {instance_id} to come online",
         _noticing(notice, lambda: True if is_online(ssm, instance_id, since) else None),
+        hint=hint,
     )
 
 

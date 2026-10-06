@@ -894,7 +894,10 @@ def test_it_leaves_the_known_hosts_alone_when_the_agent_stays_offline(
     clock: Clock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """known_hosts を用意するのは、つなげるようになった後である。締め切りは 5 分。"""
+    """known_hosts を用意するのは、つなげるようになった後である。締め切りは 5 分。
+
+    締め切りを過ぎたときも、待たずに確かめたときと同じ手がかりを添える。
+    """
     _ = required
     monkeypatch.setattr(wait, "INTERVAL", 60)
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
@@ -902,7 +905,10 @@ def test_it_leaves_the_known_hosts_alone_when_the_agent_stays_offline(
         agent(aws_stubs, "")
     with pytest.raises(
         TemtError,
-        match=f"timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online",
+        match=(
+            f"timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online; "
+            "see 'temt status --svc dev-main' or run 'temt reboot --svc dev-main --async'"
+        ),
     ):
         proxy.run(configured, 22)
     aws_stubs.done()

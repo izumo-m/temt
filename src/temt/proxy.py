@@ -135,17 +135,18 @@ def _ssm_ready(ssm: SSMClient, service: Service, one: Instance, *, fresh: bool) 
     のを待つ。
     """
     instance_id = one.id
+    hint = f"see 'temt status --svc {service.svc}' or run 'temt reboot --svc {service.svc} --async'"
     if fresh:
         instances.wait_online(
-            ssm, instance_id, f"waiting for the SSM agent on {instance_id}", since=one.launched
+            ssm,
+            instance_id,
+            f"waiting for the SSM agent on {instance_id}",
+            since=one.launched,
+            hint=hint,
         )
         _sshd_ready(ssm, service, instance_id)
     elif not instances.is_online(ssm, instance_id):
-        raise TemtError(
-            f"the SSM agent on {instance_id} is not online; "
-            f"see 'temt status --svc {service.svc}' or "
-            f"run 'temt reboot --svc {service.svc} --async'"
-        )
+        raise TemtError(f"the SSM agent on {instance_id} is not online; {hint}")
 
 
 def _sshd_ready(ssm: SSMClient, service: Service, instance_id: str) -> None:
