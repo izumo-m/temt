@@ -1,0 +1,38 @@
+# python と uv は mise が用意する。このディレクトリに入ると .venv を作って有効にする。
+[tools]
+# 先頭の 3.12 が既定。3.14 は `mise run check-py314` で別の環境に作って確かめる
+python = ["3.12", "3.14"]
+uv = "0.12"
+
+[settings]
+python.uv_venv_auto = "create|source"
+
+[env]
+# 開発には mise が入れた 3.12 系を使い、uv が自分で入れた python は使わない。PATH
+# では mise の 3.12 が先に見つかる。版を末尾まで書かないので、mise が 3.12 の中で
+# 上げても .venv はそのまま使える
+UV_PYTHON = "3.12"
+UV_PYTHON_PREFERENCE = "only-system"
+UV_PYTHON_DOWNLOADS = "never"
+
+# temt をリポジトリの外（uv がツールを入れる場所）に入れる。入れ直しも同じ。python は
+# システムの python3（3.12 以上）を使う
+[tasks.install]
+description = "uv tool install . with the system python3"
+run = "uv tool install --python /usr/bin/python3 ."
+
+# commit 前に通す確認
+[tasks.check]
+description = "ruff check, ruff format --check, basedpyright, pytest"
+run = [
+    "uv run ruff check .",
+    "uv run ruff format --check .",
+    "uv run basedpyright",
+    "uv run pytest -q",
+]
+
+# .venv を作り直さないよう、3.14 は別の環境 .venv314 で動かす
+[tasks.check-py314]
+description = "pytest on python 3.14"
+env = { UV_PROJECT_ENVIRONMENT = ".venv314" }
+run = "uv run --python 3.14 pytest -q"

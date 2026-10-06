@@ -1,0 +1,3 @@
+name = "timezone-tokyo"
+version = "1"
+description = "Set the time zone of the instance to Asia/Tokyo"

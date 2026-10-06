@@ -1,0 +1,16 @@
+#!/bin/bash
+# /swapfile の swap を止めて消し、/etc/fstab から外す。app remove が root で実行する。
+# 何度実行してもよい
+set -euo pipefail
+
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+. "$here/common.sh"
+
+if is_active; then
+    turn_off "run app remove again"
+fi
+set_fstab ""
+# install が作るのは普通のファイルだけなので、それ以外は消さない
+if [ -f "$SWAPFILE" ] && [ ! -L "$SWAPFILE" ]; then
+    rm -f "$SWAPFILE"
+fi

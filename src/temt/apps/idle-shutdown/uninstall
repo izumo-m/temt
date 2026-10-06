@@ -1,0 +1,32 @@
+#!/bin/bash
+# idle-shutdown を外す。app remove が root で実行する。何度実行してもよい
+set -euo pipefail
+
+# PAM の行は、呼ぶ先の idle-shutdown を消す前に外す。外せなければ、何も変えずに止める
+if [ -e /usr/share/pam-configs/idle-shutdown ]; then
+    DEBIAN_FRONTEND=noninteractive pam-auth-update --remove idle-shutdown
+    # common-session に手元の変更があると、pam-auth-update は書かずに 0 で終わる。行を
+    # 残して本体を消すと、ログインとログアウトのたびに無い本体を呼ぶ
+    if grep -q 'idle-shutdown touch pam' /etc/pam.d/common-session; then
+        echo "uninstall: pam-auth-update did not remove idle-shutdown from" \
+            "/etc/pam.d/common-session; /etc/pam.d/common-* seem to be edited by hand;" \
+            "undo the edits and remove again" >&2
+        exit 1
+    fi
+fi
+systemctl disable --now idle-shutdown.timer 2>/dev/null || true
+systemctl stop idle-shutdown.service 2>/dev/null || true
+rm -f /usr/share/pam-configs/idle-shutdown \
+      /etc/update-motd.d/60-idle-shutdown \
+      /etc/systemd/system/idle-shutdown.service \
+      /etc/systemd/system/idle-shutdown.timer \
+      /etc/tmpfiles.d/idle-shutdown.conf \
+      /etc/ssh/sshd_config.d/idle-shutdown.conf \
+      /etc/idle-shutdown/limit \
+      /usr/local/bin/idle-shutdown
+systemctl daemon-reload
+systemctl try-reload-or-restart ssh.service
+rm -rf /run/idle-shutdown
+# 他のアプリが置いた判定が残っていれば、ディレクトリも残す
+rmdir --ignore-fail-on-non-empty /etc/idle-shutdown/in-use.d 2>/dev/null || true
+rmdir --ignore-fail-on-non-empty /etc/idle-shutdown 2>/dev/null || true

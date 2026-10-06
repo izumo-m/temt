@@ -1,0 +1,12 @@
+#!/bin/bash
+# タイムゾーンを Ubuntu の AMI の既定の Etc/UTC に戻す。app remove が root で実行する。
+# 何度実行してもよい
+set -euo pipefail
+
+timedatectl set-timezone Etc/UTC
+# 起動したときのタイムゾーンを使い続けるので、動いていれば起動し直す
+for unit in cron.service rsyslog.service; do
+    if systemctl is-active --quiet "$unit"; then
+        systemctl restart "$unit"
+    fi
+done

@@ -1,0 +1,31 @@
+# ローカルの秘密情報 / 環境変数
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+CLAUDE.local.md
+.claude/settings.local.json
+
+# ローカル限定の作業メモ
+/.local/
+
+# エージェントのツール
+/.agents/
+/skills-lock.json
+
+# Python
+__pycache__/
+.venv*/
+.pytest_cache/
+.ruff_cache/
+/dist/
+*.egg-info/
+
+# mise のローカル上書き
+mise.local.toml
+.mise.local.toml

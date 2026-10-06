@@ -1,0 +1,54 @@
+#!/bin/bash
+# idle-shutdown を入れる。deploy が root で実行する。何度実行してもよい
+set -euo pipefail
+
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+# deploy のオプション。TEMT_OPTION_LIMIT は、deploy のオプション limit の値
+. "$here/temt-options.env"
+
+# deploy で決めた制限時間を、/etc/idle-shutdown/limit に置く。期間は本体が検査するので、
+# aws-cli や本体などを入れる前に、送られた本体で行う。通らなければ、何も入れずに失敗する
+python3 -I "$here/idle_shutdown.py" limit --deploy "$TEMT_OPTION_LIMIT"
+
+# 判定の結果を SSM パラメータに書く aws-cli。本体が探す場所に無ければ snap で入れる。
+# 起動直後は snapd の初期化（seed）が終わっていないことがあるので、先に待つ。
+# 失敗すれば install も失敗する（set -e）
+if [ ! -x /snap/bin/aws ] && [ ! -x /usr/local/bin/aws ] && [ ! -x /usr/bin/aws ]; then
+    snap wait system seed.loaded
+    snap install aws-cli --classic
+fi
+
+install -m 755 "$here/idle_shutdown.py" /usr/local/bin/idle-shutdown
+install -m 644 "$here/idle-shutdown.service" "$here/idle-shutdown.timer" /etc/systemd/system/
+install -m 644 "$here/tmpfiles.conf" /etc/tmpfiles.d/idle-shutdown.conf
+install -m 644 "$here/pam-config" /usr/share/pam-configs/idle-shutdown
+# ログインのメッセージに状態を出す
+install -D -m 755 "$here/motd" /etc/update-motd.d/60-idle-shutdown
+install -m 644 "$here/sshd.conf" /etc/ssh/sshd_config.d/idle-shutdown.conf
+# 他のアプリが使用中の判定を置く。中身は他のアプリのもの
+install -d -m 755 /etc/idle-shutdown/in-use.d
+
+systemd-tmpfiles --create /etc/tmpfiles.d/idle-shutdown.conf
+# /etc/pam.d/common-session に、ログインとログアウトで最終利用時刻を更新する行を足す
+DEBIAN_FRONTEND=noninteractive pam-auth-update --enable idle-shutdown
+# common-session に手元の変更があると、pam-auth-update は書かずに 0 で終わる
+if ! grep -q 'idle-shutdown touch pam' /etc/pam.d/common-session; then
+    echo "install: pam-auth-update did not add idle-shutdown to /etc/pam.d/common-session;" \
+        "/etc/pam.d/common-* seem to be edited by hand; undo the edits and deploy again" >&2
+    exit 1
+fi
+systemctl daemon-reload
+systemctl enable --now idle-shutdown.timer
+# sshd の設定を確かめてから読み直させる。いまの接続は切れず、新しい接続から効く。
+# 通らなければ置いた設定を外す。そのまま焼くと、次のインスタンスで sshd が起動しない
+if ! sshd -t; then
+    rm -f /etc/ssh/sshd_config.d/idle-shutdown.conf
+    echo "install: sshd -t failed; removed /etc/ssh/sshd_config.d/idle-shutdown.conf" >&2
+    exit 1
+fi
+systemctl try-reload-or-restart ssh.service
+
+# 判定の結果を SSM パラメータに書く。入れ直したときも、temt status に新しい制限時間が
+# 次のタイマーを待たずに出る
+idle-shutdown report
+idle-shutdown status

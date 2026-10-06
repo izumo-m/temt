@@ -1,0 +1,76 @@
+#!/bin/bash
+# /swapfile を作って swap に使い、起動のたびに使うよう /etc/fstab に書く。deploy が root で
+# 実行する。何度実行してもよい
+set -euo pipefail
+
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+# deploy のオプション。TEMT_OPTION_SIZE は、deploy のオプション size の値
+. "$here/temt-options.env"
+. "$here/common.sh"
+
+# fstab に書く行。nofail を付けるので、ファイルが壊れていても swap.target は失敗の扱いに
+# ならない。付けなくても起動は止まらない
+FSTAB_LINE="$SWAPFILE none swap sw,nofail 0 0"
+# 作ったあとに残すディスクの空き
+DISK_MARGIN=$((1024 * MIB))
+
+# size をバイト数に直す。桁が多すぎると bash の整数があふれるので、先に止める
+number=${TEMT_OPTION_SIZE%[mg]}
+if [ ${#number} -gt 9 ]; then
+    echo "install: size is too large: $TEMT_OPTION_SIZE" >&2
+    exit 1
+fi
+case $TEMT_OPTION_SIZE in
+    [1-9]*m) size=$((number * MIB)) ;;
+    [1-9]*g) size=$((number * 1024 * MIB)) ;;
+    *)
+        echo "install: bad size: $TEMT_OPTION_SIZE" >&2
+        exit 1
+        ;;
+esac
+
+# このアプリが作るのは普通のファイルだけなので、それ以外には触らない
+if [ -L "$SWAPFILE" ] || { [ -e "$SWAPFILE" ] && [ ! -f "$SWAPFILE" ]; }; then
+    echo "install: $SWAPFILE is not a regular file; move it away and deploy again" >&2
+    exit 1
+fi
+
+# 同じ大きさで使っていれば、そのまま使う。焼いた AMI から起動したインスタンスもこれに当たる
+current=0
+if [ -f "$SWAPFILE" ]; then
+    current=$(stat -c %s "$SWAPFILE")
+fi
+if ! is_active || [ "$current" -ne "$size" ]; then
+    # 作ったあとに DISK_MARGIN が残るか、何かを変える前に確かめる。いまのファイルを
+    # 消せば空く分も数える
+    freed=0
+    if [ -f "$SWAPFILE" ]; then
+        freed=$(($(stat -c '%b * %B' "$SWAPFILE")))
+    fi
+    available=$(df --output=avail -B1 "$(dirname "$SWAPFILE")" | awk 'NR == 2 {print $1}')
+    if [ $((available + freed - size)) -lt "$DISK_MARGIN" ]; then
+        echo "install: not enough disk space for a $TEMT_OPTION_SIZE swap file:" \
+            "$(((available + freed) / MIB)) MiB free, $(((size + DISK_MARGIN) / MIB)) MiB" \
+            "needed to leave 1 GiB" >&2
+        exit 1
+    fi
+    if is_active; then
+        turn_off "deploy again"
+    fi
+    rm -f "$SWAPFILE"
+    # 中身を書き込まずに場所だけ取るので、大きくてもすぐ終わる
+    (umask 077 && fallocate -l "$size" "$SWAPFILE")
+    mkswap "$SWAPFILE" >/dev/null
+    swapon "$SWAPFILE"
+fi
+# swap に出たメモリの中身を、root のほかに読ませない。前からあったファイルも直す
+chown root:root "$SWAPFILE"
+chmod 600 "$SWAPFILE"
+set_fstab "$FSTAB_LINE"
+
+if ! read -r total used < <(swapon --show=NAME,SIZE,USED --noheadings --raw |
+    awk -v f="$SWAPFILE" '$1 == f {print $2, $3}'); then
+    echo "install: $SWAPFILE is not in use as swap after swapon" >&2
+    exit 1
+fi
+echo "swapfile: $SWAPFILE $total, active, $used used"
