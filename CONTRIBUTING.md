@@ -74,17 +74,15 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
 
 ## 言語
 
-- 文書（README、CONTRIBUTING、docs/）とコード内のコメントは日本語で書く。
+- 文書（README、CONTRIBUTING、docs/）とコード内のコメントは日本語で書く。設計書（design/）は
+  英語で書く。
 - コンソールに出す文は英語で、ASCII 文字だけを使う。
 - Issue と Pull Request は、日本語でも英語でもよい。
 
-## 設計の進め方
+## 設計書
 
-設計は、[docs/discussions/](docs/discussions/) に議論のファイルを置いて論点ごとに
-決める。決まった内容を [docs/design.md](docs/design.md) と
-[docs/design/](docs/design/) に書き、議論を終えたらファイルを
-`docs/discussions/done/` へ移す。`done/` は過去の記録で、後から書き換えない。
-選択肢が分かれたときに何を優先するかは [docs/overview.md](docs/overview.md) にある。
+設計書は [design/](design/) にある。選択肢が分かれたときに何を優先するかは
+[design/principles.md](design/principles.md) にある。
 
 ## Issue
 
@@ -115,6 +113,6 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
    作る。mise の `pypi` バックエンドは、`latest` を最新の GitHub Release に解決する。
 
 番号を上げるのは、`src/temt/` の下か、`pyproject.toml` の依存が変わったときである。
-それ以外（`docs/`、`README.md`、`tests/`、`mise.toml`、`uv.lock` など）だけのときは、
+それ以外（`docs/`、`design/`、`README.md`、`tests/`、`mise.toml`、`uv.lock` など）だけのときは、
 番号を上げず、git のタグも付けない。`main` へのマージと、
 `git push origin main develop` だけを行う。

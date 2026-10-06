@@ -1,4 +1,4 @@
-"""sshd の待ち受けポートを SshdPorts に揃える仕組み。docs/design/sshd-ports.md。
+"""sshd の待ち受けポートを SshdPorts に揃える仕組み。design/topics/sshd-ports.md。
 
 State Manager の関連付け <名前>-sshd の中身（インスタンスで動くスクリプト）を作り、
 関連付けとインスタンスでの実行の状態を読む。関連付けは名前で探す。関連付けを揃えて
@@ -40,7 +40,7 @@ WAITING = frozenset({"Queued", "Pending", "InProgress"})
 # describe-instance-associations-status が返す誤りの名前
 NO_SUCH_INSTANCE = "InvalidInstanceId"
 
-# インスタンスの上の場所。docs/design/sshd-ports.md の「スクリプト」
+# インスタンスの上の場所。design/topics/sshd-ports.md の Script
 CONF_FILE = "/etc/ssh/sshd_config.d/temt-sshd-ports.conf"
 STATE_DIR = "/run/temt-sshd"
 MOTD_DIR = "/run/motd.d"
@@ -61,8 +61,8 @@ def commands(ports: Sequence[int], svc: str) -> list[str]:
     実行するので、Ubuntu の dash でも動く POSIX の sh で書く。ports は SshdPorts、
     svc はサービス名で、どちらも設定ファイルとサービス名の規則で確かめた値なので、
     そのまま埋め込める。スクリプトは AWS のコンソールにもそのまま出るので、ASCII
-    だけで書き、説明はここのコメントに置く。手順の番号は docs/design/sshd-ports.md の
-    「スクリプト」のもの。
+    だけで書き、説明はここのコメントに置く。手順の番号は design/topics/sshd-ports.md の
+    Script のもの。
     """
     want = " ".join(str(port) for port in ports)
     return [
