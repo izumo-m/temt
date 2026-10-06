@@ -872,8 +872,10 @@ Session Manager 経由に戻すには、`TEMT_LOGIN` を消すか `ssm` にす�
 `~/.ssh/id_*` から EC2 のキーペアに一致する鍵を探して、手がかりとして表示する。
 設定ファイルの `IdentityFile` をそのどれかに直すか、`KeyName` を新しい名前にして
 `apply` をやり直す。`IdentityFile` に別の鍵を書けるのは、それが EC2 のキーペア
-`KeyName` と同じ鍵のときだけである。新しい名前にすると新しい鍵が作られて登録され、
-`terminate` して次に `start` したときから使われる。`apply` が EC2 のキーペア
+`KeyName` と同じ鍵のときだけである。`KeyName` を新しい名前にすると、`IdentityFile` の
+鍵がその名前で登録され（鍵が無ければ作られる）、`terminate` して次に `start` したときから
+使われる。`IdentityFile` を書いていなければ、鍵の場所も `~/.ssh/temt/keys/<新しい名前>` に
+変わるので、新しい鍵が作られる。`apply` が EC2 のキーペア
 そのものや `IdentityFile` を書き換えることはない。初回の `apply` なら、設定ファイルは
 まだ作られていないので、`IdentityFile` か `KeyName` を書いたファイルを用意してから
 やり直す（[conf.md](conf.md)）。
