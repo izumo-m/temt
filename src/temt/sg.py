@@ -2,7 +2,7 @@
 
 どちらも表示するだけで、ロックは取らず、設定ファイルにも AWS にも書き込まない。
 sg diff は、次の apply が受信規則をどう変えるかを標準出力に書く。sg show は
-セキュリティグループを標準エラー出力に書く。比べるセキュリティグループは、設定ファイルの
+セキュリティグループを表示する。比べるセキュリティグループは、設定ファイルの
 SubnetId が属する VPC にある <名前> のものである。設定ファイルだけを扱う sg list、
 sg add、sg remove は ingress にある。
 
@@ -55,8 +55,15 @@ def _split(
 def diff(service: Service) -> None:
     """次の apply が受信規則をどう変えるかを、1 つ 1 行で標準出力に書く。
 
-    セキュリティグループが無ければ、すべての規則を足すものとして出す。
+    セキュリティグループが無ければ、すべての規則を足すものとして出す。標準出力には変更
+    だけを書くよう、途中の知らせは標準エラー出力に回す。
     """
+    with msg.stderr_only():
+        _diff(service)
+
+
+def _diff(service: Service) -> None:
+    """sg diff の本体。"""
     values = conf.load(service)
     ec2 = aws.session(values).client("ec2")
     vpc_id = _vpc(ec2, service, values)
@@ -69,7 +76,7 @@ def diff(service: Service) -> None:
             current = resources.current_rules(ec2, field(mine, "GroupId"))
     found = resources.changes(resources.wanted_rules(values), current)
     if not found:
-        msg.info(f"security group {service.name}: no differences")
+        msg.info(f"security group {service.name}: no differences", side=True)
         return
     lines: list[list[str]] = []
     lines += [[ADD, one.port(), one.source, one.description] for one in found.added]

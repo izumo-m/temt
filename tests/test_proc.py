@@ -1,6 +1,8 @@
 """外部コマンドの確認と実行のテスト。"""
 
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -53,18 +55,33 @@ def test_run_puts_a_failure_on_one_line() -> None:
     assert str(caught.value) == f"{sys.executable}: WARNING: TOO OPEN Load key: bad permissions"
 
 
-def test_stream_sends_the_output_to_stderr(capfd: pytest.CaptureFixture[str]) -> None:
-    """標準出力は表と app get の値だけに使うので、子の出力は標準エラー出力に回す。"""
+def test_stream_shows_the_output_as_it_is(capfd: pytest.CaptureFixture[str]) -> None:
+    """子の標準出力は標準出力に、標準エラー出力は標準エラー出力に、そのまま見せる。"""
     code = proc.stream(["sh", "-c", "cat; echo out; echo err >&2; exit 3"], b"in\n")
     captured = capfd.readouterr()
     assert code == 3
-    assert captured.out == ""
-    assert captured.err == "in\nout\nerr\n"
+    assert captured.out == "in\nout\n"
+    assert captured.err == "err\n"
+
+
+def test_stream_runs_the_command_to_the_end_when_the_reader_goes_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """標準出力の読み手（head など）が先に閉じても、install を途中で切らないよう子は止めない。"""
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    monkeypatch.setattr(sys, "stdout", os.fdopen(write_end, "w", encoding="utf-8"))
+    done = tmp_path / "done"
+    script = f"for i in $(seq 2000); do echo line $i; done; touch '{done}'"
+    assert proc.stream(["sh", "-c", script]) == 0
+    assert done.exists()
 
 
 def test_stream_closes_stdin_without_data(capfd: pytest.CaptureFixture[str]) -> None:
     assert proc.stream(["sh", "-c", "cat"]) == 0
-    assert capfd.readouterr().err == ""
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_read_returns_the_output_and_shows_the_errors(capfd: pytest.CaptureFixture[str]) -> None:

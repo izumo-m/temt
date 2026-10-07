@@ -119,7 +119,7 @@ values, so they are not columns.
 
 `app show --svc <svc> <app ID>`
 
-Prints to stderr the `deploy` record, the declared options (below), and the list of keys
+Prints the `deploy` record, the declared options (below), and the list of keys
 other than `deploy` directly under the app's hierarchy (key, last modified time), in
 this order. Values are not shown. Without a record, it says the app is not deployed
 (`app <app ID>: not deployed`). Keys that break the key rule are listed too. The
@@ -268,7 +268,8 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
    `/opt/temt/apps/<app ID>/`. On failure partway, the temporary directory is removed and
    the old directory remains. Temporary directories left by an earlier interrupted run
    are removed first. Then connect again and run `bash /opt/temt/apps/<app ID>/install`
-   as the user, with `/` as the current directory. ssh's output goes to stderr.
+   as the user, with `/` as the current directory. ssh's output goes to stdout and
+   stderr as it is.
 4. Write the record `/<name>/<app ID>/deploy`: `user` is the user that ran `install`,
    `deployed` is the local time when `install` finished, in UTC, `instance` is the ID of
    the instance, and `options` is the values decided in step 2 whose source is `given` or

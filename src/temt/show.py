@@ -1,8 +1,8 @@
 """template show の本体。起動テンプレートの詳細を表示する。
 
 この module は template show だけを持つ。表示するだけなので、ロックは取らず、
-設定ファイルは読むが書かず、AWS にも書き込まない。出力は status と同じく標準エラー
-出力に書く。instance show（短縮形 status）は status の module が持つ。次の apply が
+設定ファイルは読むが書かず、AWS にも書き込まない。出力は status と同じく標準出力に
+書く。instance show（短縮形 status）は status の module が持つ。次の apply が
 何を変えるかは diff が出すので、ここでは設定ファイルと比べない。
 
 項目のラベルは、設定ファイルから来る 5 つ（ImageId、InstanceType、KeyName、

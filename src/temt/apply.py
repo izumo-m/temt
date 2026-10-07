@@ -359,7 +359,7 @@ def run(service: Service, *, yes: bool) -> None:
     """サービスの設定ファイル、キーペア、AWS リソース、ssh の設定を揃える。
 
     すべての差分を先に検出し、違いが無ければそう知らせて終わる。違いがあれば diff と同じ
-    形で標準エラー出力に表示し、確認を求めてから更新する。確認の前には何も書かない。
+    形で表示し、確認を求めてから更新する。確認の前には何も書かない。
     """
     proc.require(keys.KEYGEN)
     # 手順 1。同じサービスを別の場所から apply していれば、何かを書く前に止める。
@@ -385,8 +385,15 @@ def diff(service: Service) -> None:
     """次の apply が何を変えるかを、1 つの変更を 1 行で標準出力に書く。
 
     差分を検出するだけで、何も書き込まない。apply が止まるところで止まるときは、
-    それまでに検出した変更を書いてから、同じエラーで終わる。
+    それまでに検出した変更を書いてから、同じエラーで終わる。標準出力には変更だけを
+    書くよう、途中の知らせは標準エラー出力に回す。
     """
+    with msg.stderr_only():
+        _diff(service)
+
+
+def _diff(service: Service) -> None:
+    """diff の本体。"""
     proc.require(keys.KEYGEN)
     shown: list[Change] = []
     try:
@@ -398,6 +405,7 @@ def diff(service: Service) -> None:
         change.write(shown)
         raise
     if not shown:
-        msg.info(f"{service.name}: no differences")
+        # 標準出力が空なら違いが無いと分かるよう、標準エラー出力に書く
+        msg.info(f"{service.name}: no differences", side=True)
         return
     change.write(shown)

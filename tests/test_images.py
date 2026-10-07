@@ -347,18 +347,20 @@ def test_prune_deregisters_the_images_no_template_uses(
 
     stubs.done()
     assert terminal.reads == 1
-    err = capsys.readouterr().err
-    assert (
-        f"{ENVIRONMENT}\n"
+    captured = capsys.readouterr()
+    assert captured.out.startswith(
         "deregister:\n"
         f"  {LOOSE}  temt-api-2609021200       failed     2026-09-02 12:00:00\n"
         f"  {OLD}  temt-dev-main-2609011200  available  2026-09-01 12:00:00\n"
-        "deregister 2 AMIs and their snapshots? [y/N] "
-    ) in err
+    )
     # 指されている AMI は挙げない
-    assert NEW not in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
-    assert f"temt: warning: snapshot snap-1 of {OLD}: client-error" in err
+    assert NEW not in captured.out
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
+    assert captured.err == (
+        f"{ENVIRONMENT}\n"
+        "deregister 2 AMIs and their snapshots? [y/N] "
+        f"temt: warning: snapshot snap-1 of {OLD}: client-error\n"
+    )
 
 
 def test_prune_with_nothing_to_deregister_does_not_ask(
@@ -374,7 +376,7 @@ def test_prune_with_nothing_to_deregister_does_not_ask(
 
     stubs.done()
     assert terminal.reads == 0
-    assert capsys.readouterr().err.splitlines()[-1] == "no AMIs to deregister"
+    assert capsys.readouterr().out.splitlines()[-1] == "no AMIs to deregister"
 
 
 def test_prune_does_nothing_when_the_answer_is_no(
@@ -408,9 +410,9 @@ def test_prune_goes_on_after_a_failure(stubs: Stubs, capsys: pytest.CaptureFixtu
 
     stubs.done()
     assert str(caught.value) == f"kept 1 of 2 AMIs: {LOOSE}"
-    err = capsys.readouterr().err
-    assert f"temt: warning: keeping {LOOSE}: cannot deregister it: " in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
+    captured = capsys.readouterr()
+    assert f"temt: warning: keeping {LOOSE}: cannot deregister it: " in captured.err
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
 
 
 def test_prune_stops_when_aws_does_not_answer(
@@ -675,10 +677,11 @@ def test_prune_of_a_service_deregisters_only_its_images(
 
     stubs.done()
     assert stubs.regions == []
-    err = capsys.readouterr().err
-    assert ENVIRONMENT not in err
-    assert NEW not in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
+    captured = capsys.readouterr()
+    # --svc を付けたので、環境の行は出さない
+    assert captured.err == ""
+    assert NEW not in captured.out
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
 
 
 DEV_MAIN_OLD = an_image(OLD, "temt-dev-main-2609011200", "2026-09-01T03:00:00.000Z")
@@ -881,15 +884,16 @@ def test_delete_deregisters_an_unused_image_by_name(
 
     stubs.done()
     assert terminal.reads == 1
-    err = capsys.readouterr().err
-    assert (
+    captured = capsys.readouterr()
+    assert captured.out.startswith(
+        f"deregister:\n  {OLD}  temt-dev-main-2609011200  available  2026-09-01 12:00:00\n"
+    )
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
+    assert captured.err == (
         f"{ENVIRONMENT}\n"
-        "deregister:\n"
-        f"  {OLD}  temt-dev-main-2609011200  available  2026-09-01 12:00:00\n"
         f"deregister {OLD} and its snapshots? [y/N] "
-    ) in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
-    assert f"temt: warning: snapshot snap-1 of {OLD}: client-error" in err
+        f"temt: warning: snapshot snap-1 of {OLD}: client-error\n"
+    )
 
 
 def test_delete_refuses_a_used_image_without_force(stubs: Stubs) -> None:
@@ -919,9 +923,9 @@ def test_delete_deregisters_a_used_image_with_force(
     images.delete(OLD, None, None, force=True, yes=True)
 
     stubs.done()
-    err = capsys.readouterr().err
-    assert f"temt: warning: {OLD}: used by temt-dev-main-template version 2" in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
+    captured = capsys.readouterr()
+    assert f"temt: warning: {OLD}: used by temt-dev-main-template version 2" in captured.err
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
 
 
 def test_delete_warns_every_reason_with_force(
@@ -937,13 +941,13 @@ def test_delete_warns_every_reason_with_force(
 
     stubs.done()
     assert stubs.regions == ["us-east-1"]
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
     assert (
         f"temt: warning: {OLD}: cannot resolve the AMI of: mine version 1 "
         "(resolve:ssm:/golden: ParameterNotFound)\n"
         f"temt: warning: {OLD}: pending; bake may be creating it\n"
-    ) in err
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in err
+    ) in captured.err
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
 
 
 def test_delete_names_every_reason_without_force(stubs: Stubs) -> None:
@@ -1050,7 +1054,7 @@ def test_delete_of_a_service_deregisters_its_image(
 
     stubs.done()
     assert stubs.regions == []
-    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in capsys.readouterr().err
+    assert f"deregistered {OLD} (temt-dev-main-2609011200)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

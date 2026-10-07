@@ -133,8 +133,28 @@ operations can be typed in this form.
 
 ### Messages
 
-- Messages go to stderr, because when `proxy` runs as the ProxyCommand, stdout is the
-  ssh channel.
+- Normal output goes to stdout: progress lines, the displays of `status` and the `show`
+  commands, the list of what a command will do before its confirmation, and the output
+  of `install` and `uninstall` during `deploy` and `app remove`.
+- Warnings, errors, the usage after a usage error, and the `[y/N]` prompt go to stderr,
+  so that they stay on screen when stdout goes to a file or a pipe.
+- Also on stderr, so that stdout holds only the data: the environment line of the
+  commands without `--svc` ([List tables](#list-tables)), and every message of `diff`
+  and `sg diff`, `no differences` included (empty stdout means no differences).
+- Lines that belong to a warning or an error go to stderr with it: the instances found
+  before a too-many or unknown-ID error, the fingerprints and matching keys after a key
+  pair mismatch, the state `bake` leaves before its error, and the newline that closes
+  `^C` on an interrupt.
+- If stdout is closed at start (`>&-`), what would go to stdout goes to stderr.
+- `install` and `uninstall` output is read by temt and written to stdout, so that a
+  reader that closes early (`| head`) does not cut them off: the rest is dropped and they
+  run to the end.
+- Everything `proxy` writes goes to stderr, because as the ProxyCommand its stdout is
+  the ssh channel.
+- Before writing to one stream, the other is flushed, so the order holds on a terminal;
+  each write is flushed, so progress shows at once through a pipe. Characters the
+  locale cannot encode are written as backslash escapes. If the reader of stdout closes
+  early, the rest is dropped silently.
 - Progress lines carry the time; error lines carry the program name.
 - Wording is English, ASCII only.
 - Exception: text that is not temt's own wording is shown as is, Japanese included:
@@ -153,11 +173,12 @@ operations can be typed in this form.
     `app show`, only the unprintable characters that disturb the terminal are replaced
     ([commands/app.md](commands/app.md#app-options)). In a list table, all unprintable
     characters are replaced, as for other values ([List tables](#list-tables)).
-- Only these go to stdout: list tables ([List tables](#list-tables)), the value of
-  `app get` ([commands/app.md](commands/app.md#app-get)), the changes of `diff`
+- Data for other programs goes to stdout in UTF-8 regardless of the locale: list tables
+  ([List tables](#list-tables)), the value of `app get`
+  ([commands/app.md](commands/app.md#app-get)), and the changes of `diff`
   ([commands/service.md](commands/service.md#diff)) and of `sg diff`
-  ([commands/sg.md](commands/sg.md#sg-diff)), the usage of `--help`, and the version of
-  `--version`.
+  ([commands/sg.md](commands/sg.md#sg-diff)). So do the usage of `--help` and the
+  version of `--version`.
 
 ### Exit codes
 
@@ -259,7 +280,8 @@ as absent for most commands. The rules are in
   `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami prune`,
   `ami delete`, `keypair delete`, and `deploy` and `app remove` with `--bake`.
 - `apply` ends without asking if there are no differences.
-- The prompt goes to stderr; the answer is read from stdin. Any answer other than `y`
+- The list of targets goes to stdout and the prompt to stderr; the answer is read from
+  stdin. Any answer other than `y`
   or `Y` ends with exit code 1 without doing anything.
 - `--yes` skips the confirmation. If stdin is not a terminal and `--yes` is not given,
   the command exits saying `--yes` is needed.

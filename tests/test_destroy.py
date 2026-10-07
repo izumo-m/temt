@@ -343,16 +343,15 @@ def test_it_destroys_everything_and_reports_what_is_left(
     assert not configured.known_hosts_dir.exists()
     assert not command.exists()
     captured = capsys.readouterr()
-    # 一覧も問いかけも標準エラー出力に書く。標準出力は ssh の通信路である
-    assert captured.out == ""
-    err = captured.err
-    assert err.startswith(LISTING + PROMPT)
-    assert told(err.removeprefix(LISTING + PROMPT)) == [
+    # 一覧と進行は標準出力に、問いかけは標準エラー出力に書く
+    assert captured.out.startswith(LISTING)
+    assert told(captured.out.removeprefix(LISTING)) == [
         *gone(),
         f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
         f"~/.local/bin/{NAME}: deleted",
         *staying(),
     ]
+    assert captured.err == PROMPT
 
 
 def test_it_deletes_in_the_order_of_the_design(
@@ -400,7 +399,7 @@ def test_it_leaves_the_ami_out_when_the_service_has_none(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err)[-5:] == staying(image=None)
+    assert told(capsys.readouterr().out)[-5:] == staying(image=None)
 
 
 def test_it_finishes_when_the_amis_cannot_be_read(
@@ -419,9 +418,12 @@ def test_it_finishes_when_the_amis_cannot_be_read(
     assert cli.main(["temt", "destroy", "--svc", "dev-main", "--yes"]) == 0
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "temt: warning: cannot tell which AMIs are tagged temt:service=dev-main" in err
-    assert told(err)[-5:] == staying(image=None)
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "temt: warning: cannot tell which AMIs are tagged temt:service=dev-main: "
+    )
+    assert len(captured.err.splitlines()) == 1
+    assert told(captured.out)[-5:] == staying(image=None)
 
 
 def test_it_reports_what_was_not_there(
@@ -442,7 +444,7 @@ def test_it_reports_what_was_not_there(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         *LISTING.splitlines(),
         *gone(what="absent"),
         # known_hosts のディレクトリはロックを取るときに作られるので、つねにある
@@ -478,10 +480,11 @@ def test_it_names_and_deletes_every_inline_policy(
     destroy.run(configured, yes=False)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == PROMPT
     listing = listed(role=f"role {NAME} (inline policies: temt-jupyter, temt-idle, by-hand)")
-    assert err.startswith(listing + PROMPT)
-    reported = told(err.removeprefix(listing + PROMPT))
+    assert captured.out.startswith(listing)
+    reported = told(captured.out.removeprefix(listing))
     assert reported[5:9] == [
         "role policy temt-jupyter: deleted",
         "role policy temt-idle: deleted",
@@ -515,9 +518,9 @@ def test_it_goes_on_when_an_inline_policy_is_already_gone(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "role policy temt-jupyter" not in err
-    assert f"role {NAME}: deleted" in err
+    out = capsys.readouterr().out
+    assert "role policy temt-jupyter" not in out
+    assert f"role {NAME}: deleted" in out
 
 
 def test_it_terminates_the_instance_before_it_deletes(
@@ -552,10 +555,11 @@ def test_it_terminates_the_instance_before_it_deletes(
     aws_stubs.done()
     assert answer.reads == 1
     assert not configured.known_hosts_dir.exists()
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == PROMPT
     running = listed(f"{INSTANCE} (running)")
-    assert err.startswith(running + PROMPT)
-    assert told(err.removeprefix(running + PROMPT)) == [
+    assert captured.out.startswith(running)
+    assert told(captured.out.removeprefix(running)) == [
         f"terminating {INSTANCE}",
         f"{INSTANCE} is terminated",
         *gone(),
@@ -595,7 +599,7 @@ def test_it_terminates_every_instance_with_the_name(
 
     aws_stubs.done()
     listing = listed(f"{INSTANCE} (running), {OTHER} (stopped)")
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         *listing.splitlines(),
         f"terminating {INSTANCE}",
         f"terminating {OTHER}",
@@ -654,10 +658,10 @@ def test_yes_skips_the_question(
 
     aws_stubs.done()
     assert answer.reads == 0
-    err = capsys.readouterr().err
-    assert "[y/N]" not in err
+    captured = capsys.readouterr()
+    assert captured.err == ""
     # 何を消そうとしているかは、問いかけないときも見せる
-    assert err.startswith(LISTING)
+    assert captured.out.startswith(LISTING)
 
 
 def test_it_changes_nothing_when_the_answer_is_not_y(
@@ -678,9 +682,9 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     aws_stubs.done()
     assert command.exists()
     assert configured.known_hosts_dir.is_dir()
-    err = capsys.readouterr().err
-    assert err.startswith(LISTING + PROMPT)
-    assert err.endswith("temt: cancelled\n")
+    captured = capsys.readouterr()
+    assert captured.out == LISTING
+    assert captured.err == PROMPT + "temt: cancelled\n"
 
 
 def test_it_needs_yes_when_stdin_is_not_a_terminal(
@@ -722,7 +726,7 @@ def test_it_waits_for_the_network_interfaces_to_detach(
 
     aws_stubs.done()
     assert clock.slept == [wait.INTERVAL] * 2
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     # 待つことになったと分かるよう、最初の 1 回だけ知らせる
     waiting = f"waiting for the network interfaces to leave the security group {GROUP}"
     assert lines.count(waiting) == 1
@@ -799,7 +803,7 @@ def test_it_deletes_every_group_with_the_name(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     assert f"security group {NAME} ({GROUP}): deleted" in lines
     assert f"security group {NAME} ({OTHER_GROUP}): deleted" in lines
 
@@ -822,7 +826,7 @@ def test_it_counts_a_group_gone_after_listing_as_absent(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     assert f"security group {NAME} ({GROUP}): absent" in lines
     assert f"role {NAME}: deleted" in lines
 
@@ -945,7 +949,7 @@ def test_it_deletes_whatever_is_in_place_of_the_command(
     aws_stubs.done()
     assert not path.is_symlink()
     assert not path.exists()
-    assert f"~/.local/bin/{NAME}: deleted" in capsys.readouterr().err
+    assert f"~/.local/bin/{NAME}: deleted" in capsys.readouterr().out
 
 
 def test_it_shows_the_local_paths_safely(
@@ -968,9 +972,9 @@ def test_it_shows_the_local_paths_safely(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "\x1b" not in err
-    lines = told(err)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    lines = told(out)
     assert "  ~/ssh?[2J/keys/temt" in lines
     assert "  ~/conf?[2J/dev-main.toml" in lines
 
@@ -1077,7 +1081,7 @@ def test_a_second_run_goes_on_from_where_it_stopped(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err)[len(LISTING.splitlines()) :][:6] == [
+    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][:6] == [
         f"launch template {TEMPLATE}: absent",
         f"association {SSHD}: absent",
         f"parameters under /{NAME}/: deleted (1)",

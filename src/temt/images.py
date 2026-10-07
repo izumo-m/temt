@@ -19,9 +19,9 @@ bake は AMI が available になってからテンプレートを向けるの�
 並行する bake の AMI は消さない。取れなければ、その AMI を残して次へ進む。ami delete
 はロックを取らない。
 
-ami list の表は table が標準出力に、ami prune と ami delete の一覧と確認は標準エラー
-出力に書く。boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。
-botocore の例外もそこで包む。
+ami list の表は table が、ami prune と ami delete の一覧は msg が標準出力に書き、
+確認の問いかけは標準エラー出力に書く。boto3 を使うので、この module は cli.run が
+呼ばれたときに読み込まれる。botocore の例外もそこで包む。
 """
 
 from __future__ import annotations

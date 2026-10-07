@@ -481,7 +481,7 @@ def test_deploy_sends_installs_and_records(
     assert install == ["ssh", "-T", NAME, install[3]]
     assert install[3].startswith("sudo -n bash -c ")
     assert install[3].endswith(" temt /opt/temt/apps/jupyter root")
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         "using jupyter from ~/.config/temt/apps/jupyter",
         f"checking that 'ssh {NAME}' reaches {INSTANCE}",
         f"sending jupyter to {INSTANCE}",
@@ -669,10 +669,10 @@ def test_deploy_with_bake_asks_first_and_bakes_last(
     assert asked == [
         f"deploy jupyter 1.2 to {INSTANCE} as root and bake {INSTANCE} (running)? True"
     ]
-    err = capsys.readouterr().err
-    assert f"deploy jupyter 1.2 to {INSTANCE} as root and bake {NAME}:\n" in err
-    assert f"  stop {INSTANCE}\n" in err
-    assert "run 'temt bake" not in err
+    out = capsys.readouterr().out
+    assert f"deploy jupyter 1.2 to {INSTANCE} as root and bake {NAME}:\n" in out
+    assert f"  stop {INSTANCE}\n" in out
+    assert "run 'temt bake" not in out
 
 
 def test_deploy_with_bake_does_not_bake_when_install_fails(
@@ -778,10 +778,13 @@ def test_remove_uninstalls_and_deletes_the_record(
     assert check[3].endswith(" temt /opt/temt/apps/jupyter")
     # user の無い記録なら root で実行する
     assert uninstall[3].endswith(" temt /opt/temt/apps/jupyter root")
-    assert told(capsys.readouterr().err) == [
-        f"checking that 'ssh {NAME}' reaches {INSTANCE}",
+    captured = capsys.readouterr()
+    assert captured.err == (
         f"temt: warning: no user in the deploy record {RECORD}; running uninstall as root; "
-        "give the user with --user if install ran as another user",
+        "give the user with --user if install ran as another user\n"
+    )
+    assert told(captured.out) == [
+        f"checking that 'ssh {NAME}' reaches {INSTANCE}",
         f"running uninstall of jupyter as root on {INSTANCE}",
         f"/opt/temt/apps/jupyter on {INSTANCE}: deleted",
         f"parameter {STATUS}: deleted",
@@ -943,11 +946,11 @@ def test_remove_deletes_the_record_when_the_app_is_not_there(
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
 
     aws_stubs.done()
-    err = told(capsys.readouterr().err)
-    assert (
-        f"temt: warning: /opt/temt/apps/jupyter is not on {INSTANCE}; updating only the record"
-    ) in err
-    assert f"parameter {RECORD}: deleted" in err
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"temt: warning: /opt/temt/apps/jupyter is not on {INSTANCE}; updating only the record\n"
+    )
+    assert f"parameter {RECORD}: deleted" in told(captured.out)
 
 
 def template_image(stubs: Stubs, image: str) -> None:
@@ -1014,7 +1017,7 @@ def test_remove_keeps_the_record_of_an_app_in_the_ami(
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
 
     aws_stubs.done()
-    assert f"parameter {RECORD}: updated" in told(capsys.readouterr().err)
+    assert f"parameter {RECORD}: updated" in told(capsys.readouterr().out)
 
 
 def test_remove_deletes_the_record_of_an_app_in_another_ami(
@@ -1653,7 +1656,7 @@ def test_deploy_passes_the_options_to_install(
     info = sent_file(ssh)
     assert info is not None
     assert (info.mode, info.uid, info.gid, info.uname) == (0o644, 0, 0, "root")
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     assert lines[2:4] == ["option port=8888 (default)", "option greeting='こんにちは 世界' (given)"]
     assert lines[4] == f"sending jupyter to {INSTANCE}"
 
@@ -1702,7 +1705,7 @@ def test_deploy_keeps_the_options_of_the_last_deploy(
 
     aws_stubs.done()
     assert "TEMT_OPTION_PORT=9999\nTEMT_OPTION_GREETING=hello\n" in sent_options(ssh)
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     assert lines[2:4] == ["option port=9999 (kept)", "option greeting=hello (default)"]
 
 
@@ -2226,4 +2229,4 @@ def test_deploy_hides_what_disturbs_the_terminal_in_the_version(
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err)[-1].startswith("deployed jupyter 1.2?[2J to ")
+    assert told(capsys.readouterr().out)[-1].startswith("deployed jupyter 1.2?[2J to ")

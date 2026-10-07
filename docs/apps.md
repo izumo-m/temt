@@ -264,7 +264,7 @@ fi
   `here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")` のように求める。
 - **問いかけるコマンドを使わない。** 端末は無く、標準入力は空である。apt なら
   `apt-get update` のあと、`DEBIAN_FRONTEND=noninteractive apt-get install -y` の
-  ように書く。出力は手元の標準エラー出力にそのまま出る。
+  ように書く。出力は手元にそのまま出る。
 - **apt のロックを待つ。** `start` の直後は、起動時の自動更新が apt のロックを
   持っていることがある。`apt-get install` には `-o DPkg::Lock::Timeout=300` を
   付けて待たせる。`apt-get update` はロックを待たずに失敗するので、失敗したら少し

@@ -105,7 +105,7 @@ def test_it_launches_and_waits_until_login_is_possible(
         "ap-northeast-1",
     )
     assert (configured.known_hosts_dir / lock.LOCK_NAME).exists()
-    err = capsys.readouterr().err
+    err = capsys.readouterr().out
     assert told(err) == [
         f"launched {INSTANCE} from {TEMPLATE}",
         f"{INSTANCE} is running",
@@ -155,7 +155,7 @@ def test_it_waits_for_a_pending_instance(
 
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"{INSTANCE} is already pending",
         f"{INSTANCE} is running",
         f"{INSTANCE} is ready for login",
@@ -179,7 +179,7 @@ def test_it_uses_an_instance_that_is_already_running(
     # describe-instances は探索の 1 回しか積んでいないので、待てば Stubber が失敗する
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"{INSTANCE} is already running",
         f"{INSTANCE} is ready for login",
     ]
@@ -198,7 +198,7 @@ def test_it_does_not_wait_for_an_address(
     start.run(configured, is_async=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"{INSTANCE} is already running",
         f"{INSTANCE} is ready for login",
     ]
@@ -252,7 +252,7 @@ def test_it_resumes_a_stopped_instance_and_waits_until_login_is_possible(
 
     aws_stubs.done()
     assert clock.slept == [5, 5]
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"resuming {INSTANCE}",
         f"{INSTANCE} is running",
         f"{INSTANCE} is ready for login",
@@ -282,7 +282,7 @@ def test_async_returns_as_soon_as_the_resume_is_accepted(
     # describe-instances は探索の 1 回しか積んでいないので、待てば Stubber が失敗する
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [f"resuming {INSTANCE}"]
+    assert told(capsys.readouterr().out) == [f"resuming {INSTANCE}"]
 
 
 def test_it_stops_when_the_resumed_instance_stops_again(
@@ -338,7 +338,7 @@ def test_it_launches_when_the_only_instance_is_shutting_down(
     start.run(configured, is_async=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"launched {INSTANCE} from {TEMPLATE}"]
+    assert told(capsys.readouterr().out) == [f"launched {INSTANCE} from {TEMPLATE}"]
 
 
 def test_it_does_not_count_an_instance_that_is_shutting_down(
@@ -355,7 +355,7 @@ def test_it_does_not_count_an_instance_that_is_shutting_down(
     start.run(configured, is_async=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"{INSTANCE} is already running"]
+    assert told(capsys.readouterr().out) == [f"{INSTANCE} is already running"]
 
 
 def test_it_resumes_a_stopping_instance_and_waits_until_both_old_states_go_away(
@@ -384,7 +384,7 @@ def test_it_resumes_a_stopping_instance_and_waits_until_both_old_states_go_away(
 
     aws_stubs.done()
     assert clock.slept == [5] * 14
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"resuming {INSTANCE}",
         f"{INSTANCE} is stopping; waiting for it to stop",
         f"{INSTANCE} is running",
@@ -415,7 +415,7 @@ def test_it_does_not_tell_about_stopping_once_it_has_stopped(
 
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"resuming {INSTANCE}",
         f"{INSTANCE} is running",
         f"{INSTANCE} is ready for login",
@@ -602,7 +602,7 @@ def test_it_stops_when_more_than_one_instance_is_tagged(
     )
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    assert capsys.readouterr().err.splitlines() == [
         f"instances tagged Name={NAME}:",
         f"  {INSTANCE} (running)",
         f"  {OTHER} (stopped)",
@@ -666,7 +666,7 @@ def test_async_returns_as_soon_as_it_launches(
 
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [f"launched {INSTANCE} from {TEMPLATE}"]
+    assert told(capsys.readouterr().out) == [f"launched {INSTANCE} from {TEMPLATE}"]
 
 
 @pytest.mark.parametrize("state", ["shutting-down", "terminated"])
@@ -691,7 +691,7 @@ def test_it_stops_when_the_new_instance_goes_away_right_after_launch(
     # エージェントは積んでいないので、待てば Stubber が失敗する
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [f"launched {INSTANCE} from {TEMPLATE}"]
+    assert told(capsys.readouterr().out) == [f"launched {INSTANCE} from {TEMPLATE}"]
 
 
 @pytest.mark.parametrize("launch", [True, False])
@@ -741,7 +741,7 @@ def test_async_does_not_wait_for_an_instance_it_found(
     assert cli.main(["temt", "start", "--svc", "dev-main", "--async"]) == 0
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"{INSTANCE} is already {state}"]
+    assert told(capsys.readouterr().out) == [f"{INSTANCE} is already {state}"]
 
 
 def test_it_keeps_waiting_while_the_new_instance_is_not_found_by_id(

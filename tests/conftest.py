@@ -20,7 +20,7 @@ from types_boto3_ec2.client import EC2Client
 from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 
-from temt import aws, conf, ingress, lock, names, sshd, wait
+from temt import aws, conf, ingress, lock, msg, names, sshd, wait
 from temt.conf import Conf
 from temt.names import Service
 
@@ -39,6 +39,7 @@ def process_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(conf, "OPTION_PROFILE", None)
     monkeypatch.setattr(conf, "ENV_REGION", None)
+    monkeypatch.setattr(msg, "_only_stderr", False)
     for name in conf.REGION_ENV:
         monkeypatch.delenv(name, raising=False)
 

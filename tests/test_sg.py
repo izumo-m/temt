@@ -142,8 +142,8 @@ def test_show_the_group(
     sg.show(configured)
     aws_stubs.done()
     out, err = capsys.readouterr()
-    assert out == ""
-    assert err.splitlines() == [
+    assert err == ""
+    assert out.splitlines() == [
         f"security group {NAME}:",
         f"  id:            {GROUP}",
         f"  vpc:           {VPC}",
@@ -162,7 +162,7 @@ def test_show_a_group_that_is_not_there(
     groups(aws_stubs)
     sg.show(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         f"security group {NAME}:",
         f"  state: (not found in {VPC}; the next apply creates it)",
     ]
@@ -213,7 +213,7 @@ def test_show_without_a_subnet(
     groups(aws_stubs, a_group(), a_group(group_id="sg-00000000000000002", vpc_id="vpc-other"))
     sg.show(service)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         f"security group {NAME}:",
         "  state: (no subnet yet; the next apply picks one)",
         "groups with this name:",

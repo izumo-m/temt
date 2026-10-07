@@ -325,8 +325,10 @@ def test_list_and_show_keep_a_deploy_time_they_cannot_read(
 
     aws_stubs.done()
     captured = capsys.readouterr()
-    assert captured.out.splitlines() == ["ID        DEPLOYED", "jupyter   yesterday"]
-    assert "  deployed:      yesterday" in captured.err.splitlines()
+    shown = captured.out.splitlines()
+    assert shown[:3] == ["ID        DEPLOYED", "jupyter   yesterday", "app jupyter:"]
+    assert "  deployed:      yesterday" in shown[3:]
+    assert captured.err == ""
 
 
 def test_list_checks_the_columns_before_aws(configured: Service) -> None:
@@ -360,8 +362,8 @@ def test_show_prints_the_record_and_the_keys_but_no_value(
 
     aws_stubs.done()
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err.splitlines() == [
+    assert captured.err == ""
+    assert captured.out.splitlines() == [
         "app jupyter:",
         "  name:          Jupyter Lab",
         "  version:       1.2",
@@ -390,7 +392,9 @@ def test_show_tells_an_app_that_is_not_deployed(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines() == [
         "app jupyter: not deployed",
         "keys:",
         "  token  2026-09-26 12:00:00",
@@ -410,7 +414,7 @@ def test_show_tells_that_there_is_no_key(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         "app jupyter:",
         "  name:          J",
         "  version:       -",
@@ -514,7 +518,7 @@ def test_set_writes_a_string(
     app.set_value(configured, "jupyter", "token", "a b\n")
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"parameter {TOKEN}: {state}"]
+    assert told(capsys.readouterr().out) == [f"parameter {TOKEN}: {state}"]
 
 
 def test_set_stops_when_the_app_is_not_deployed(aws_stubs: Stubs, configured: Service) -> None:
@@ -541,7 +545,7 @@ def test_unset_deletes_without_asking(
     app.unset(configured, "jupyter", "token")
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"parameter {TOKEN}: deleted"]
+    assert told(capsys.readouterr().out) == [f"parameter {TOKEN}: deleted"]
 
 
 def test_unset_of_a_missing_value_is_not_an_error(
@@ -552,7 +556,7 @@ def test_unset_of_a_missing_value_is_not_an_error(
 
     app.unset(configured, "jupyter", "token")
 
-    assert told(capsys.readouterr().err) == [f"parameter {TOKEN}: absent"]
+    assert told(capsys.readouterr().out) == [f"parameter {TOKEN}: absent"]
 
 
 def test_show_reads_every_page_and_hides_control_characters(
@@ -582,7 +586,7 @@ def test_show_reads_every_page_and_hides_control_characters(
     app.show(configured, "jupyter")
 
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         "app jupyter:",
         "  name:          J?[2J",
         "  version:       1.2",
@@ -611,8 +615,11 @@ def test_show_warns_about_a_record_it_cannot_read(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [
         f"temt: warning: cannot read the deploy record {RECORD}: not a JSON object",
+    ]
+    assert captured.out.splitlines() == [
         "app jupyter:",
         "  name:          -",
         "  version:       -",
@@ -874,7 +881,7 @@ def test_mark_baked_records_what_the_instance_has(
 
     aws_stubs.done()
     # 焼いたと知らせるのは、このインスタンスに入れたものだけ
-    assert told(capsys.readouterr().err) == [f"recorded fresh as baked in {NEW_IMAGE}"]
+    assert told(capsys.readouterr().out) == [f"recorded fresh as baked in {NEW_IMAGE}"]
 
 
 def test_mark_baked_deletes_the_records_of_apps_removed_from_the_instance(
@@ -913,7 +920,7 @@ def test_mark_baked_deletes_the_records_of_apps_removed_from_the_instance(
     app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"recorded gone as removed from {NEW_IMAGE}"]
+    assert told(capsys.readouterr().out) == [f"recorded gone as removed from {NEW_IMAGE}"]
 
 
 def test_mark_baked_goes_on_when_a_removed_record_cannot_be_deleted(
@@ -939,9 +946,11 @@ def test_mark_baked_goes_on_when_a_removed_record_cannot_be_deleted(
     app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
+    captured = capsys.readouterr()
+    lines = captured.err.splitlines()
     assert len(lines) == 1
     assert lines[0].startswith(f"temt: warning: cannot delete {PATH}/gone/deploy: ")
+    assert captured.out == ""
 
 
 def test_mark_removed_turns_the_record_into_the_baked_version() -> None:
@@ -1004,8 +1013,8 @@ def test_mark_baked_keeps_the_older_images_without_a_source_image(
     app.mark_baked(ssm, configured, replace(BAKED_FROM, image_id=""), NEW_IMAGE)
 
     aws_stubs.done()
-    # 書けずに警告して飛ばしたのでもない
-    assert capsys.readouterr().err == ""
+    # 書けずに警告して飛ばしたのでも、焼いたと知らせたのでもない
+    assert capsys.readouterr() == ("", "")
 
 
 def test_mark_baked_goes_on_when_a_record_cannot_be_written(
@@ -1030,9 +1039,11 @@ def test_mark_baked_goes_on_when_a_record_cannot_be_written(
     app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
+    captured = capsys.readouterr()
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
     assert lines[0].startswith(f"temt: warning: cannot mark {PATH}/a/deploy as baked: ")
-    assert lines[1:] == [f"recorded b as baked in {NEW_IMAGE}"]
+    assert told(captured.out) == [f"recorded b as baked in {NEW_IMAGE}"]
 
 
 def test_mark_baked_shows_a_multiline_error_on_one_line(
@@ -1058,10 +1069,12 @@ def test_mark_baked_shows_a_multiline_error_on_one_line(
     app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [
         f"temt: warning: cannot mark {PATH}/a/deploy as baked: Parameter validation failed: "
         "Invalid length for parameter Value; value: ?[2J"
     ]
+    assert captured.out == ""
 
 
 # --- オプション ---
@@ -1110,7 +1123,9 @@ def test_show_lists_the_options_and_the_declared_ones(
     app.show(configured, "jupyter")
 
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines() == [
         "app jupyter:",
         "  name:          J",
         "  version:       1.3",
@@ -1140,7 +1155,7 @@ def test_show_lists_a_local_app_that_is_not_deployed(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         "app jupyter: not deployed",
         "options in ~/.config/temt/apps/jupyter (version 1): none",
         "keys: none",
@@ -1163,7 +1178,7 @@ def test_show_lists_the_options_of_the_app_that_comes_with_temt(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         "app jupyter: not deployed",
         "options in ~/bundled/jupyter (version 2): none",
         "keys: none",
@@ -1180,11 +1195,11 @@ def test_show_warns_about_a_local_manifest_it_cannot_read(
 
     app.show(configured, "jupyter")
 
-    assert capsys.readouterr().err.splitlines() == [
-        "app jupyter: not deployed",
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["app jupyter: not deployed", "keys: none"]
+    assert captured.err.splitlines() == [
         "temt: warning: cannot read the manifest of jupyter: "
         "~/.config/temt/apps/jupyter/manifest.toml: version is missing",
-        "keys: none",
     ]
 
 
@@ -1423,7 +1438,7 @@ def test_show_marks_options_it_cannot_read_and_keeps_wide_spaces(
     app.show(configured, "jupyter")
 
     aws_stubs.done()
-    lines = capsys.readouterr().err.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert "  options:       greeting='こんにちは\u3000世界'" in lines
     assert "  baked_options: (unreadable)" in lines
 
@@ -1443,7 +1458,7 @@ def test_show_hides_what_disturbs_the_terminal_in_the_declarations(
     app.show(configured, "jupyter")
 
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[1:3] == [
+    assert capsys.readouterr().out.splitlines()[1:3] == [
         "options in ~/.config/temt/apps/jupyter (version 1?[2J):",
         "  greeting  'a?b\u3000c'  the? greeting",
     ]
@@ -1495,6 +1510,8 @@ def test_mark_baked_leaves_a_record_that_utf_8_cannot_hold(
 
     aws_stubs.done()
     # 読めないと警告するだけで、書けずに飛ばしたのでも、焼いたと知らせたのでもない
-    assert told(capsys.readouterr().err) == [
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [
         f"temt: warning: cannot read the deploy record {PATH}/odd/deploy: not valid UTF-8"
     ]
+    assert captured.out == ""

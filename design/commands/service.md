@@ -16,7 +16,7 @@ one target.
   the same code as `diff`. Nothing is written to the config file, AWS, or local files
   in this phase. If a step stops, temt exits having written nothing.
 - Show: with no differences, report so (`<name>: no differences`) and finish.
-  Otherwise print the differences to stderr in the same format as [`diff`](#diff).
+  Otherwise print the differences to stdout in the same format as [`diff`](#diff).
 - Confirm: ask `[y/N]` (`apply these changes?`; see
   [cli.md](../cli.md#common-behavior)).
 - Update: apply the detected differences in step order. Report what was created,

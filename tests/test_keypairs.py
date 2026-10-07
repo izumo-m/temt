@@ -31,6 +31,8 @@ CREATED = datetime(2026, 9, 20, 3, tzinfo=UTC)
 SHOWN = "2026-09-20 12:00:00"
 TAG = {"Key": "temt:keypair", "Value": "temt"}
 LIVE = ["pending", "running", "stopping", "stopped"]
+# 進行の行の先頭の時刻
+TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
 
 class Session:
@@ -86,6 +88,11 @@ def stubs(
         made = Stubs(ec2_stub, sts_stub, regions)
         yield made
         made.done()
+
+
+def told(out: str) -> list[str]:
+    """書いた行から時刻を外したもの。"""
+    return [TIME_RE.sub("", line) for line in out.splitlines()]
 
 
 class Terminal:
@@ -276,8 +283,9 @@ def test_show_a_key_pair(stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFix
     keypairs.show("legacy", None)
 
     stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
-        ENVIRONMENT,
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    assert captured.out.splitlines() == [
         "key pair legacy:",
         "  id:             key-legacy",
         "  type:           ed25519",
@@ -319,8 +327,9 @@ def test_show_a_private_key_file(
     keypairs.show(str(path), None)
 
     stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
-        ENVIRONMENT,
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    assert captured.out.splitlines() == [
         "key file ~/.ssh/id_ed25519:",
         "  kind:        private key",
         "  type:        ED25519, 256 bits",
@@ -343,9 +352,9 @@ def test_show_a_private_key_whose_pub_differs(
 
     keypairs.show(str(path), None)
 
-    err = capsys.readouterr().err
-    assert "  .pub:        differs from ~/k.pub\n" in err
-    assert "  key pairs:   (none)\n" in err
+    out = capsys.readouterr().out
+    assert "  .pub:        differs from ~/k.pub\n" in out
+    assert "  key pairs:   (none)\n" in out
 
 
 def test_show_a_public_key_file(
@@ -360,8 +369,9 @@ def test_show_a_public_key_file(
     keypairs.show("./k.pub", None)
 
     stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
-        ENVIRONMENT,
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    assert captured.out.splitlines() == [
         "key file ~/k.pub:",
         "  kind:        public key",
         "  type:        ED25519, 256 bits",
@@ -385,14 +395,14 @@ def test_show_a_locked_key_uses_the_pub_next_to_it(
     keypairs.show(str(path), None)
 
     stubs.done()
-    err = capsys.readouterr().err.splitlines()
-    assert f"  fingerprint: {keys.fingerprint(public_key)}" in err
-    assert "  comment:     locked" in err
+    shown = capsys.readouterr().out.splitlines()
+    assert f"  fingerprint: {keys.fingerprint(public_key)}" in shown
+    assert "  comment:     locked" in shown
     assert any(
         line.startswith("  .pub:        used instead; cannot read the private key: ssh-keygen")
-        for line in err
+        for line in shown
     )
-    assert "  key pairs:   a" in err
+    assert "  key pairs:   a" in shown
 
 
 def test_show_a_locked_key_without_a_pub(
@@ -406,10 +416,12 @@ def test_show_a_locked_key_without_a_pub(
     keypairs.show(str(path), None)
 
     stubs.done()
-    err = capsys.readouterr().err.splitlines()
-    assert err[:3] == [ENVIRONMENT, "key file ~/locked:", "  kind:       private key"]
-    assert err[3].startswith("  public key: cannot read: ssh-keygen")
-    assert len(err) == 4
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    shown = captured.out.splitlines()
+    assert shown[:2] == ["key file ~/locked:", "  kind:       private key"]
+    assert shown[2].startswith("  public key: cannot read: ssh-keygen")
+    assert len(shown) == 3
 
 
 def test_show_a_file_that_is_not_a_key(stubs: Stubs, home_dir: Path) -> None:
@@ -459,9 +471,9 @@ def test_create_makes_a_key_and_imports_it(
     assert path.stat().st_mode & 0o777 == 0o600
     public_key = keys.public_key(path)
     assert public_key.endswith(" work")
-    err = capsys.readouterr().err
-    assert "created the key ~/.ssh/temt/keys/work\n" in err
-    assert f"imported the key pair work (key-0), {keys.fingerprint(public_key)}\n" in err
+    shown = capsys.readouterr().out
+    assert "created the key ~/.ssh/temt/keys/work\n" in shown
+    assert f"imported the key pair work (key-0), {keys.fingerprint(public_key)}\n" in shown
 
 
 @pytest.mark.parametrize(
@@ -507,7 +519,7 @@ def test_create_removes_the_key_when_aws_refuses(
     stubs.done()
     assert not (keys_dir() / "work").exists()
     assert not (keys_dir() / "work.pub").exists()
-    assert "removed the key ~/.ssh/temt/keys/work\n" in capsys.readouterr().err
+    assert "removed the key ~/.ssh/temt/keys/work\n" in capsys.readouterr().out
 
 
 def test_delete_removes_the_key_pair_and_the_local_key(
@@ -530,8 +542,8 @@ def test_delete_removes_the_key_pair_and_the_local_key(
     stubs.done()
     assert not (keys_dir() / "temt").exists()
     assert not (keys_dir() / "temt.pub").exists()
-    err = capsys.readouterr().err.splitlines()
-    assert err[:8] == [
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [
         ENVIRONMENT,
         "temt: warning: the key pair temt is used by temt-dev-main-template version 4",
         "temt: warning: instances launched with the key pair temt: i-1 (running), "
@@ -539,15 +551,17 @@ def test_delete_removes_the_key_pair_and_the_local_key(
         "temt: warning: ~/.ssh/temt/keys/temt is shared by every region and account; "
         "if the key is also registered elsewhere, run 'temt keypair delete temt' there "
         "too, or apply there stops with a key mismatch",
+        "delete the key pair temt and its local key? [y/N] ",
+    ]
+    assert told(captured.out) == [
         "delete:",
         "  key pair temt (key-temt)",
         "  ~/.ssh/temt/keys/temt",
         "  ~/.ssh/temt/keys/temt.pub",
+        "deleted the key pair temt (key-temt)",
+        "deleted ~/.ssh/temt/keys/temt",
+        "deleted ~/.ssh/temt/keys/temt.pub",
     ]
-    assert err[8].startswith("delete the key pair temt and its local key? [y/N] ")
-    assert err[8].endswith("deleted the key pair temt (key-temt)")
-    assert err[9].endswith("deleted ~/.ssh/temt/keys/temt")
-    assert err[10].endswith("deleted ~/.ssh/temt/keys/temt.pub")
 
 
 def test_delete_without_a_local_key(
@@ -562,10 +576,13 @@ def test_delete_without_a_local_key(
     keypairs.delete("temt", None, yes=True)
 
     stubs.done()
-    err = capsys.readouterr().err.splitlines()
-    assert err[1:3] == ["delete:", "  key pair temt (key-temt)"]
-    assert err[3].endswith("deleted the key pair temt (key-temt)")
-    assert len(err) == 4
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    assert told(captured.out) == [
+        "delete:",
+        "  key pair temt (key-temt)",
+        "deleted the key pair temt (key-temt)",
+    ]
 
 
 def test_delete_leaves_a_key_pair_without_the_tag(stubs: Stubs, home_dir: Path) -> None:
@@ -629,11 +646,11 @@ def test_show_a_tagged_key_pair_without_a_public_key(
     keypairs.show("temt", None)
 
     stubs.done()
-    err = capsys.readouterr().err.splitlines()
-    assert "  tags:           temt:keypair=temt" in err
-    assert "  fingerprint:    (unknown)" in err
-    assert "  public key:     (unknown)" in err
-    assert "  local keys:     (none)" in err
+    shown = capsys.readouterr().out.splitlines()
+    assert "  tags:           temt:keypair=temt" in shown
+    assert "  fingerprint:    (unknown)" in shown
+    assert "  public key:     (unknown)" in shown
+    assert "  local keys:     (none)" in shown
 
 
 def test_list_without_a_public_key_does_not_compare(
@@ -687,7 +704,7 @@ def test_show_a_private_key_whose_pub_is_not_a_public_key(
     keypairs.show(str(path), None)
 
     stubs.done()
-    assert "  .pub:        ~/k.pub is not a readable public key\n" in capsys.readouterr().err
+    assert "  .pub:        ~/k.pub is not a readable public key\n" in capsys.readouterr().out
 
 
 def test_show_a_public_key_whose_comment_mentions_a_private_key(
@@ -700,9 +717,9 @@ def test_show_a_public_key_whose_comment_mentions_a_private_key(
     keypairs.show(str(home_dir / "k.pub"), None)
 
     stubs.done()
-    err = capsys.readouterr().err
-    assert "  kind:        public key\n" in err
-    assert f"  public key:  {public_key}\n" in err
+    shown = capsys.readouterr().out
+    assert "  kind:        public key\n" in shown
+    assert f"  public key:  {public_key}\n" in shown
 
 
 def test_show_names_the_pub_when_it_is_broken(stubs: Stubs, home_dir: Path) -> None:
@@ -758,7 +775,7 @@ def test_users_skip_a_template_that_goes_away(
     keypairs.show("temt", None)
 
     stubs.done()
-    assert "  used by:        here version 1\n" in capsys.readouterr().err
+    assert "  used by:        here version 1\n" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
@@ -774,9 +791,11 @@ def test_show_a_locked_key_whose_pub_cannot_be_read(
     finally:
         keys.public_path(path).chmod(0o644)
 
-    err = capsys.readouterr().err.splitlines()
-    assert err[1:3] == ["key file ~/locked:", "  kind:       private key"]
-    assert err[3].startswith("  public key: cannot read: ssh-keygen")
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [ENVIRONMENT]
+    shown = captured.out.splitlines()
+    assert shown[:2] == ["key file ~/locked:", "  kind:       private key"]
+    assert shown[2].startswith("  public key: cannot read: ssh-keygen")
 
 
 def test_list_compares_the_local_key_without_the_fingerprint_column(

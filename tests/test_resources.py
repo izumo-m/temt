@@ -426,7 +426,7 @@ def test_the_inline_policy_is_put_when_the_role_has_none(
         )
         resources.inline_policy(iam, service, resources.PolicyDiff(JUPYTER, None, CONTENT))
         stub.assert_no_pending_responses()
-    assert "role policy temt-jupyter: created" in capsys.readouterr().err
+    assert "role policy temt-jupyter: created" in capsys.readouterr().out
 
 
 def test_the_inline_policy_that_is_already_right_is_left_alone(
@@ -449,7 +449,7 @@ def test_the_inline_policy_that_differs_is_rewritten(
         )
         resources.inline_policy(iam, service, resources.PolicyDiff(JUPYTER, before, CONTENT))
         stub.assert_no_pending_responses()
-    assert "role policy temt-jupyter: updated" in capsys.readouterr().err
+    assert "role policy temt-jupyter: updated" in capsys.readouterr().out
 
 
 def test_the_inline_policy_tells_true_from_one(
@@ -468,7 +468,7 @@ def test_the_inline_policy_tells_true_from_one(
         )
         resources.inline_policy(iam, service, resources.PolicyDiff(JUPYTER, before, content))
         stub.assert_no_pending_responses()
-    assert "role policy temt-jupyter: updated" in capsys.readouterr().err
+    assert "role policy temt-jupyter: updated" in capsys.readouterr().out
 
 
 def test_the_inline_policy_ignores_the_order_of_keys(
@@ -490,7 +490,7 @@ def test_the_inline_policy_is_deleted_when_no_content_is_given(
         stub.add_response("delete_role_policy", {}, THE_POLICY)
         resources.inline_policy(iam, service, resources.PolicyDiff(JUPYTER, CONTENT, None))
         stub.assert_no_pending_responses()
-    assert "role policy temt-jupyter: deleted" in capsys.readouterr().err
+    assert "role policy temt-jupyter: deleted" in capsys.readouterr().out
 
 
 def test_the_inline_policy_is_absent_when_neither_has_it(
@@ -626,7 +626,7 @@ def test_role_policies_puts_each_and_deletes_the_temt_ones_that_are_gone(
         "PutRolePolicy",
         "DeleteRolePolicy",
     ]
-    err = capsys.readouterr().err
+    err = capsys.readouterr().out
     assert "role policy temt-jupyter: created" in err
     assert "role policy temt-idle: deleted" in err
     assert "by-hand" not in err
@@ -666,7 +666,7 @@ def test_a_role_without_any_tag_gets_it(
         stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
-    assert f"role {NAME}: updated" in capsys.readouterr().err
+    assert f"role {NAME}: updated" in capsys.readouterr().out
 
 
 def test_a_role_tag_with_another_value_is_rewritten(
@@ -678,7 +678,7 @@ def test_a_role_tag_with_another_value_is_rewritten(
         stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
-    assert f"role {NAME}: updated" in capsys.readouterr().err
+    assert f"role {NAME}: updated" in capsys.readouterr().out
 
 
 def test_a_role_that_only_has_other_tags_gets_its_tag(
@@ -690,7 +690,7 @@ def test_a_role_that_only_has_other_tags_gets_its_tag(
         stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
-    assert f"role {NAME}: updated" in capsys.readouterr().err
+    assert f"role {NAME}: updated" in capsys.readouterr().out
 
 
 def test_other_iam_errors_are_left_to_apply(iam: IAMClient, service: Service) -> None:
@@ -739,7 +739,7 @@ def test_the_role_is_put_back_into_an_empty_instance_profile(
         )
         align_profile(iam, service)
         stub.assert_no_pending_responses()
-    assert f"instance profile {NAME}: updated" in capsys.readouterr().err
+    assert f"instance profile {NAME}: updated" in capsys.readouterr().out
 
 
 def test_an_instance_profile_that_is_already_right(
@@ -770,7 +770,7 @@ def test_an_instance_profile_that_only_has_other_tags_gets_its_tag(
         stub.add_response("tag_instance_profile", {}, {"InstanceProfileName": NAME, "Tags": MARK})
         align_profile(iam, service)
         stub.assert_no_pending_responses()
-    assert f"instance profile {NAME}: updated" in capsys.readouterr().err
+    assert f"instance profile {NAME}: updated" in capsys.readouterr().out
 
 
 def test_an_instance_profile_without_any_tag_gets_it(
@@ -784,7 +784,7 @@ def test_an_instance_profile_without_any_tag_gets_it(
         stub.add_response("tag_instance_profile", {}, {"InstanceProfileName": NAME, "Tags": MARK})
         align_profile(iam, service)
         stub.assert_no_pending_responses()
-    assert f"instance profile {NAME}: updated" in capsys.readouterr().err
+    assert f"instance profile {NAME}: updated" in capsys.readouterr().out
 
 
 def test_an_instance_profile_tag_with_another_value_is_rewritten(
@@ -798,7 +798,7 @@ def test_an_instance_profile_tag_with_another_value_is_rewritten(
         stub.add_response("tag_instance_profile", {}, {"InstanceProfileName": NAME, "Tags": MARK})
         align_profile(iam, service)
         stub.assert_no_pending_responses()
-    assert f"instance profile {NAME}: updated" in capsys.readouterr().err
+    assert f"instance profile {NAME}: updated" in capsys.readouterr().out
 
 
 def test_another_role_in_the_instance_profile_is_swapped(
@@ -827,7 +827,7 @@ def test_another_role_in_the_instance_profile_is_swapped(
     assert found.changes() == [
         Change("~", resources.INSTANCE_PROFILE, NAME, f"role: other -> {NAME}")
     ]
-    err = capsys.readouterr().err
+    err = capsys.readouterr().out
     assert f"instance profile {NAME}: removed the role other\n" in err
     assert f"instance profile {NAME}: updated\n" in err
 
@@ -1023,7 +1023,7 @@ def test_only_the_differences_are_applied_adding_first(
         assert align_group(ec2, service, values) == GROUP
         stub.assert_no_pending_responses()
     assert calls[-2:] == ["AuthorizeSecurityGroupIngress", "RevokeSecurityGroupIngress"]
-    err = capsys.readouterr().err
+    err = capsys.readouterr().out
     assert "security group temt-dev-main: added 22/tcp 198.51.100.7/32 office\n" in err
     assert "security group temt-dev-main: removed 443/tcp 0.0.0.0/0 -\n" in err
     assert f"security group temt-dev-main: updated ({GROUP})\n" in err
@@ -1120,11 +1120,11 @@ def test_only_the_description_differs(
         )
         assert align_group(ec2, service, values) == GROUP
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
+    out = capsys.readouterr().out
     assert (
         "security group temt-dev-main: updated the description of 22/tcp 203.0.113.10/32: "
         "- -> home\n"
-    ) in err
+    ) in out
 
 
 @pytest.mark.parametrize(
@@ -1372,7 +1372,7 @@ def test_the_launch_template_is_created_with_its_tag(
         create_template(stub, wanted())
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"launch template {TEMPLATE}: created (version 1)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: created (version 1)" in capsys.readouterr().out
 
 
 def test_the_instance_and_its_volumes_and_network_interfaces_are_tagged() -> None:
@@ -1419,7 +1419,7 @@ def test_a_launch_template_that_only_has_other_tags_gets_its_tag(
         stub.add_response("create_tags", {}, {"Resources": [TEMPLATE_ID], "Tags": MARK})
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().out
 
 
 def test_a_launch_template_without_any_tag_gets_it(
@@ -1436,7 +1436,7 @@ def test_a_launch_template_without_any_tag_gets_it(
         stub.add_response("create_tags", {}, {"Resources": [TEMPLATE_ID], "Tags": MARK})
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().out
 
 
 def test_a_launch_template_tag_with_another_value_is_rewritten(
@@ -1453,7 +1453,7 @@ def test_a_launch_template_tag_with_another_value_is_rewritten(
         stub.add_response("create_tags", {}, {"Resources": [TEMPLATE_ID], "Tags": MARK})
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 3)" in capsys.readouterr().out
 
 
 def test_the_tag_and_a_new_version_are_both_written(
@@ -1485,7 +1485,7 @@ def test_the_tag_and_a_new_version_are_both_written(
         )
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"launch template {TEMPLATE}: updated (version 2)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 2)" in capsys.readouterr().out
 
 
 def test_every_item_that_temt_decides_is_compared(ec2: EC2Client, service: Service) -> None:
@@ -1862,7 +1862,7 @@ def test_leftover_versions_are_deleted_without_a_new_version(
         )
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    shown = capsys.readouterr().err
+    shown = capsys.readouterr().out
     assert f"launch template {TEMPLATE}: updated (version 3)" in shown
     assert "warning" not in shown
 
@@ -1906,9 +1906,12 @@ def test_a_version_that_cannot_be_deleted_is_a_warning(
         )
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    shown = capsys.readouterr().err
-    assert f"launch template {TEMPLATE}: updated (version 2)" in shown
-    assert "cannot delete version 1: launchTemplateVersionDoesNotExist: no such version" in shown
+    captured = capsys.readouterr()
+    assert f"launch template {TEMPLATE}: updated (version 2)" in captured.out
+    assert captured.err == (
+        f"temt: warning: launch template {TEMPLATE}: cannot delete version 1: "
+        "launchTemplateVersionDoesNotExist: no such version\n"
+    )
 
 
 def test_a_refused_delete_is_a_warning(
@@ -1939,9 +1942,11 @@ def test_a_refused_delete_is_a_warning(
         )
         align_template(ec2, service)
         stub.assert_no_pending_responses()
-    shown = capsys.readouterr().err
-    assert f"launch template {TEMPLATE}: updated (version 2)" in shown
-    assert "cannot delete the old versions" in shown
+    captured = capsys.readouterr()
+    assert f"launch template {TEMPLATE}: updated (version 2)" in captured.out
+    assert captured.err.startswith(
+        f"temt: warning: launch template {TEMPLATE}: cannot delete the old versions 1: "
+    )
 
 
 def test_a_template_without_a_default_version(ec2: EC2Client, service: Service) -> None:
@@ -1998,7 +2003,7 @@ def test_point_image_deletes_the_versions_it_read(
         resources.point_image(ec2, service, NEW_IMAGE)
         stub.assert_no_pending_responses()
     assert f"launch template {TEMPLATE}: updated (version 3, {NEW_IMAGE})" in (
-        capsys.readouterr().err
+        capsys.readouterr().out
     )
 
 
@@ -2109,7 +2114,7 @@ def test_update_goes_through_them_in_order(
         "CreateAssociation",
         "StartAssociationsOnce",
     ]
-    assert f"association {SSHD}: created\n" in capsys.readouterr().err
+    assert f"association {SSHD}: created\n" in capsys.readouterr().out
 
 
 def test_update_puts_the_created_security_group_into_the_launch_template(
@@ -2167,7 +2172,7 @@ def test_update_puts_the_created_security_group_into_the_launch_template(
             f'NetworkInterfaces.0.Groups: ["{old_group}"] -> ["{resources.NEW_GROUP}"]',
         )
     ]
-    assert [line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines()] == [
+    assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()] == [
         f"security group {NAME}: created ({GROUP})",
         f"launch template {TEMPLATE}: updated (version 2)",
     ]
@@ -2497,7 +2502,7 @@ def test_every_group_with_the_name_is_deleted(
         stub.add_response("delete_security_group", {"Return": True}, {"GroupId": GROUP})
         resources.delete_security_groups(ec2, service)
         stub.assert_no_pending_responses()
-    shown = capsys.readouterr().err
+    shown = capsys.readouterr().out
     assert f"security group {NAME} ({GROUP}): {resources.DELETED}" in shown
     assert f"security group {NAME} ({other}): {resources.DELETED}" in shown
 
@@ -2509,7 +2514,7 @@ def test_no_group_to_delete(
         groups(stub)
         resources.delete_security_groups(ec2, service)
         stub.assert_no_pending_responses()
-    assert f"security group {NAME}: {resources.ABSENT}" in capsys.readouterr().err
+    assert f"security group {NAME}: {resources.ABSENT}" in capsys.readouterr().out
 
 
 def test_other_errors_from_reading_the_instance_profile_are_left_to_destroy(
@@ -2626,7 +2631,7 @@ def test_no_parameter_to_delete(
         parameters_under(stub, [])
         resources.delete_parameters(ssm, service)
         stub.assert_no_pending_responses()
-    assert f"parameters under {PATH}/: {resources.ABSENT}" in capsys.readouterr().err
+    assert f"parameters under {PATH}/: {resources.ABSENT}" in capsys.readouterr().out
 
 
 def test_the_parameters_are_deleted_by_path(
@@ -2639,7 +2644,7 @@ def test_the_parameters_are_deleted_by_path(
         stub.add_response("delete_parameters", {"DeletedParameters": found}, {"Names": found})
         resources.delete_parameters(ssm, service)
         stub.assert_no_pending_responses()
-    assert f"parameters under {PATH}/: {resources.DELETED} (3)" in capsys.readouterr().err
+    assert f"parameters under {PATH}/: {resources.DELETED} (3)" in capsys.readouterr().out
 
 
 def test_the_parameters_are_deleted_ten_at_a_time(
@@ -2658,7 +2663,7 @@ def test_the_parameters_are_deleted_ten_at_a_time(
         resources.delete_parameters(ssm, service)
         stub.assert_no_pending_responses()
     assert resources.PARAMETER_BATCH == 10
-    assert f"parameters under {PATH}/: {resources.DELETED} (11)" in capsys.readouterr().err
+    assert f"parameters under {PATH}/: {resources.DELETED} (11)" in capsys.readouterr().out
 
 
 def test_every_page_of_parameters_is_read_before_deleting(
@@ -2677,7 +2682,7 @@ def test_every_page_of_parameters_is_read_before_deleting(
         )
         resources.delete_parameters(ssm, service)
         stub.assert_no_pending_responses()
-    assert f"parameters under {PATH}/: {resources.DELETED} (12)" in capsys.readouterr().err
+    assert f"parameters under {PATH}/: {resources.DELETED} (12)" in capsys.readouterr().out
 
 
 def test_a_parameter_that_went_away_in_between_is_not_an_error(
@@ -2698,7 +2703,7 @@ def test_a_parameter_that_went_away_in_between_is_not_an_error(
         )
         resources.delete_parameters(ssm, service)
         stub.assert_no_pending_responses()
-    assert f"parameters under {PATH}/: {resources.DELETED} (1)" in capsys.readouterr().err
+    assert f"parameters under {PATH}/: {resources.DELETED} (1)" in capsys.readouterr().out
 
 
 def test_other_errors_from_reading_the_parameters_are_left_to_destroy(

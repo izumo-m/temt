@@ -39,9 +39,9 @@ PROMPT = f"terminate {INSTANCE} (running)? [y/N] "
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
 
-def told(err: str) -> list[str]:
+def told(out: str) -> list[str]:
     """知らせた行から時刻を外したもの。"""
-    return [TIME_RE.sub("", line) for line in err.splitlines()]
+    return [TIME_RE.sub("", line) for line in out.splitlines()]
 
 
 class Terminal:
@@ -134,12 +134,10 @@ def test_it_terminates_the_instance_and_waits(
     # 手順 4.3。known_hosts を消し、リンク切れになった current も消す
     assert not file.exists()
     assert not configured.known_hosts_current.is_symlink()
-    captured = capsys.readouterr()
-    # 問いかけは標準エラー出力に書く。標準出力は ssh の通信路である
-    assert captured.out == ""
-    err = captured.err
-    assert err.startswith(PROMPT)
-    assert told(err.removeprefix(PROMPT)) == [
+    out, err = capsys.readouterr()
+    # 問いかけは、標準出力をファイルやパイプに回しても見えるよう、標準エラー出力に書く
+    assert err == PROMPT
+    assert told(out) == [
         f"terminating {INSTANCE}",
         f"{INSTANCE} is shutting-down",
         f"{INSTANCE} is terminated",
@@ -246,7 +244,7 @@ def test_it_reports_that_there_is_no_instance(
     terminate.run(configured, is_async=False, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"no instance for {NAME}"]
+    assert told(capsys.readouterr().out) == [f"no instance for {NAME}"]
 
 
 def test_it_terminates_every_instance_when_there_are_two(
@@ -277,10 +275,10 @@ def test_it_terminates_every_instance_when_there_are_two(
     assert answer.reads == 1
     assert [file.exists() for file in files] == [False, False]
     assert not configured.known_hosts_current.is_symlink()
-    err = capsys.readouterr().err
-    assert err.startswith(f"terminate {INSTANCE} (running), {OTHER} (stopped)? [y/N] ")
-    assert f"{INSTANCE} is terminated" in err
-    assert f"{OTHER} is terminated" in err
+    out, err = capsys.readouterr()
+    assert err == f"terminate {INSTANCE} (running), {OTHER} (stopped)? [y/N] "
+    assert f"{INSTANCE} is terminated" in told(out)
+    assert f"{OTHER} is terminated" in told(out)
 
 
 def test_it_makes_the_volumes_go_with_the_instance(
@@ -312,7 +310,7 @@ def test_it_makes_the_volumes_go_with_the_instance(
 
     aws_stubs.done()
     assert (
-        told(capsys.readouterr().err)[0]
+        told(capsys.readouterr().out)[0]
         == f"{INSTANCE}: /dev/sdb will be deleted with the instance"
     )
 
@@ -346,9 +344,11 @@ def test_it_goes_on_when_a_volume_cannot_be_fixed(
     terminate.run(configured, is_async=False, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert f"temt: warning: {INSTANCE}: /dev/sdb will remain after the instance is gone" in err
-    assert f"terminating {INSTANCE}" in err
+    out, err = capsys.readouterr()
+    assert err.startswith(
+        f"temt: warning: {INSTANCE}: /dev/sdb will remain after the instance is gone"
+    )
+    assert f"terminating {INSTANCE}" in told(out)
 
 
 def test_it_keeps_the_known_hosts_when_the_request_fails(
@@ -394,7 +394,7 @@ def test_async_returns_before_the_wait(
 
     aws_stubs.done()
     assert not file.exists()
-    assert told(capsys.readouterr().err) == [f"terminating {INSTANCE}"]
+    assert told(capsys.readouterr().out) == [f"terminating {INSTANCE}"]
 
 
 def test_it_keeps_current_when_it_points_at_another_instance(
@@ -602,9 +602,10 @@ def test_it_terminates_even_when_the_records_cannot_be_read(
     terminate.run(configured, is_async=True, yes=True)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
-    assert lines[0].startswith("temt: warning: cannot read the deploy records: ")
-    assert lines[1:] == [f"terminating {INSTANCE}"]
+    out, err = capsys.readouterr()
+    assert len(err.splitlines()) == 1
+    assert err.startswith("temt: warning: cannot read the deploy records: ")
+    assert told(out) == [f"terminating {INSTANCE}"]
 
 
 def test_it_terminates_only_the_instance_it_is_given(
@@ -637,9 +638,9 @@ def test_it_terminates_only_the_instance_it_is_given(
     assert [file.exists() for file in files] == [True, False]
     assert configured.known_hosts_current.is_symlink()
     prompt = f"terminate {OTHER} (stopped)? [y/N] "
-    err = capsys.readouterr().err
-    assert err.startswith(f"temt: warning: unbaked apps will be lost: jupyter\n{prompt}")
-    assert told(err.split(prompt, 1)[1]) == [f"terminating {OTHER}", f"{OTHER} is terminated"]
+    out, err = capsys.readouterr()
+    assert err == f"temt: warning: unbaked apps will be lost: jupyter\n{prompt}"
+    assert told(out) == [f"terminating {OTHER}", f"{OTHER} is terminated"]
 
 
 def test_it_terminates_nothing_when_an_instance_it_is_given_is_not_found(
@@ -659,10 +660,11 @@ def test_it_terminates_nothing_when_an_instance_it_is_given_is_not_found(
     # 探す以外は何も積んでいないので、変えていれば Stubber が失敗する
     aws_stubs.done()
     assert [file.exists() for file in files] == [True, True]
-    assert capsys.readouterr().err == (
-        f"instances tagged Name={NAME}:\n"
-        f"  {INSTANCE} (running)\n"
-        f"  {OTHER} (stopped)\n"
+    out, err = capsys.readouterr()
+    assert out == ""
+    # 見つかったものを挙げてから、エラーを出す
+    assert err == (
+        f"instances tagged Name={NAME}:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n"
         f"temt: no instance {missing} for {NAME}; nothing was terminated; "
         "see 'temt status --svc dev-main' and terminate again\n"
     )

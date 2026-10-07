@@ -2,8 +2,8 @@
 
 表は標準出力に書き、grep や awk に渡せるようにする。見出しを付けずに列を揃える
 write_lines は sg diff が使う。標準出力に書く out は、app get の値と、diff の変更
-（change.write）にも使う。環境の行や警告は、他のメッセージと同じく msg が標準エラー
-出力に書く。proxy は表を出さないので、ssh の通信路は乱さない。
+（change.write）にも使う。表だけを渡せるよう、環境の行は msg が標準エラー出力に書く。
+proxy は表を出さないので、ssh の通信路は乱さない。
 """
 
 import os

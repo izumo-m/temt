@@ -236,8 +236,10 @@ def test_too_many_lists_the_instances_and_tells_how_to_go_on(
         f"2 instances for {NAME}; terminate the extra one with "
         "'temt terminate --svc dev-main <instance-id>' and bake again"
     )
-    assert capsys.readouterr().err == (
-        f"instances tagged Name={NAME}:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n"
+    # 続くエラーに添えるので、標準エラー出力に出す
+    assert capsys.readouterr() == (
+        "",
+        f"instances tagged Name={NAME}:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n",
     )
 
 
@@ -252,7 +254,7 @@ def test_wait_online_tells_the_notice_once(
         instances.wait_online(ssm, INSTANCE, "waiting for the agent")
         stub.assert_no_pending_responses()
     assert clock.slept == [5, 5]
-    assert told(capsys.readouterr().err) == ["waiting for the agent"]
+    assert told(capsys.readouterr().out) == ["waiting for the agent"]
 
 
 def test_wait_online_tells_nothing_when_it_is_already_online(
@@ -305,7 +307,7 @@ def test_wait_accepting_tells_the_notice_once(
     assert instances.wait_accepting(ADDRESS, 22, "waiting for the port") is opened
     assert calls == [(ADDRESS, 22)] * 3
     assert clock.slept == [5, 5]
-    assert told(capsys.readouterr().err) == ["waiting for the port"]
+    assert told(capsys.readouterr().out) == ["waiting for the port"]
 
 
 def test_wait_accepting_tells_nothing_when_it_already_accepts(
@@ -361,7 +363,7 @@ def test_wait_address_tells_the_notice_once(
         assert instances.wait_address(ec2, INSTANCE, "waiting for an address") == ADDRESS
         stub.assert_no_pending_responses()
     assert clock.slept == [5, 5]
-    assert told(capsys.readouterr().err) == ["waiting for an address"]
+    assert told(capsys.readouterr().out) == ["waiting for an address"]
 
 
 def test_wait_address_tells_nothing_when_the_address_is_there(

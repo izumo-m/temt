@@ -519,7 +519,7 @@ def test_everything_is_made_when_nothing_exists(
     user_config = (Path.home() / ".ssh" / "config").read_text(encoding="utf-8")
     assert user_config.startswith(f"{home.MARK}\nInclude ~/.ssh/temt/config\n")
     # 手順 6 の報告
-    err = capsys.readouterr().err
+    out = capsys.readouterr().out
     for made in (
         *(f'wrote {key} = "{value}" in {service.conf_path}' for key, value in written.items()),
         f"wrote the default [[role.policy.{conf.EC2}]] in {service.conf_path}",
@@ -532,11 +532,11 @@ def test_everything_is_made_when_nothing_exists(
         f"launch template {TEMPLATE}: created (version 1)",
         f"association {SSHD}: created",
     ):
-        assert made in err
+        assert made in out
     # 既定の 22 で作ったときは、ポートは変わらないので、焼くよう添えない
-    assert "take effect" not in err
+    assert "take effect" not in out
     # 関連付けは起動テンプレートの後に揃える
-    assert err.index(f"launch template {TEMPLATE}: created") < err.index(f"association {SSHD}:")
+    assert out.index(f"launch template {TEMPLATE}: created") < out.index(f"association {SSHD}:")
     # 手順 7。Port は既定の 22
     assert "Port               22\n" in block
 
@@ -598,13 +598,13 @@ def test_nothing_changes_when_everything_matches(
     assert (aws_stubs.passed[0].AwsProfile, aws_stubs.passed[0].AwsRegion) == (None, REGION)
     # AWS には読むことしか求めない（書き込みを積んでいないので、呼べば Stubber が止める）。
     # 変えなかったものは知らせず、手元の ssh の設定とサービスのコマンドだけを作る
-    err = capsys.readouterr().err
-    assert "unchanged" not in err
-    assert f"role {NAME}" not in err
-    assert f"association {SSHD}" not in err
-    assert f"wrote the Host {NAME} block" in err
-    assert "take effect" not in err
-    assert "warning" not in err
+    captured = capsys.readouterr()
+    assert "unchanged" not in captured.out
+    assert f"role {NAME}" not in captured.out
+    assert f"association {SSHD}" not in captured.out
+    assert f"wrote the Host {NAME} block" in captured.out
+    assert "take effect" not in captured.out
+    assert captured.err == ""
 
 
 def test_new_sshd_ports_update_the_association_and_the_host_block(
@@ -641,12 +641,12 @@ def test_new_sshd_ports_update_the_association_and_the_host_block(
 
     aws_stubs.done()
     assert service.conf_path.read_text(encoding="utf-8") == text
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: updated" in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD}: updated" in out
     assert (
         "sshd ports 2222,443 take effect on a running instance shortly; "
         "run 'temt bake --svc dev-main' to keep them in the AMI"
-    ) in err
+    ) in out
     block = (ssh_dir() / "config").read_text(encoding="utf-8")
     assert "    Port               2222\n" in block
 
@@ -691,7 +691,7 @@ def test_a_role_policy_becomes_an_inline_policy(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert f"role policy {JUPYTER}: created" in capsys.readouterr().err
+    assert f"role policy {JUPYTER}: created" in capsys.readouterr().out
 
 
 def test_a_warning_on_the_role_statements_goes_on(
@@ -724,12 +724,11 @@ def test_a_warning_on_the_role_statements_goes_on(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert (
-        "temt: warning: temt-jupyter: SECURITY_WARNING SOME_WARNING: Use a narrower resource."
-        in err
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "temt: warning: temt-jupyter: SECURITY_WARNING SOME_WARNING: Use a narrower resource.\n"
     )
-    assert f"role policy {JUPYTER}: created" in err
+    assert f"role policy {JUPYTER}: created" in captured.out
 
 
 def test_an_error_in_the_role_statements_stops_before_aws_changes(
@@ -843,9 +842,10 @@ def test_a_second_run_leaves_the_local_files_alone(
         service.conf_path.read_text(),
     ) == after_first
     # 2 度目は違いが無いので、確認も求めずに終わる
-    err = capsys.readouterr().err
-    assert f"{NAME}: no differences" in err
-    assert "wrote" not in err
+    captured = capsys.readouterr()
+    assert f"{NAME}: no differences" in captured.out
+    assert "wrote" not in captured.out
+    assert captured.err == ""
 
 
 def test_a_new_vpc_gets_a_new_group_and_the_template_follows(
@@ -943,9 +943,9 @@ def test_a_new_vpc_gets_a_new_group_and_the_template_follows(
     aws_stubs.done()
     # 設定ファイルは揃っているので書かない
     assert service.conf_path.read_text(encoding="utf-8") == text
-    err = capsys.readouterr().err
-    assert f"security group {NAME}: created ({other_group})" in err
-    assert f"launch template {TEMPLATE}: updated (version 2)" in err
+    out = capsys.readouterr().out
+    assert f"security group {NAME}: created ({other_group})" in out
+    assert f"launch template {TEMPLATE}: updated (version 2)" in out
 
 
 def test_the_template_follows_the_ipv6_of_the_subnet(
@@ -978,7 +978,7 @@ def test_the_template_follows_the_ipv6_of_the_subnet(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert f"launch template {TEMPLATE}: updated (version 4)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 4)" in capsys.readouterr().out
 
 
 def test_the_example_is_written_once(aws_stubs: Stubs, service: Service) -> None:
@@ -1253,7 +1253,7 @@ def test_the_option_is_written_as_the_profile(
 
     aws_stubs.done()
     assert conf.load(service).AwsProfile == "work"
-    assert f'wrote AwsProfile = "work" in {service.conf_path}' in capsys.readouterr().err
+    assert f'wrote AwsProfile = "work" in {service.conf_path}' in capsys.readouterr().out
     # ssh の設定は設定ファイルを正とするので、ProxyCommand に --profile は入らない
     assert "--profile" not in (ssh_dir() / "config").read_text(encoding="utf-8")
 
@@ -1325,7 +1325,7 @@ def test_the_same_profile_is_not_written_again(
 
     aws_stubs.done()
     assert service.conf_path.read_text(encoding="utf-8") == before
-    assert "wrote AwsProfile" not in capsys.readouterr().err
+    assert "wrote AwsProfile" not in capsys.readouterr().out
 
 
 def test_the_written_profile_is_left_alone_without_the_option(
@@ -1341,7 +1341,7 @@ def test_the_written_profile_is_left_alone_without_the_option(
     aws_stubs.done()
     assert aws_stubs.passed[0].AwsProfile == "work"
     assert service.conf_path.read_text(encoding="utf-8") == before
-    assert "wrote AwsProfile" not in capsys.readouterr().err
+    assert "wrote AwsProfile" not in capsys.readouterr().out
 
 
 def test_the_ssh_config_is_left_alone_when_a_resource_fails(
@@ -1618,9 +1618,9 @@ def test_diff_and_apply_agree_on_a_new_instance_type(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert f"launch template {TEMPLATE}: updated (version 4)" in err
-    assert "wrote" not in err
+    shown = capsys.readouterr().out
+    assert f"launch template {TEMPLATE}: updated (version 4)" in shown
+    assert "wrote" not in shown
 
 
 def test_diff_and_apply_agree_on_a_new_volume_size(
@@ -1676,7 +1676,7 @@ def test_diff_and_apply_agree_on_a_new_volume_size(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert f"launch template {TEMPLATE}: updated (version 4)" in capsys.readouterr().err
+    assert f"launch template {TEMPLATE}: updated (version 4)" in capsys.readouterr().out
 
 
 def test_diff_shows_the_ec2_default_that_apply_writes(
@@ -1756,8 +1756,7 @@ def test_a_file_in_place_of_the_command_is_left_alone(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "command" not in err
+    assert "command" not in capsys.readouterr().out
     assert service.command_path.read_text(encoding="utf-8") == "mine\n"
 
 
@@ -1774,8 +1773,8 @@ def test_apply_shows_the_changes_and_writes_nothing_when_declined(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """変えるものを diff と同じ形で標準エラー出力に見せてから確認を求める。y と答え
-    なければ、設定ファイルにも AWS にも手元にも書かない。"""
+    """変えるものを diff と同じ形で標準出力に見せてから、標準エラー出力で確認を求める。
+    y と答えなければ、設定ファイルにも AWS にも手元にも書かない。"""
     values = write_conf(service)
     before = service.conf_path.read_text(encoding="utf-8")
     nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
@@ -1786,9 +1785,9 @@ def test_apply_shows_the_changes_and_writes_nothing_when_declined(
 
     aws_stubs.done()
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert f"+   command       ~/.local/bin/{NAME}" in captured.err
-    assert "apply these changes? [y/N]" in captured.err
+    assert f"+   command       ~/.local/bin/{NAME}" in captured.out
+    assert "[y/N]" not in captured.out
+    assert captured.err == "apply these changes? [y/N] "
     assert service.conf_path.read_text(encoding="utf-8") == before
     assert not service.command_path.exists()
     assert not (ssh_dir() / "config").exists()
@@ -1830,9 +1829,9 @@ def test_apply_asks_nothing_without_differences(
     apply.run(service, yes=False)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert f"{NAME}: no differences" in err
-    assert "[y/N]" not in err
+    captured = capsys.readouterr()
+    assert f"{NAME}: no differences" in captured.out
+    assert captured.err == ""
 
 
 def test_a_first_apply_that_is_declined_makes_nothing(
@@ -1859,9 +1858,9 @@ def test_a_first_apply_that_is_declined_makes_nothing(
         apply.run(service, yes=False)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "+   conf " in err
-    assert "+   key " in err
+    out = capsys.readouterr().out
+    assert "+   conf " in out
+    assert "+   key " in out
     assert not service.conf_path.exists()
     assert not keys_dir().exists()
     assert not ssh_dir().exists()
@@ -1884,7 +1883,7 @@ def test_apply_goes_on_when_the_answer_is_yes(
 
     aws_stubs.done()
     assert service.command_path.exists()
-    assert f"wrote ~/.local/bin/{NAME}" in capsys.readouterr().err
+    assert f"wrote ~/.local/bin/{NAME}" in capsys.readouterr().out
 
 
 def test_a_key_mismatch_stops_apply_before_showing_anything(
@@ -1904,9 +1903,9 @@ def test_a_key_mismatch_stops_apply_before_showing_anything(
         apply.run(service, yes=False)
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert "command" not in err
-    assert "[y/N]" not in err
+    captured = capsys.readouterr()
+    assert "command" not in captured.out
+    assert "[y/N]" not in captured.err
     assert not service.command_path.exists()
     assert service.conf_path.read_text(encoding="utf-8") == before
 

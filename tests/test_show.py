@@ -137,9 +137,9 @@ def test_it_shows_the_default_version(
     show.template(configured)
     aws_stubs.done()
     out, err = capsys.readouterr()
-    # 標準出力には何も書かない
-    assert out == ""
-    assert err == (
+    # 表示はすべて標準出力に書く
+    assert err == ""
+    assert out == (
         f"launch template {TEMPLATE}:\n"
         "  version:                3 (created 2026-09-20 18:00:00)\n"
         f"  ImageId:                {IMAGE}\n"
@@ -182,7 +182,7 @@ def test_it_shows_no_ipv6_as_zero(
     a_template(aws_stubs, a_version(1, NetworkInterfaces=[interface]))
     show.template(configured)
     aws_stubs.done()
-    assert "  ipv6 addresses:         0" in capsys.readouterr().err.splitlines()
+    assert "  ipv6 addresses:         0" in capsys.readouterr().out.splitlines()
 
 
 def test_it_shows_the_volume_size(
@@ -193,7 +193,7 @@ def test_it_shows_the_volume_size(
     a_template(aws_stubs, a_version(1, BlockDeviceMappings=mappings))
     show.template(configured)
     aws_stubs.done()
-    assert "  VolumeSize:             30" in capsys.readouterr().err.splitlines()
+    assert "  VolumeSize:             30" in capsys.readouterr().out.splitlines()
 
 
 def test_it_shows_an_image_without_an_ebs_root_volume(
@@ -207,7 +207,7 @@ def test_it_shows_an_image_without_an_ebs_root_volume(
     service_images(aws_stubs, (IMAGE, MADE))
     show.template(configured)
     aws_stubs.done()
-    assert "  root volume: (no EBS root volume)" in capsys.readouterr().err.splitlines()
+    assert "  root volume: (no EBS root volume)" in capsys.readouterr().out.splitlines()
 
 
 def test_it_shows_an_image_that_is_gone(
@@ -220,7 +220,7 @@ def test_it_shows_an_image_that_is_gone(
     service_images(aws_stubs, (NEWEST, LATER))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().err.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert lines[18:21] == [
         f"image {IMAGE}:",
         "  state:  (not found; it may have been deregistered)",
@@ -238,7 +238,7 @@ def test_it_marks_a_newer_image(
     service_images(aws_stubs, (IMAGE, MADE), (NEWEST, LATER))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().err.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert lines[23] == (
         f"  latest:      {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) "
         f"created {LATER_SHOWN}, newer"
@@ -254,7 +254,7 @@ def test_it_shows_no_ami_of_the_service(
     service_images(aws_stubs)
     show.template(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[23] == "  latest:      none (temt:service=dev-main)"
+    assert capsys.readouterr().out.splitlines()[23] == "  latest:      none (temt:service=dev-main)"
 
 
 def test_it_lists_every_version(
@@ -271,7 +271,7 @@ def test_it_lists_every_version(
     service_images(aws_stubs, (IMAGE, MADE))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().err.splitlines()
+    lines = capsys.readouterr().out.splitlines()
     assert lines[24:] == [
         "versions (* is the default):",
         f"  1   2026-09-20 18:00:00 {NEWEST} t3.small {SUBNET}",
@@ -290,7 +290,7 @@ def test_it_shows_a_subnet_that_is_gone(
     show.template(configured)
     aws_stubs.done()
     assert (
-        capsys.readouterr().err.splitlines()[6]
+        capsys.readouterr().out.splitlines()[6]
         == f"  SubnetId:               {SUBNET} (no such subnet)"
     )
 
@@ -306,7 +306,7 @@ def test_it_asks_for_apply_without_the_launch_template(
     with pytest.raises(TemtError, match="run 'temt apply --svc dev-main' first"):
         show.template(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr() == ("", "")
 
 
 def test_it_asks_for_apply_when_there_is_no_config_file(aws_stubs: Stubs, service: Service) -> None:
@@ -322,5 +322,5 @@ def test_main_runs_it(
     assert cli.main(["temt", "template", "show", "--svc", "dev-main"]) == 0
     aws_stubs.done()
     out, err = capsys.readouterr()
-    assert out == ""
-    assert err.startswith(f"launch template {TEMPLATE}:\n")
+    assert err == ""
+    assert out.startswith(f"launch template {TEMPLATE}:\n")

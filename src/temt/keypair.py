@@ -144,21 +144,22 @@ def _register(ec2: EC2Client, service: Service, values: Conf, found: KeyDiff) ->
 def _mismatch(service: Service, values: Conf, path: Path, mine: str | None, want: str) -> None:
     """食い違いを、キーペアの名前と両方のフィンガープリントで知らせ、止める。
 
-    直し方の手がかりとして、キーペアと一致する手元の鍵を挙げる。
+    直し方の手がかりとして、キーペアと一致する手元の鍵を挙げる。警告に続く行なので、
+    標準エラー出力に書く。
     """
     if mine is None:
         msg.warn(f"the key pair {values.KeyName} exists, but {printable(tilde(path))} does not")
     else:
         msg.warn(f"the key pair {values.KeyName} does not match {printable(tilde(path))}")
-        msg.tell(f"  local: {mine}\n")
-    msg.tell(f"  EC2:   {want}\n")
+        msg.tell(f"  local: {mine}\n", side=True)
+    msg.tell(f"  EC2:   {want}\n", side=True)
     found = keys.matching(want)
     if found:
-        msg.tell(f"keys that match the key pair {values.KeyName}:\n")
+        msg.tell(f"keys that match the key pair {values.KeyName}:\n", side=True)
         for one in found:
-            msg.tell(f"  {printable(tilde(one))}\n")
+            msg.tell(f"  {printable(tilde(one))}\n", side=True)
     else:
-        msg.tell(f"no key on this machine matches the key pair {values.KeyName}\n")
+        msg.tell(f"no key on this machine matches the key pair {values.KeyName}\n", side=True)
     raise TemtError(f"the key pair {values.KeyName} does not match; {_fix(service)}")
 
 

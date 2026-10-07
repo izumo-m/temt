@@ -123,7 +123,7 @@ belongs to.
 
 `sg show --svc <svc>`
 
-Shows the security group on stderr: name, ID, VPC, description, tags, and the number of
+Shows the security group: name, ID, VPC, description, tags, and the number of
 ingress rules on the AWS side.
 
 - If it is not in the VPC of `SubnetId`, shows that the next `apply` creates it.

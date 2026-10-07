@@ -154,9 +154,9 @@ def test_it_shows_a_running_instance(
     status.run(configured)
     aws_stubs.done()
     out, err = capsys.readouterr()
-    # 標準出力には何も書かない
-    assert out == ""
-    assert err == (
+    # 表示は標準出力に書く
+    assert err == ""
+    assert out == (
         f"template:   {TEMPLATE}\n"
         f"instance:   {INSTANCE} (running)\n"
         f"ipv4:       {ADDRESS}\n"
@@ -179,7 +179,7 @@ def test_it_shows_nothing_running(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"
+    assert capsys.readouterr().out == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"
 
 
 def test_it_shows_every_instance(
@@ -207,7 +207,8 @@ def test_it_shows_every_instance(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    out, err = capsys.readouterr()
+    assert out.splitlines() == [
         APPLIED,
         f"instance:   {INSTANCE} (running)",
         f"ipv4:       {ADDRESS}",
@@ -217,10 +218,12 @@ def test_it_shows_every_instance(
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
         "sshd-ports: (not run)",
-        f"temt: warning: 2 instances for {NAME}; terminate the extra one with "
-        "'temt terminate --svc dev-main <instance-id>'",
         NO_APPS,
         NO_STATUS,
+    ]
+    assert err.splitlines() == [
+        f"temt: warning: 2 instances for {NAME}; terminate the extra one with "
+        "'temt terminate --svc dev-main <instance-id>'"
     ]
 
 
@@ -242,9 +245,9 @@ def test_it_does_not_count_an_instance_that_is_shutting_down(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert f"instance:   {OTHER} (shutting-down)" in err.splitlines()
-    assert "warning" not in err
+    out, err = capsys.readouterr()
+    assert f"instance:   {OTHER} (shutting-down)" in out.splitlines()
+    assert err == ""
 
 
 def test_it_takes_an_answer_with_missing_items(
@@ -268,7 +271,8 @@ def test_it_takes_an_answer_with_missing_items(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    out, err = capsys.readouterr()
+    assert out.splitlines() == [
         APPLIED,
         f"instance:   {INSTANCE} (running)",
         "ipv4:       (none)",
@@ -278,10 +282,12 @@ def test_it_takes_an_answer_with_missing_items(
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
         NO_ASSOCIATION,
-        f"temt: warning: 2 instances for {NAME}; terminate the extra one with "
-        "'temt terminate --svc dev-main <instance-id>'",
         NO_APPS,
         NO_STATUS,
+    ]
+    assert err.splitlines() == [
+        f"temt: warning: 2 instances for {NAME}; terminate the extra one with "
+        "'temt terminate --svc dev-main <instance-id>'"
     ]
 
 
@@ -303,7 +309,7 @@ def test_it_takes_an_answer_without_the_list(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[3:] == [
+    assert capsys.readouterr().out.splitlines()[3:] == [
         "ssm-agent:  (not registered)",
         "sshd-ports: failed",
         NO_APPS,
@@ -355,7 +361,7 @@ def test_it_shows_the_sshd_ports_of_the_current_version(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[-3] == f"sshd-ports: {shown}"
+    assert capsys.readouterr().out.splitlines()[-3] == f"sshd-ports: {shown}"
 
 
 def test_it_shows_that_the_service_is_not_applied(
@@ -381,7 +387,7 @@ def test_it_shows_that_the_service_is_not_applied(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines() == [
+    assert capsys.readouterr().out.splitlines() == [
         "template:   none (not applied; run 'temt apply --svc dev-main')",
         f"instance:   {INSTANCE} (running)",
         f"ipv4:       {ADDRESS}",
@@ -408,7 +414,7 @@ def test_it_asks_for_apply_when_there_is_no_association(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[-3:] == [NO_ASSOCIATION, NO_APPS, NO_STATUS]
+    assert capsys.readouterr().out.splitlines()[-3:] == [NO_ASSOCIATION, NO_APPS, NO_STATUS]
 
 
 def test_it_reads_the_current_version_of_the_association_found_by_name(
@@ -426,7 +432,7 @@ def test_it_reads_the_current_version_of_the_association_found_by_name(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[-3] == "sshd-ports: applied"
+    assert capsys.readouterr().out.splitlines()[-3] == "sshd-ports: applied"
 
 
 def test_other_errors_from_reading_the_template_are_not_swallowed(
@@ -468,7 +474,9 @@ def test_main_runs_it(
     assert conf.OPTION_PROFILE == "work"
     assert aws_stubs.passed[0].AwsProfile is None
     assert configured.conf_path.read_text(encoding="utf-8") == before
-    assert capsys.readouterr().out == ""
+    out, err = capsys.readouterr()
+    assert out == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"
+    assert err == ""
 
 
 def test_it_shows_the_app_statuses(
@@ -499,7 +507,7 @@ def test_it_shows_the_app_statuses(
     )
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[5:] == [
+    assert capsys.readouterr().out.splitlines()[5:] == [
         NO_APPS,
         "app status:",
         "  idle-shutdown  power off in 42m  [just now]",
@@ -527,7 +535,7 @@ def test_it_goes_through_every_page_of_statuses(
     status.run(configured)
     aws_stubs.done()
     # 動いているインスタンスが無いので、どれも stale
-    assert capsys.readouterr().err.splitlines()[2:] == [
+    assert capsys.readouterr().out.splitlines()[2:] == [
         NO_APPS,
         "app status:",
         "  a  one  [1m ago, stale]",
@@ -553,7 +561,7 @@ def test_it_marks_the_statuses_of_a_stopped_instance_stale(
     )
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[-2:] == [
+    assert capsys.readouterr().out.splitlines()[-2:] == [
         "app status:",
         "  idle-shutdown  in use: 1 ssh session(s) (limit 1h)  [10m ago, stale]",
     ]
@@ -587,7 +595,7 @@ def test_it_shows_the_apps_that_are_not_baked(
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().err.splitlines()[-2] == (
+    assert capsys.readouterr().out.splitlines()[-2] == (
         "apps:       unbaked cloudflared, mise; lost moved, timezone-tokyo"
     )
 

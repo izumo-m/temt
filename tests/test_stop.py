@@ -37,9 +37,9 @@ REFUSED = f"This instance '{INSTANCE}' is not in a state from which it can be st
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
 
-def told(err: str) -> list[str]:
+def told(out: str) -> list[str]:
     """知らせた行から時刻を外したもの。"""
-    return [TIME_RE.sub("", line) for line in err.splitlines()]
+    return [TIME_RE.sub("", line) for line in out.splitlines()]
 
 
 class Terminal:
@@ -112,11 +112,9 @@ def test_it_stops_the_instance_and_waits(
     assert clock.slept == [5, 5]
     # 再開すれば同じホスト鍵で戻るので、known_hosts は残す
     assert known_hosts.exists()
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    err = captured.err
-    assert err.startswith(PROMPT)
-    assert told(err.removeprefix(PROMPT)) == [f"stopping {INSTANCE}", f"{INSTANCE} is stopped"]
+    out, err = capsys.readouterr()
+    assert err == PROMPT
+    assert told(out) == [f"stopping {INSTANCE}", f"{INSTANCE} is stopped"]
 
 
 @pytest.mark.parametrize("state", ["running", "pending"])
@@ -140,7 +138,7 @@ def test_async_returns_as_soon_as_the_stop_is_accepted(
     # describe-instances は探索の 1 回しか積んでいないので、待てば Stubber が失敗する
     aws_stubs.done()
     assert clock.slept == []
-    assert told(capsys.readouterr().err) == [f"stopping {INSTANCE}"]
+    assert told(capsys.readouterr().out) == [f"stopping {INSTANCE}"]
 
 
 def test_it_changes_nothing_when_the_answer_is_not_y(
@@ -171,7 +169,7 @@ def test_it_reports_that_there_is_no_instance(
     stop.run(configured, is_async=False, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"no instance for {NAME}"]
+    assert told(capsys.readouterr().out) == [f"no instance for {NAME}"]
 
 
 def test_it_does_nothing_when_the_instance_is_already_stopped(
@@ -182,7 +180,7 @@ def test_it_does_nothing_when_the_instance_is_already_stopped(
     stop.run(configured, is_async=False, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"{INSTANCE} is already stopped"]
+    assert told(capsys.readouterr().out) == [f"{INSTANCE} is already stopped"]
 
 
 def test_it_waits_for_an_instance_that_is_already_stopping(
@@ -195,7 +193,7 @@ def test_it_waits_for_an_instance_that_is_already_stopping(
     stop.run(configured, is_async=False, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"{INSTANCE} is already stopping",
         f"{INSTANCE} is stopped",
     ]
@@ -213,10 +211,9 @@ def test_it_stops_a_pending_instance_and_waits(
 
     aws_stubs.done()
     assert answer.reads == 1
-    err = capsys.readouterr().err
-    prompt = f"stop {INSTANCE} (pending)? [y/N] "
-    assert err.startswith(prompt)
-    assert told(err.removeprefix(prompt)) == [f"stopping {INSTANCE}", f"{INSTANCE} is stopped"]
+    out, err = capsys.readouterr()
+    assert err == f"stop {INSTANCE} (pending)? [y/N] "
+    assert told(out) == [f"stopping {INSTANCE}", f"{INSTANCE} is stopped"]
 
 
 @pytest.mark.parametrize("code", ["IncorrectInstanceState", "IncorrectState"])
@@ -253,7 +250,7 @@ def test_it_treats_an_instance_that_is_shutting_down_as_gone(
     stop.run(configured, is_async=False, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"no instance for {NAME}"]
+    assert told(capsys.readouterr().out) == [f"no instance for {NAME}"]
 
 
 def test_it_lists_two_instances_and_stops(
@@ -328,7 +325,7 @@ def test_async_does_not_wait_for_an_instance_that_is_already_stopping(
     stop.run(configured, is_async=True, yes=False)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"{INSTANCE} is already stopping"]
+    assert told(capsys.readouterr().out) == [f"{INSTANCE} is already stopping"]
 
 
 def test_it_stops_when_another_command_holds_the_lock(

@@ -187,11 +187,9 @@ def test_it_reboots_and_waits_until_the_boot_id_changes(
     assert answer.reads == 1
     assert clock.slept == [5] * 8
     captured = capsys.readouterr()
-    assert captured.out == ""
-    err = captured.err
-    assert err.startswith(PROMPT)
+    assert captured.err == PROMPT
     # 段階が進むたびに 1 回ずつ知らせる。2 回目に落ちたときと戻ったときは知らせない
-    assert told(err.removeprefix(PROMPT)) == [
+    assert told(captured.out) == [
         f"rebooting {INSTANCE}",
         f"waiting for the SSM agent on {INSTANCE} to come back",
         f"the SSM agent on {INSTANCE} is back; reading the boot id",
@@ -219,7 +217,7 @@ def test_it_tells_each_stage_once(
     reboot.run(configured, is_async=False, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [
+    assert told(capsys.readouterr().out) == [
         f"rebooting {INSTANCE}",
         f"waiting for the SSM agent on {INSTANCE} to come back",
         f"the SSM agent on {INSTANCE} is back; reading the boot id",
@@ -256,7 +254,7 @@ def test_async_reboots_without_reading_the_boot_id(
 
     aws_stubs.done()
     assert made == ["ec2"]
-    assert told(capsys.readouterr().err) == [f"rebooting {INSTANCE}"]
+    assert told(capsys.readouterr().out) == [f"rebooting {INSTANCE}"]
 
 
 def test_it_changes_nothing_when_the_answer_is_not_y(
@@ -274,9 +272,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     assert cli.main(["temt", "reboot", "--svc", "dev-main"]) == 1
 
     aws_stubs.done()
-    err = capsys.readouterr().err
-    assert err.startswith(PROMPT)
-    assert err.endswith("temt: cancelled\n")
+    assert capsys.readouterr() == ("", f"{PROMPT}temt: cancelled\n")
 
 
 def test_it_needs_the_agent_online_to_wait(
@@ -372,7 +368,7 @@ def test_async_asks_aws_to_reboot_an_instance_on_its_way(
     reboot.run(configured, is_async=True, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().err) == [f"rebooting {INSTANCE}"]
+    assert told(capsys.readouterr().out) == [f"rebooting {INSTANCE}"]
 
 
 @pytest.mark.parametrize("code", ["IncorrectInstanceState", "IncorrectState"])

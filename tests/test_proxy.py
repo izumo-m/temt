@@ -26,7 +26,7 @@ from conftest import (
     taken,
 )
 
-from temt import aws, cli, conf, home, instances, proc, proxy, relay, wait
+from temt import aws, cli, conf, home, instances, msg, proc, proxy, relay, wait
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -246,6 +246,17 @@ def required(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(proc, "require", require)
     return seen
+
+
+@pytest.fixture(autouse=True)
+def only_stderr(process_state: None) -> None:
+    """cli.run が proxy の前にするのと同じく、すべてを標準エラー出力に回す。
+
+    proxy.run を直に呼ぶテストも、本番と同じ出力先で確かめる。process_state がテストの
+    後に戻す。
+    """
+    _ = process_state
+    msg.use_stderr()
 
 
 @pytest.fixture(autouse=True)
@@ -565,7 +576,9 @@ def test_it_stops_when_more_than_one_instance_is_tagged(
     aws_stubs.done()
     assert not execs.calls
     assert not configured.known_hosts_dir.exists()
-    assert told(capsys.readouterr().err) == [
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert told(captured.err) == [
         f"instances tagged Name={NAME}:",
         f"  {INSTANCE} (running)",
         f"  {OTHER} (running)",
@@ -659,6 +672,37 @@ def test_it_waits_for_a_pending_instance(
     else:
         # 待って得たインスタンスのアドレスにつなぐ
         assert ports.calls == [(ADDRESS, 22)]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert told(captured.err) == [
+        f"{INSTANCE} is pending; waiting for it",
+        f"{INSTANCE} is running",
+    ]
+
+
+def test_main_writes_the_notices_only_to_stderr(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """cli.main から動かせば、待ちの知らせも標準エラー出力に書き、標準出力には何も書かない。
+
+    標準出力は ssh の通信路だからである。
+    """
+    _ = required
+    # cli.run が自ら標準エラー出力に回すことを確かめるため、only_stderr の設定を戻す
+    monkeypatch.setattr(msg, "_only_stderr", False)
+    found(aws_stubs, an_instance(INSTANCE, "pending"))
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running", address=ADDRESS)), BY_ID
+    )
+    agent(aws_stubs, "Online")
+    sshd_applied(aws_stubs)
+    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
+    assert execs.calls[0][1] == SSM_ARGV
     captured = capsys.readouterr()
     assert captured.out == ""
     assert told(captured.err) == [
@@ -943,7 +987,9 @@ def test_it_waits_for_a_public_address(
     # ポートはすぐにつながったので、それを待つ知らせは出ない
     assert ports.calls == [(ADDRESS, 22)]
     assert relays.calls == ports.opened
-    assert told(capsys.readouterr().err) == [f"waiting for a public address on {INSTANCE}"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert told(captured.err) == [f"waiting for a public address on {INSTANCE}"]
 
 
 def test_it_waits_for_an_address_after_a_pending_instance_is_running(
@@ -974,7 +1020,9 @@ def test_it_waits_for_an_address_after_a_pending_instance_is_running(
     aws_stubs.done()
     assert clock.slept == [5]
     assert ports.calls == [(ADDRESS, 22)]
-    assert told(capsys.readouterr().err) == [
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert told(captured.err) == [
         f"{INSTANCE} is pending; waiting for it",
         f"{INSTANCE} is running",
         f"waiting for a public address on {INSTANCE}",
@@ -1074,7 +1122,7 @@ def test_it_does_not_wait_for_an_old_instance_whose_agent_is_offline(
     assert clock.slept == []
     assert not execs.calls
     assert not configured.known_hosts_dir.exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr() == ("", "")
 
 
 def test_it_does_not_wait_for_the_address_of_an_old_instance(
@@ -1123,7 +1171,7 @@ def test_it_tells_that_sshd_refuses_on_an_old_instance(
     assert ports.calls == [(ADDRESS, 22)]
     assert not relays.calls
     assert not configured.known_hosts_dir.exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.parametrize("reason", [TimeoutError("timed out"), OSError(113, "No route to host")])
@@ -1154,7 +1202,7 @@ def test_it_suspects_the_security_group_on_an_old_instance(
     assert ports.calls == [(ADDRESS, 22)]
     assert not relays.calls
     assert not configured.known_hosts_dir.exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr() == ("", "")
 
 
 def test_it_asks_for_apply_when_there_is_no_config_file(

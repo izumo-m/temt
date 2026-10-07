@@ -120,9 +120,11 @@ def environment(region: str | None) -> boto3.Session:
     # boto3 はプロファイルを選んでいなくても default と答えるので、選んだときだけ出す。
     # 選んでいなければ、資格情報は環境変数の鍵などから来ていることがある
     chosen = conf.OPTION_PROFILE or any(os.environ.get(name) for name in PROFILE_ENV)
+    # 表だけを標準出力に残すよう、標準エラー出力に書く
     msg.tell(
         f"account {account(session)}, region {printable(session.region_name)}, "
-        f"profile {printable(session.profile_name) if chosen else NO_PROFILE}\n"
+        f"profile {printable(session.profile_name) if chosen else NO_PROFILE}\n",
+        side=True,
     )
     return session
 

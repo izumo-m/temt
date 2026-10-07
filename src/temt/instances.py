@@ -196,10 +196,13 @@ def extra(service: Service, count: int) -> str:
 
 
 def tell_found(service: Service, found: list[Instance]) -> None:
-    """見つかったインスタンスを、1 台 1 行で挙げる。"""
-    msg.tell(f"instances tagged Name={service.name}:\n")
+    """見つかったインスタンスを、1 台 1 行で挙げる。
+
+    続くエラーに添えるので、標準エラー出力に書く。終了する ID は、ここからしか分からない。
+    """
+    msg.tell(f"instances tagged Name={service.name}:\n", side=True)
     for one in found:
-        msg.tell(f"  {one.id} ({one.state})\n")
+        msg.tell(f"  {one.id} ({one.state})\n", side=True)
 
 
 def too_many(service: Service, found: list[Instance], command: str) -> NoReturn:

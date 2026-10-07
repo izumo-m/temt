@@ -128,9 +128,9 @@ def test_add_a_rule(service: Service, capsys: pytest.CaptureFixture[str]) -> Non
     assert conf.load(service).security_group.ingress[1] == Ingress(
         Protocol="udp", Port=(53, 53), Cidr="198.51.100.0/24", Description="dns"
     )
-    err = capsys.readouterr().err
-    assert "added 53/udp 198.51.100.0/24 to ~/.config/temt/dev-main.toml\n" in err
-    assert "run 'temt apply --svc dev-main' to update the security group\n" in err
+    out = capsys.readouterr().out
+    assert "added 53/udp 198.51.100.0/24 to ~/.config/temt/dev-main.toml\n" in out
+    assert "run 'temt apply --svc dev-main' to update the security group\n" in out
 
 
 def test_add_shows_the_path_safely(
@@ -143,9 +143,9 @@ def test_add_shows_the_path_safely(
     monkeypatch.setenv("TEMT_CONF_DIR", str(home_dir / "conf\x1b[2J"))
     write(service, HOME)
     ingress.add(service, "udp", (53, 53), "198.51.100.0/24", "dns")
-    err = capsys.readouterr().err
-    assert "added 53/udp 198.51.100.0/24 to ~/conf?[2J/dev-main.toml\n" in err
-    assert "\x1b" not in err
+    out = capsys.readouterr().out
+    assert "added 53/udp 198.51.100.0/24 to ~/conf?[2J/dev-main.toml\n" in out
+    assert "\x1b" not in out
 
 
 def test_add_a_rule_that_is_there(service: Service, capsys: pytest.CaptureFixture[str]) -> None:
@@ -153,18 +153,18 @@ def test_add_a_rule_that_is_there(service: Service, capsys: pytest.CaptureFixtur
     write(service, HOME)
     ingress.add(service, "tcp", (22, 22), "203.0.113.10/32", None)
     assert service.conf_path.read_text(encoding="utf-8") == HOME
-    err = capsys.readouterr().err
-    assert "22/tcp 203.0.113.10/32 is already in ~/.config/temt/dev-main.toml\n" in err
-    assert "apply" not in err
+    out = capsys.readouterr().out
+    assert "22/tcp 203.0.113.10/32 is already in ~/.config/temt/dev-main.toml\n" in out
+    assert "apply" not in out
 
 
 def test_add_rewrites_the_description(service: Service, capsys: pytest.CaptureFixture[str]) -> None:
     write(service, HOME)
     ingress.add(service, "tcp", (22, 22), "203.0.113.10/32", "office")
     assert conf.load(service).security_group.ingress[0].Description == "office"
-    err = capsys.readouterr().err
-    assert "updated the description of 22/tcp 203.0.113.10/32 in" in err
-    assert "run 'temt apply --svc dev-main'" in err
+    out = capsys.readouterr().out
+    assert "updated the description of 22/tcp 203.0.113.10/32 in" in out
+    assert "run 'temt apply --svc dev-main'" in out
 
 
 def test_add_without_a_cidr_uses_both_egress_addresses(
@@ -179,11 +179,11 @@ def test_add_without_a_cidr_uses_both_egress_addresses(
         Ingress(Protocol="icmp", Cidr="198.51.100.7/32", Description="home"),
         Ingress(Protocol="icmp", Cidr="2001:db8:1:2::/64", Description="home"),
     ]
-    err = capsys.readouterr().err
+    out = capsys.readouterr().out
     assert (
         "egress IPv4 address: 198.51.100.7 (https://checkip.amazonaws.com); using 198.51.100.7/32\n"
-    ) in err
-    assert "using 2001:db8:1:2::/64\n" in err
+    ) in out
+    assert "using 2001:db8:1:2::/64\n" in out
 
 
 def test_an_egress_address_that_is_not_there(
@@ -194,8 +194,8 @@ def test_an_egress_address_that_is_not_there(
     _ = answers(monkeypatch, v4="198.51.100.7", v6="198.51.100.7")
     ingress.add(service, "tcp", (22, 22), None, None)
     assert [one.Cidr for one in conf.load(service).security_group.ingress] == ["198.51.100.7/32"]
-    err = capsys.readouterr().err
-    assert "no IPv6 egress address: https://api6.ipify.org answered 198.51.100.7\n" in err
+    out = capsys.readouterr().out
+    assert "no IPv6 egress address: https://api6.ipify.org answered 198.51.100.7\n" in out
 
 
 @pytest.mark.parametrize(
@@ -217,9 +217,9 @@ def test_no_egress_address_at_all(
     with pytest.raises(TemtError, match="could not find the egress IP address; give the CIDR"):
         ingress.add(service, "tcp", (22, 22), None, None)
     assert service.conf_path.read_text(encoding="utf-8") == ""
-    err = capsys.readouterr().err
-    assert "no IPv4 egress address: " in err
-    assert err.isascii()
+    out = capsys.readouterr().out
+    assert "no IPv4 egress address: " in out
+    assert out.isascii()
 
 
 def test_remove_a_rule(service: Service, capsys: pytest.CaptureFixture[str]) -> None:
@@ -228,9 +228,9 @@ def test_remove_a_rule(service: Service, capsys: pytest.CaptureFixture[str]) -> 
     assert conf.load(service).security_group.ingress == [
         Ingress(Port=(80, 80), Cidr="203.0.113.10/32")
     ]
-    err = capsys.readouterr().err
-    assert "removed 22/tcp 203.0.113.10/32 from ~/.config/temt/dev-main.toml\n" in err
-    assert "run 'temt apply --svc dev-main' to update the security group\n" in err
+    out = capsys.readouterr().out
+    assert "removed 22/tcp 203.0.113.10/32 from ~/.config/temt/dev-main.toml\n" in out
+    assert "run 'temt apply --svc dev-main' to update the security group\n" in out
 
 
 def test_remove_a_rule_that_is_not_there(service: Service) -> None:
@@ -249,7 +249,7 @@ def test_remove_without_a_cidr(
     _ = answers(monkeypatch, v4="203.0.113.10", v6="2001:db8::1")
     ingress.remove(service, "tcp", (22, 22), None)
     assert conf.load(service).security_group.ingress == []
-    assert "no rule 22/tcp 2001:db8::/64 in" in capsys.readouterr().err
+    assert "no rule 22/tcp 2001:db8::/64 in" in capsys.readouterr().out
 
 
 def test_add_needs_the_config_file(service: Service, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,9 +311,9 @@ def test_the_reason_of_a_failed_question(
     write(service, "")
     _ = answers(monkeypatch, v4=failure, v6="2001:db8::1")
     ingress.add(service, "tcp", (22, 22), None, None)
-    err = capsys.readouterr().err
-    assert f"no IPv4 egress address: {reason} (https://checkip.amazonaws.com)\n" in err
-    assert err.isascii()
+    out = capsys.readouterr().out
+    assert f"no IPv4 egress address: {reason} (https://checkip.amazonaws.com)\n" in out
+    assert out.isascii()
 
 
 def test_remove_stops_when_the_file_changed_while_asking(
@@ -354,7 +354,7 @@ def test_an_address_that_cannot_be_a_rule(
     _ = answers(monkeypatch, v4="198.51.100.7", v6=answer)
     ingress.add(service, "tcp", (22, 22), None, None)
     assert [one.Cidr for one in conf.load(service).security_group.ingress] == ["198.51.100.7/32"]
-    err = capsys.readouterr().err
-    assert "no IPv6 egress address: https://api6.ipify.org did not answer an address\n" in err
-    assert err.isascii()
-    assert "\x1b" not in err
+    out = capsys.readouterr().out
+    assert "no IPv6 egress address: https://api6.ipify.org did not answer an address\n" in out
+    assert out.isascii()
+    assert "\x1b" not in out

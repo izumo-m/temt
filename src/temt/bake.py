@@ -212,10 +212,12 @@ def _left(service: Service, one: Instance) -> None:
 
     bake はまだ設定ファイル、テンプレート、記録に何も書いていない。--bake を付けた
     deploy と app remove は記録を書き換えているので、bake の範囲に限って知らせる。
+    続くエラーに添えるので、標準エラー出力に書く。
     """
     msg.tell(
         f"bake has not changed {printable(tilde(service.conf_path))}, the launch template "
-        f"or the deploy records; {one.id} is left {instances.STOPPED}\n"
+        f"or the deploy records; {one.id} is left {instances.STOPPED}\n",
+        side=True,
     )
 
 
@@ -266,7 +268,7 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
         why = _wait(ec2, image_id)
     except (ClientError, BotoCoreError):
         _left(service, one)
-        msg.tell(f"the AMI {image_id} is not {AVAILABLE} yet\n")
+        msg.tell(f"the AMI {image_id} is not {AVAILABLE} yet\n", side=True)
         raise
     if why is not None:
         _left(service, one)

@@ -306,18 +306,19 @@ def test_it_bakes_a_running_instance(
     assert answer.reads == 1
     assert image_id(configured) == IMAGE_NAME
     assert not known.exists()
-    err = capsys.readouterr().err
-    assert PROMPT in err
-    assert (
+    captured = capsys.readouterr()
+    # 問いかけだけを標準エラー出力に書く
+    assert captured.err == PROMPT
+    listing = (
         f"bake {NAME}:\n"
         f"  stop {INSTANCE}\n"
         f"  make an AMI of {INSTANCE}\n"
         "  point ImageId in ~/.config/temt/dev-main.toml and the launch template at the AMI "
         "when it is available\n"
         f"  terminate {INSTANCE}\n"
-    ) in err
-    # 偽の端末は答えを書き戻さないので、次の行がプロンプトに続く
-    lines = told(err.replace(PROMPT, ""))
+    )
+    assert captured.out.startswith(listing)
+    lines = told(captured.out.removeprefix(listing))
     assert f"creating the AMI {NEW} ({IMAGE_NAME}) from {INSTANCE}" in lines
     assert (
         f"wrote launch-template.ImageId = {IMAGE_NAME} in {configured.conf_path} (was {OLD})"
@@ -348,7 +349,7 @@ def test_it_bakes_a_stopped_instance_without_stopping_it(
 
     aws_stubs.done()
     assert image_id(configured) == IMAGE_NAME
-    assert "  stop " not in capsys.readouterr().err
+    assert "  stop " not in capsys.readouterr().out
 
 
 def test_it_keeps_the_rest_of_the_config_file(
@@ -725,7 +726,8 @@ def test_it_changes_nothing_when_the_image_fails(
     # インスタンスを終了するものは積んでいないので、終了しようとすれば Stubber が失敗する
     aws_stubs.done()
     assert image_id(configured) == OLD
-    assert capsys.readouterr().err.endswith(
+    # 続くエラーに添えるので、標準エラー出力に出す
+    assert capsys.readouterr().err == (
         "bake has not changed ~/.config/temt/dev-main.toml, the launch template "
         f"or the deploy records; {INSTANCE} is left stopped\n"
     )
@@ -797,7 +799,7 @@ def test_an_aws_error_while_waiting_tells_what_is_left(
 
     aws_stubs.done()
     assert image_id(configured) == OLD
-    assert capsys.readouterr().err.endswith(
+    assert capsys.readouterr().err == (
         "bake has not changed ~/.config/temt/dev-main.toml, the launch template "
         f"or the deploy records; {INSTANCE} is left stopped\n"
         f"the AMI {NEW} is not available yet\n"
@@ -1088,7 +1090,7 @@ def test_it_bakes_with_an_image_name_in_the_config_file(
     assert image_id(configured) == IMAGE_NAME
     assert (
         f"wrote launch-template.ImageId = {IMAGE_NAME} in {configured.conf_path} (was {OLD_NAME})"
-        in told(capsys.readouterr().err)
+        in told(capsys.readouterr().out)
     )
 
 
@@ -1182,7 +1184,7 @@ def test_it_records_the_apps_of_the_instance_as_baked(
     bake.run(configured, yes=True)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
+    lines = told(capsys.readouterr().out)
     # 焼いたと知らせるのは、このインスタンスに入れたものだけ
     assert f"recorded jupyter as baked in {NEW}" in lines
 
@@ -1207,10 +1209,9 @@ def test_it_goes_on_when_the_records_cannot_be_read(
     bake.run(configured, yes=True)
 
     aws_stubs.done()
-    lines = told(capsys.readouterr().err)
-    assert any(
-        line.startswith("temt: warning: cannot read the deploy records: ")
-        and line.endswith("; app list may show the apps as lost")
-        for line in lines
-    )
-    assert lines[-1] == f"baked {IMAGE_NAME} ({NEW}); the next start boots from it"
+    captured = capsys.readouterr()
+    warnings = captured.err.splitlines()
+    assert len(warnings) == 1
+    assert warnings[0].startswith("temt: warning: cannot read the deploy records: ")
+    assert warnings[0].endswith("; app list may show the apps as lost")
+    assert told(captured.out)[-1] == f"baked {IMAGE_NAME} ({NEW}); the next start boots from it"

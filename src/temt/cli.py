@@ -949,6 +949,9 @@ def run(request: Request) -> int:
     """
     # どのプロファイルを使うかは、--profile と設定ファイルで決める
     conf.OPTION_PROFILE = request.profile
+    if request.command == SSH_PROXY:
+        # ProxyCommand の標準出力は ssh の通信路なので、何も書かない
+        msg.use_stderr()
     if _is_local(request.command, request.service):
         # AWS を呼ばないので、boto3 が無くても動くよう、読み込む前に済ませる
         _run_local(request)
@@ -1014,6 +1017,6 @@ def main(argv: list[str] | None = None) -> int:
         return TemtError.exit_code
     except KeyboardInterrupt:
         # Ctrl-C は端末に ^C だけを出すので、行を閉じてから知らせる
-        msg.tell("\n")
+        msg.tell("\n", side=True)
         msg.error("interrupted")
         return TemtError.exit_code

@@ -564,9 +564,9 @@ def test_the_association_is_created(
         association_started(stub)
         associate(ssm, service, values([2222]))
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: created\n" in err
-    assert f"sshd ports 2222 {NOTE}; run 'temt bake --svc dev-main' to keep them in the AMI" in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD}: created\n" in out
+    assert f"sshd ports 2222 {NOTE}; run 'temt bake --svc dev-main' to keep them in the AMI" in out
 
 
 def test_the_association_with_the_default_port_is_created_without_the_note(
@@ -579,9 +579,9 @@ def test_the_association_with_the_default_port_is_created_without_the_note(
         association_started(stub)
         associate(ssm, service, values())
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: created\n" in err
-    assert NOTE not in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD}: created\n" in out
+    assert NOTE not in out
 
 
 def test_the_association_that_matches_is_left_alone(
@@ -592,7 +592,7 @@ def test_the_association_that_matches_is_left_alone(
         association_in_place(stub, [2222, 443])
         associate(ssm, service, values([2222, 443]))
         stub.assert_no_pending_responses()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.parametrize(
@@ -616,9 +616,9 @@ def test_the_association_that_differs_is_updated(
         association_started(stub)
         associate(ssm, service, values())
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: updated\n" in err
-    assert f"sshd ports 22 {NOTE}" in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD}: updated\n" in out
+    assert f"sshd ports 22 {NOTE}" in out
 
 
 def test_new_ports_update_the_association(ssm: SSMClient, service: Service) -> None:
@@ -658,9 +658,9 @@ def test_the_tag_of_the_association_is_put_right(
         stub.add_response("add_tags_to_resource", {}, {**THE_TAGS, "Tags": ASSOCIATION_MARK})
         associate(ssm, service, values())
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: updated\n" in err
-    assert NOTE not in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD}: updated\n" in out
+    assert NOTE not in out
 
 
 def test_the_content_and_the_tag_of_the_association_are_both_put_right(
@@ -692,7 +692,7 @@ def test_the_first_of_two_associations_with_the_name_is_put_right(
         association_started(stub)
         associate(ssm, service, values([2222]))
         stub.assert_no_pending_responses()
-    assert f"association {SSHD}: updated\n" in capsys.readouterr().err
+    assert f"association {SSHD}: updated\n" in capsys.readouterr().out
 
 
 def test_a_refused_run_is_a_warning(
@@ -709,8 +709,8 @@ def test_a_refused_run_is_a_warning(
         )
         associate(ssm, service, values())
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD}: created\n" in err
+    out, err = capsys.readouterr()
+    assert f"association {SSHD}: created\n" in out
     assert f"temt: warning: association {SSHD}: cannot ask to run it now: " in err
     assert "it runs when an instance starts next time" in err
 
@@ -789,10 +789,10 @@ def test_every_association_with_the_name_is_deleted(
         )
         resources.delete_associations(ssm, service)
         stub.assert_no_pending_responses()
-    err = capsys.readouterr().err
-    assert f"association {SSHD} ({ASSOCIATION}): deleted\n" in err
+    out = capsys.readouterr().out
+    assert f"association {SSHD} ({ASSOCIATION}): deleted\n" in out
     # 読んでから消すまでに消えたものは、既に無かったものとして知らせる
-    assert f"association {SSHD} ({OTHER}): absent\n" in err
+    assert f"association {SSHD} ({OTHER}): absent\n" in out
 
 
 def test_no_association_to_delete(
@@ -802,7 +802,7 @@ def test_no_association_to_delete(
         listed_associations(stub)
         resources.delete_associations(ssm, service)
         stub.assert_no_pending_responses()
-    assert f"association {SSHD}: absent\n" in capsys.readouterr().err
+    assert f"association {SSHD}: absent\n" in capsys.readouterr().out
 
 
 def statuses(stub: Stubber, *found: dict[str, Any]) -> None:

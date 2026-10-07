@@ -10,7 +10,7 @@ SHA256）。EC2 の KeyFingerprint は、鍵の種類と登録のしかたで計
 show に並べるだけにする。キーペアが使われているかは、そのアカウントとリージョンにある
 すべての起動テンプレートの、すべてのバージョンの KeyName で決める。
 
-list の表は table が標準出力に、他の出力は status と同じく標準エラー出力に書く。
+list の表は table が、他の出力は status と同じく msg が標準出力に書く。
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
 """
