@@ -875,7 +875,7 @@ Session Manager 経由に戻すには、`TEMT_LOGIN` を消すか `ssm` にす�
 `KeyName` と同じ鍵のときだけである。`KeyName` を新しい名前にすると、`IdentityFile` の
 鍵がその名前で登録され（鍵が無ければ作られる）、`terminate` して次に `start` したときから
 使われる。`IdentityFile` を書いていなければ、鍵の場所も `~/.ssh/temt/keys/<新しい名前>` に
-変わるので、新しい鍵が作られる。`apply` が EC2 のキーペア
+変わるので、ふつうは新しい鍵が作られる。`apply` が EC2 のキーペア
 そのものや `IdentityFile` を書き換えることはない。初回の `apply` なら、設定ファイルは
 まだ作られていないので、`IdentityFile` か `KeyName` を書いたファイルを用意してから
 やり直す（[conf.md](conf.md)）。
