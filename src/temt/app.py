@@ -7,8 +7,9 @@ temt がアプリの記録に使い、値は RECORD_FIELDS の項目を持つ JS
 記録は、最後に入れたもの（version、deployed、指定したオプションの options と、まだ
 焼いていなければ入れたインスタンスの instance）と、AMI に焼いたもの（baked_version、
 baked_image、baked_options）を別に持つ。deploy が前者を書き、bake が mark_baked で後者を
-書く。app list、status、terminate は、これと起動テンプレートの AMI、いまあるインスタンス
-から、焼いたか（state）を決める。
+書く。AMI に焼いたアプリを焼かずに app remove で外すと、mark_removed で外した
+インスタンスを removed に書いて残し、bake が記録を消す。app list、status、terminate は、
+これと起動テンプレートの AMI、いまあるインスタンスから、焼いたか（state）を決める。
 
 どのコマンドも、apply 済みであること（起動テンプレートがあること）を先に確かめる。
 表示するだけか、値 1 つを書き換えるだけなので、ロックは取らない。
@@ -50,8 +51,9 @@ TYPE_MISMATCH = "HierarchyTypeMismatchException"
 STRING = "String"
 SECURE_STRING = "SecureString"
 # deploy の記録の項目。表示し、書く順に並べる。instance は、最後に入れた版をまだ焼いて
-# いないときだけ持つ。OPTION_FIELDS はオプションの名前から値への対応（JSON のオブジェクト）
-# で、ほかは文字列である
+# いないときだけ持つ。removed は、AMI に焼いたアプリを焼かずに外したときだけ、外した
+# インスタンスの ID を持つ。OPTION_FIELDS はオプションの名前から値への対応（JSON の
+# オブジェクト）で、ほかは文字列である
 OPTIONS = "options"
 BAKED_OPTIONS = "baked_options"
 OPTION_FIELDS = (OPTIONS, BAKED_OPTIONS)
@@ -61,6 +63,7 @@ RECORD_FIELDS = (
     "user",
     "deployed",
     "instance",
+    "removed",
     OPTIONS,
     "baked_version",
     "baked_image",
@@ -69,10 +72,12 @@ RECORD_FIELDS = (
 # SSM パラメータ（標準）の値の大きさの上限。deploy は記録がこれに収まるかを先に確かめる
 RECORD_MAX = 4096
 # 焼いたかどうか。最後に入れた版が、起動テンプレートの AMI にある、いまある
-# インスタンスにだけある、どこにも無い
+# インスタンスにだけある、どこにも無い。REMOVED は、いまあるインスタンスからは外したが、
+# 起動テンプレートの AMI には残っている
 BAKED = "baked"
 UNBAKED = "unbaked"
 LOST = "lost"
+REMOVED = "removed"
 
 COLUMNS = table.Columns(
     defaults=("ID", "NAME", "VERSION", "DEPLOYED", "STATE", "BAKED", "LOCAL"), extras=("PATH",)
@@ -250,13 +255,18 @@ def find_place(ec2: EC2Client, service: Service) -> Place:
 
 
 def state(record: Mapping[str, str], where: Place) -> str:
-    """最後に入れた版を焼いたかどうか。BAKED、UNBAKED、LOST、分からなければ空。
+    """最後に入れた版を焼いたかどうか。BAKED、UNBAKED、LOST、REMOVED、分からなければ空。
 
-    instance があれば、まだ焼いていない。そのインスタンスがあれば UNBAKED、無ければ
-    LOST。無ければ焼いてある。焼いた AMI がいまの起動テンプレートの AMI なら BAKED、
-    apply で別の AMI に替えたなどで違えば LOST。どちらも無い記録（焼いたかどうかを
-    記録する前の deploy が書いたもの）は分からない。
+    removed のインスタンスがあり、焼いた AMI がいまの起動テンプレートの AMI なら、
+    そこから外したが、まだ焼いていないので REMOVED。インスタンスが無ければ、外したことは
+    失われ、AMI に焼いた版が次のインスタンスに戻るので、焼いた記録として扱う。
+    instance があれば、まだ焼いていない。そのインスタンスがあれば
+    UNBAKED、無ければ LOST。無ければ焼いてある。焼いた AMI がいまの起動テンプレートの
+    AMI なら BAKED、apply で別の AMI に替えたなどで違えば LOST。どちらも無い記録
+    （焼いたかどうかを記録する前の deploy が書いたもの）は分からない。
     """
+    if record.get("removed") in where.alive and record.get("baked_image") == where.image_id:
+        return REMOVED
     instance = record.get("instance")
     if instance:
         return UNBAKED if instance in where.alive else LOST
@@ -277,20 +287,31 @@ def mark_baked(ssm: SSMClient, service: Service, one: Instance, image_id: str) -
 
     one に入れてまだ焼いていない記録は、その版とオプションを焼いた版とオプションにして
     instance を消す。one の起動元の AMI に焼いてあった記録は、焼いた AMI だけを image_id
-    にする。one にはその版が引き継がれているからである。読めなかったオプションは、
-    書かれていたままの値で書く。書けない記録は警告して飛ばす。
+    にする。one にはその版が引き継がれているからである。外したことが失われた removed も
+    消す。one から外した記録は、image_id にアプリが無いので消す。読めなかったオプションは、
+    書かれていたままの値で書く。書けない記録と消せない記録は警告して飛ばす。
     """
     marked: list[str] = []
+    dropped: list[str] = []
     found = sorted(with_key(ssm, service, DEPLOY_KEY), key=lambda item: item[0])
     for app_id, parameter in found:
         name = service.app_parameter(app_id, DEPLOY_KEY)
         record = parse_record(name, str(parameter.get("Value") or ""))
         fields = record.fields
+        if fields.get("removed") == one.id:
+            try:
+                _ = delete(ssm, name)
+            except (ClientError, BotoCoreError) as e:
+                msg.warn(f"cannot delete {name}: {table.aws_error(e)}")
+                continue
+            dropped.append(app_id)
+            continue
         fresh = fields.get("instance") == one.id
         if fresh:
             mark_fresh(record, image_id)
         elif one.image_id and fields.get("baked_image") == one.image_id:
             fields["baked_image"] = image_id
+            _ = fields.pop("removed", None)
         else:
             continue
         if fresh and record.options is None:
@@ -308,6 +329,8 @@ def mark_baked(ssm: SSMClient, service: Service, one: Instance, image_id: str) -
             marked.append(app_id)
     if marked:
         msg.info(f"recorded {', '.join(marked)} as baked in {image_id}")
+    if dropped:
+        msg.info(f"recorded {', '.join(dropped)} as removed from {image_id}")
 
 
 def mark_fresh(record: Record, image_id: str) -> None:
@@ -328,6 +351,29 @@ def mark_fresh(record: Record, image_id: str) -> None:
             record.unread[BAKED_OPTIONS] = record.unread[OPTIONS]
     else:
         record.baked_options = dict(record.options)
+
+
+def mark_removed(record: Record, instance_id: str) -> None:
+    """AMI に焼いたアプリを、焼かずにインスタンス instance_id から外したものとして書き換える。
+
+    外したインスタンスを removed に書き、instance を消す。最後に入れた版とオプションは、
+    焼いた版とオプションにする。bake の前にインスタンスが終了すると、外したことは
+    失われ、焼いた版が次のインスタンスに戻るからである。焼いた版を入れた時刻は記録に
+    無いので、deployed は消す。
+    """
+    fields = record.fields
+    fields["version"] = fields.get("baked_version", "")
+    _ = fields.pop("instance", None)
+    _ = fields.pop("deployed", None)
+    fields["removed"] = instance_id
+    # 読めない baked_options は、書かれていたままの値を写す
+    _ = record.unread.pop(OPTIONS, None)
+    if record.baked_options is None:
+        record.options = None
+        if BAKED_OPTIONS in record.unread:
+            record.unread[OPTIONS] = record.unread[BAKED_OPTIONS]
+    else:
+        record.options = dict(record.baked_options)
 
 
 def list_apps(service: Service, spec: str | None) -> None:

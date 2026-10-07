@@ -46,6 +46,8 @@ SSHD_NOT_RUN = "(not run)"
 # 焼いていないアプリの行の、すべて焼いてあるときと、記録が 1 つも無いときの表示
 ALL_BAKED = "all baked"
 NO_APPS = "none"
+# 焼かずに外したアプリに添える説明
+REMOVED_NOTE = " (still in the AMI; bake to drop it)"
 # アプリの状態の行のラベルと、1 つも無いときの表示
 APP_STATUS = "app status"
 NO_APP_STATUS = "none"
@@ -133,15 +135,16 @@ def _show_instances(ssm: SSMClient, service: Service, found: list[Instance]) -> 
 
 
 def apps_line(found: list[tuple[str, dict[str, str]]], where: app.Place) -> str:
-    """焼いていないアプリの行の値。unbaked と lost のアプリを、その順に挙げる。
+    """焼いていないアプリの行の値。unbaked、lost、removed のアプリを、その順に挙げる。
 
-    どちらも無ければ、焼いたアプリがあれば ALL_BAKED、無ければ NO_APPS。焼いたかどうか
-    分からない記録は数えない。
+    removed には、AMI に残っていることを添える。どれも無ければ、焼いたアプリがあれば
+    ALL_BAKED、無ければ NO_APPS。焼いたかどうか分からない記録は数えない。
     """
     states = [(app_id, app.state(record, where)) for app_id, record in found]
     groups = [
         f"{label} {', '.join(app_id for app_id, one in states if one == label)}"
-        for label in (app.UNBAKED, app.LOST)
+        + (REMOVED_NOTE if label == app.REMOVED else "")
+        for label in (app.UNBAKED, app.LOST, app.REMOVED)
         if any(one == label for _, one in states)
     ]
     if groups:

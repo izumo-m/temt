@@ -409,9 +409,11 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
   表す。`(not run)` はまだ実行が始まっていない。`none` は関連付けそのものが
   AWS に無く、`apply` が要る。ほかに AWS の状態がそのまま小文字で
   出ることがある。
-- `apps` は、入れてまだ焼いていないアプリ。`unbaked` はインスタンスにだけあり、
-  焼く前にインスタンスが終了すると消える。`lost` は、焼く前にインスタンスが終了して
-  消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` する。どちらも
+- `apps` は、入れたり外したりして、まだ焼いていないアプリ。`unbaked` はインスタンスに
+  だけあり、焼く前にインスタンスが終了すると消える。`lost` は、焼く前にインスタンスが
+  終了して消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` する。
+  `removed` は、`app remove` でインスタンスからは外したが、AMI には残っているもので、
+  焼けば消える（`removed swapfile (still in the AMI; bake to drop it)`）。どれも
   無ければ `all baked`、焼いたアプリも無ければ（焼いたかどうかを記録していない
   記録は数えない）`none`。決め方は `app list` の `STATE`
   （[アプリを入れる](#アプリを入れる)）と同じである。起動テンプレートが無ければ
@@ -528,7 +530,9 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 残したものは消える。次に `start` すると、起動テンプレートの AMI から新しい
 インスタンスが立ち上がる。残したいものがあれば、終了する代わりに `bake` で AMI に
 する（[AMI にする](#ami-にする)）。入れてまだ焼いていないアプリがあれば、終了すると
-消えることを確認の前に警告する（`unbaked apps will be lost: timezone-tokyo`）。
+消えることを確認の前に警告する（`unbaked apps will be lost: timezone-tokyo`）。外して
+まだ焼いていないアプリがあれば、次のインスタンスに AMI から戻ることを警告する
+（`apps removed without baking come back from the AMI: swapfile`）。
 
 `--yes` を付けると確認しない。標準入力が端末でないとき（スクリプトの中など）は、
 確認できないので `--yes` が要る。
@@ -991,10 +995,10 @@ Session Manager 経由に戻すには、`TEMT_LOGIN` を消すか `ssm` にす�
   `unbaked` は、いまのインスタンスにだけあり、焼く前にインスタンスが終了すると
   消える（`idle-shutdown` の自動終了も含む）。`lost` は、焼く前にインスタンスが
   終了して消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` して
-  焼く。`-` は入れていないか、焼いたかどうかを記録していない。同じ版を入れ直しても、
-  焼くまでは `unbaked` になる。
-- `app remove` で外したアプリは、焼くまで AMI に残るが、記録を消すので `app list`
-  には `BAKED` も出ない。外したら続けて焼く（`app remove --bake`）。
+  焼く。`removed` は、いまのインスタンスからは外したが、AMI には残っている。焼けば
+  記録ごと消える。焼く前にインスタンスが終了すると、次のインスタンスには AMI から
+  戻るので、`baked` に戻る。`-` は入れていないか、焼いたかどうかを記録していない。
+  同じ版を入れ直しても、焼くまでは `unbaked` になる。
 
 `--svc` を付けない `temt app list` は、アプリ ID で指せるアプリだけを表示する。
 AWS には問い合わせないので、`--profile` と `--region` は付けられない。`LOCAL` は
@@ -1030,7 +1034,7 @@ temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明�
 与えた値は記録に残り、次の `deploy` は、与えなかったオプションにその値を引き継ぐ。
 版を上げるときも、値を与え直さなくてよい。`<名前>=` と値を空にすれば、その
 オプションを既定に戻す。`--reset` を付ければ、前の値を何も引き継がず、与えたもの
-だけを使う。`app remove` は記録を消すので、外したあとの `deploy` は既定から始まる。
+だけを使う。`app remove` で外したインスタンスに入れ直すときは、既定から始まる。
 
     temt-<svc> deploy hello              # 前の port=8080 のまま入れ直す
     temt-<svc> deploy hello port=        # port を既定に戻す
@@ -1060,9 +1064,10 @@ AMI にも残るので、オプションには秘密の値を渡さない。
       motd  off   show the URL in the login message: on or off
     keys: none
 
-`app remove <アプリID>` は、`uninstall` を実行してディレクトリを消し、記録と状態
+`app remove <アプリID>` は、`uninstall` を実行してディレクトリを消し、状態
 （キー `status`）を消す。
-焼くまで AMI には残る。アプリの値は残るので、要らなければ `app unset` で消す。
+焼くまで AMI には残る。AMI に焼いてあったアプリなら、そのあいだ記録が残り、
+`app list` の `STATE` は `removed` になる。焼くと記録も消える。アプリの値は残るので、要らなければ `app unset` で消す。
 アプリのために書いた権限も残るので、要らなければ設定ファイルから消して
 `apply` する。`uninstall` は、`install` を実行したのと同じユーザーで実行される。
 `--user` で変えられる。

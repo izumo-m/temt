@@ -509,6 +509,56 @@ def a_record(app_id: str, instance: str) -> dict[str, Any]:
     return {"Name": f"/{NAME}/{app_id}/deploy", "Type": "String", "Value": json.dumps(value)}
 
 
+def a_removed_record(app_id: str, instance: str, image: str) -> dict[str, Any]:
+    """AMI image に焼いてあり、instance から焼かずに外した、deploy の記録のパラメータ。"""
+    value = {"name": app_id, "version": "1", "removed": instance, "baked_image": image}
+    return {"Name": f"/{NAME}/{app_id}/deploy", "Type": "String", "Value": json.dumps(value)}
+
+
+TEMPLATE_IMAGE = "ami-0123456789abcdef0"
+
+
+def test_it_warns_about_the_apps_removed_without_baking(
+    aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """終了するインスタンスから焼かずに外したアプリが、テンプレートの AMI にあれば警告する。"""
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
+    )
+    read_records(
+        aws_stubs,
+        a_record("mise", INSTANCE),
+        a_removed_record("swapfile", INSTANCE, TEMPLATE_IMAGE),
+        # apply で別の AMI に替えたので、戻らない
+        a_removed_record("moved", INSTANCE, "ami-0fedcba9876543210"),
+        # ほかのインスタンスから外したもの
+        a_removed_record("other", OTHER, TEMPLATE_IMAGE),
+    )
+    aws_stubs.ec2.add_response(
+        "describe_launch_template_versions",
+        {
+            "LaunchTemplateVersions": [
+                {
+                    "VersionNumber": 1,
+                    "DefaultVersion": True,
+                    "LaunchTemplateData": {"ImageId": TEMPLATE_IMAGE},
+                }
+            ]
+        },
+        {"LaunchTemplateName": f"{NAME}-template"},
+    )
+    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
+
+    terminate.run(configured, is_async=True, yes=False)
+
+    aws_stubs.done()
+    assert capsys.readouterr().err.startswith(
+        "temt: warning: unbaked apps will be lost: mise\n"
+        "temt: warning: apps removed without baking come back from the AMI: swapfile\n"
+        f"{PROMPT}"
+    )
+
+
 def test_it_warns_about_the_apps_that_are_not_baked(
     aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
 ) -> None:

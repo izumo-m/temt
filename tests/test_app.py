@@ -368,6 +368,7 @@ def test_show_prints_the_record_and_the_keys_but_no_value(
         "  user:          root",
         "  deployed:      2026-09-26 12:00:00",
         "  instance:      -",
+        "  removed:       -",
         "  options:       -",
         "  baked_version: -",
         "  baked_image:   -",
@@ -416,6 +417,7 @@ def test_show_tells_that_there_is_no_key(
         "  user:          -",
         "  deployed:      -",
         "  instance:      -",
+        "  removed:       -",
         "  options:       -",
         "  baked_version: -",
         "  baked_image:   -",
@@ -587,6 +589,7 @@ def test_show_reads_every_page_and_hides_control_characters(
         "  user:          root",
         "  deployed:      2026-09-26 12:00:00",
         "  instance:      -",
+        "  removed:       -",
         "  options:       -",
         "  baked_version: -",
         "  baked_image:   -",
@@ -616,6 +619,7 @@ def test_show_warns_about_a_record_it_cannot_read(
         "  user:          -",
         "  deployed:      -",
         "  instance:      -",
+        "  removed:       -",
         "  options:       -",
         "  baked_version: -",
         "  baked_image:   -",
@@ -757,6 +761,29 @@ def a_place(*alive: str) -> app.Place:
             id="another image",
         ),
         pytest.param({}, a_place(INSTANCE), "", "", id="unknown"),
+        pytest.param(
+            {"removed": INSTANCE, "baked_version": "1", "baked_image": IMAGE},
+            a_place(INSTANCE),
+            app.REMOVED,
+            "1",
+            id="removed",
+        ),
+        # apply で別の AMI に替えたので、外したアプリは次のインスタンスに入らない
+        pytest.param(
+            {"removed": INSTANCE, "baked_version": "1", "baked_image": OTHER_IMAGE},
+            a_place(INSTANCE),
+            app.LOST,
+            "",
+            id="removed from another image",
+        ),
+        # 外したインスタンスが無ければ、AMI の版が次のインスタンスに戻っている
+        pytest.param(
+            {"removed": GONE, "baked_version": "1", "baked_image": IMAGE},
+            a_place(INSTANCE),
+            app.BAKED,
+            "1",
+            id="removal lost",
+        ),
         # 版だけあって AMI の無い記録は、どの AMI にも入っていない
         pytest.param({"baked_version": "1"}, a_place(), "", "", id="no image"),
     ],
@@ -848,6 +875,110 @@ def test_mark_baked_records_what_the_instance_has(
     aws_stubs.done()
     # 焼いたと知らせるのは、このインスタンスに入れたものだけ
     assert told(capsys.readouterr().err) == [f"recorded fresh as baked in {NEW_IMAGE}"]
+
+
+def test_mark_baked_deletes_the_records_of_apps_removed_from_the_instance(
+    aws_stubs: Stubs, ssm: SSMClient, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """このインスタンスから外した記録は消す。外したことが失われた記録は、removed を消す。"""
+    aws_stubs.ssm.add_response(
+        "get_parameters_by_path",
+        {
+            "Parameters": [
+                a_parameter(
+                    f"{PATH}/gone/deploy",
+                    a_full_record(removed=INSTANCE, baked_version="1", baked_image=IMAGE),
+                ),
+                # 外したインスタンスが終了し、起動元の AMI からこのインスタンスに戻っている
+                a_parameter(
+                    f"{PATH}/back/deploy",
+                    a_full_record(removed=GONE, baked_version="1", baked_image=IMAGE),
+                ),
+                # 起動元でない AMI に焼いた記録は触らない
+                a_parameter(
+                    f"{PATH}/apart/deploy",
+                    a_full_record(removed=GONE, baked_version="1", baked_image=OTHER_IMAGE),
+                ),
+            ]
+        },
+        {"Path": PATH, "Recursive": True},
+    )
+    written(
+        aws_stubs,
+        "back",
+        {**BASE, "version": "1", "baked_version": "1", "baked_image": NEW_IMAGE},
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": f"{PATH}/gone/deploy"})
+
+    app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().err) == [f"recorded gone as removed from {NEW_IMAGE}"]
+
+
+def test_mark_baked_goes_on_when_a_removed_record_cannot_be_deleted(
+    aws_stubs: Stubs, ssm: SSMClient, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """消せない記録は警告して飛ばす。"""
+    aws_stubs.ssm.add_response(
+        "get_parameters_by_path",
+        {
+            "Parameters": [
+                a_parameter(
+                    f"{PATH}/gone/deploy",
+                    a_full_record(removed=INSTANCE, baked_version="1", baked_image=IMAGE),
+                )
+            ]
+        },
+        {"Path": PATH, "Recursive": True},
+    )
+    aws_stubs.ssm.add_client_error(
+        "delete_parameter", service_error_code="AccessDeniedException", http_status_code=400
+    )
+
+    app.mark_baked(ssm, configured, BAKED_FROM, NEW_IMAGE)
+
+    aws_stubs.done()
+    lines = told(capsys.readouterr().err)
+    assert len(lines) == 1
+    assert lines[0].startswith(f"temt: warning: cannot delete {PATH}/gone/deploy: ")
+
+
+def test_mark_removed_turns_the_record_into_the_baked_version() -> None:
+    """外したインスタンスを書き、最後に入れた版とオプションを焼いたものにする。"""
+    record = app.Record(
+        fields={**BASE, "version": "3", "instance": INSTANCE, "baked_version": "2"},
+        options={"limit": "4h"},
+        baked_options={"limit": "2h"},
+    )
+
+    app.mark_removed(record, INSTANCE)
+
+    # 焼いた版を入れた時刻は分からないので、deployed は消す
+    assert record.fields == {
+        "name": "J",
+        "version": "2",
+        "user": "root",
+        "baked_version": "2",
+        "removed": INSTANCE,
+    }
+    assert record.options == {"limit": "2h"}
+    assert record.baked_options == {"limit": "2h"}
+
+
+def test_mark_removed_keeps_baked_options_it_cannot_read() -> None:
+    """読めない baked_options は、書かれていたままの値を options にも写す。"""
+    record = app.Record(
+        fields=dict(BASE),
+        options={"limit": "4h"},
+        baked_options=None,
+        unread={app.BAKED_OPTIONS: ["x"]},
+    )
+
+    app.mark_removed(record, INSTANCE)
+
+    assert record.options is None
+    assert record.unread == {app.OPTIONS: ["x"], app.BAKED_OPTIONS: ["x"]}
 
 
 def test_mark_baked_keeps_the_older_images_without_a_source_image(
@@ -986,6 +1117,7 @@ def test_show_lists_the_options_and_the_declared_ones(
         "  user:          root",
         "  deployed:      2026-09-26 12:00:00",
         f"  instance:      {INSTANCE}",
+        "  removed:       -",
         "  options:       port=9999 token='こんにちは 世界'",
         "  baked_version: 1.2",
         f"  baked_image:   {IMAGE}",

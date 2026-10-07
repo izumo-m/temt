@@ -20,6 +20,7 @@ object with these fields:
 | `user` | `deploy` | The user that ran `install` |
 | `deployed` | `deploy` | When the install finished, in UTC as `2026-09-20T03:00:00Z` |
 | `instance` | `deploy` | ID of the instance it was installed on. `bake` removes it, so it is present only while the version installed last is not baked yet |
+| `removed` | `app remove` | ID of the instance the app was removed from without baking, while the app is still in the template's AMI ([`app remove`](#app-remove)) |
 | `options` | `deploy` | The options used by the last install that came from the command line or the previous record: a JSON object from option name to value. Values filled from the default are not written; with none, the field is omitted |
 | `baked_version` | `bake` | The version baked into the AMI |
 | `baked_image` | `bake` | ID of the newest AMI that has that version. Re-pointed on every rebake |
@@ -41,8 +42,15 @@ value as parsed from JSON is written back unchanged.
 `deploy` carries over `baked_version`, `baked_image`, and `baked_options` from the
 previous record, because the AMI keeps the previous version until the next bake. It
 writes `instance` even when reinstalling the same version, because `install` or the app's
-files may have changed. `app remove` deletes the record, so an app that is still in the
-AMI because it was not baked away cannot be seen from the records.
+files may have changed. It does not carry over `removed`.
+
+`app remove` keeps the record only while the app is still in the template's AMI, marked
+with `removed`, so that `status` and `app list` can show that baking is needed to drop
+it. Otherwise it deletes the record. While the instance in `removed` exists and the
+template still points at `baked_image`, the app is `removed`. If that instance
+terminates before a bake, the removal is lost: the next
+instance from the AMI has the baked version again, so the record counts as baked, and
+the next rewrite (`bake` or `deploy`) drops `removed`.
 
 The key `status` is the app's current state, written by the app from the instance and
 shown by `status` ([instance.md](instance.md#status),
@@ -88,6 +96,7 @@ as absent.
 
 | `STATE` | Condition | Meaning |
 | --- | --- | --- |
+| `removed` | `removed` is set, that instance exists, and `baked_image` is the template's AMI | Removed from that instance without baking; still in the template's AMI. Checked before the rows below; if `apply` switched the AMI, the rows below give `lost` |
 | `unbaked` | `instance` is set and that instance exists | The version installed last exists only on that instance |
 | `lost` | `instance` is set and that instance does not exist | The instance terminated before baking; the version installed last is gone |
 | `baked` | No `instance`, and `baked_image` is the template's AMI | The version installed last is in the AMI |
@@ -308,8 +317,9 @@ The value used is decided per declared option in this order:
 
 1. `<name>=<value>` on the command line (source `given`).
 2. The value in the previous record's `options` (`kept`). With `--reset`, nothing is
-   carried over from the previous record. `<name>=` (empty value) stops that name from
-   being carried over.
+   carried over from the previous record, nor when its `removed` is the instance being
+   deployed to (the app was removed from it). `<name>=` (empty value) stops that name
+   from being carried over.
 3. The declaration's `default` (`default`). An option without a default that still has
    no value here makes `deploy` exit. `<name>=` for an option without a default makes
    step 1 exit.
@@ -320,7 +330,7 @@ Depending on the previous record:
 
 | Previous record | Behavior |
 | --- | --- |
-| None (first `deploy`, or after `app remove` or `destroy`) | Nothing is carried over |
+| None (first `deploy`, or after `app remove` or `destroy`), or `removed` is this instance | Nothing is carried over |
 | Readable from SSM, but the record is unreadable or its `options` is malformed | Exit without changing anything, telling the user to give the options again with `--reset`. If the app declares no options, nothing would be carried over, so it does not stop; a malformed `options` is discarded with a warning |
 | Has a name the app does not declare | Warn, drop it, and continue. It disappears from the record too |
 | A carried-over value does not match `pattern` | Exit without changing anything, telling the user to give `<name>=<value>`, or `<name>=` if there is a default |
@@ -382,11 +392,20 @@ removed from the config file and `apply`ed by the user after removing the app.
 2. Run `bash /opt/temt/apps/<app ID>/uninstall` as that user with `/` as the current
    directory, and on success delete the directory as root. On failure, leave the record
    and exit. Stopping with Ctrl-C may leave `uninstall` running on the instance.
-3. Delete the status `/<name>/<app ID>/status`, then the record
-   `/<name>/<app ID>/deploy`. The status is deleted because otherwise `status` keeps
-   showing the old state of the removed app. The record goes last so that, if anything
-   fails partway, the remaining record lets a retry continue from where it stopped.
-   Other values of the app and the role's policies are not deleted.
+3. Delete the status `/<name>/<app ID>/status`, then handle the record
+   `/<name>/<app ID>/deploy`. If the record is readable and its `baked_image` is the
+   template's default-version AMI, rewrite it ([Deploy record](#deploy-record)): set
+   `removed` to the instance, remove `instance` and `deployed` (when the baked version
+   was installed is not recorded), and set `version` and `options` to `baked_version`
+   and `baked_options` (what comes back if the removal is lost; an unreadable
+   `baked_options` is copied as written). Otherwise delete it. If the rewritten record
+   would not fit in an SSM parameter, warn and delete it, since a retry could never
+   write it. When the directory is absent, the warning is
+   `<directory> is not on <instance-id>; updating only the record`. The status is
+   deleted because otherwise `status` keeps showing the old state of the removed app.
+   The record goes last so that, if anything fails partway, the remaining record lets a
+   retry continue from where it stopped. Other values of the app and the role's policies
+   are not deleted.
 4. With `--bake`, do `bake` steps 5-9 ([ami.md](ami.md#bake)) holding the same lock.
    Without it, report that the app stays in the AMI until baked.
 

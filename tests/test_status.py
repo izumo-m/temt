@@ -607,6 +607,15 @@ ALL_IN = app.Place(image_id=IMAGE, alive=frozenset({INSTANCE}))
             id="unbaked",
         ),
         pytest.param([("a", {"instance": OTHER})], "lost a", id="lost"),
+        pytest.param(
+            [
+                ("a", {"removed": INSTANCE, "baked_version": "1", "baked_image": IMAGE}),
+                ("b", {"instance": OTHER}),
+                ("c", {"instance": INSTANCE}),
+            ],
+            "unbaked c; lost b; removed a (still in the AMI; bake to drop it)",
+            id="removed",
+        ),
         pytest.param([], "none", id="no record"),
         # 焼いたかどうか分からない記録は数えない
         pytest.param([("a", {"version": "1"})], "none", id="unknown"),

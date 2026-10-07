@@ -52,8 +52,8 @@ are in [Creating](../topics/ami.md#creating).
    with only `ImageId` replaced, make it the default, and delete the other versions
    ([Versions](../topics/launch-template.md#versions)).
    Then point the deploy records ([Deploy record](app.md#deploy-record)) at the new AMI
-   too, so the records' AMI does not disagree with the template. Two kinds of record are
-   rewritten; report as baked only the ones whose `instance` was removed. If records
+   too, so the records' AMI does not disagree with the template. Three kinds of record are
+   handled; report as baked only the ones whose `instance` was removed. If records
    cannot be read or written, warn and continue. `options` and `baked_options` that
    cannot be read because of their shape are written back with their values as written.
    - Records whose `instance` is this instance: write `version` to `baked_version`, the
@@ -62,7 +62,14 @@ are in [Creating](../topics/ami.md#creating).
      `baked_options` and warn the user to `deploy` again with `--reset`.
    - Records whose `baked_image` is the AMI this instance was launched from: set only
      `baked_image` to the new AMI's ID, because the version baked into the source AMI is
-     also in this instance and carries over into the new AMI.
+     also in this instance and carries over into the new AMI. Drop `removed` too: a
+     `removed` naming another instance is a lost removal.
+   - Records whose `removed` is this instance (checked first): delete them, because the
+     app is not in the new AMI. Report them as
+     `recorded <app IDs> as removed from <AMI ID>`. If one cannot be deleted, warn
+     (`cannot delete <parameter>: <reason>`) and continue; after the instance
+     terminates, that record shows `lost`. Accepted: it needs a failed delete, and
+     `status` shows it.
 9. Do step 4 of [`terminate`](instance.md#terminate) and wait until the instance is
    `terminated`.
 

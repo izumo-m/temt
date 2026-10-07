@@ -47,6 +47,7 @@ from temt.names import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from types_boto3_ec2.client import EC2Client
     from types_boto3_ssm.client import SSMClient
 
     from temt.app import Record
@@ -469,7 +470,12 @@ def run(
         _reach(service, values, one)
         _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user")
         before = _previous(ssm, record_name)
-        explicit, chosen = _choose(app_id, manifest, given, before, reset=reset, record=record_name)
+        # このインスタンスから外したアプリは、外す前のオプションを引き継がない。焼いた版は
+        # AMI に残っているので、_new_record は引き継ぐ
+        removed = before is not None and before.fields.get("removed") == one.id
+        explicit, chosen = _choose(
+            app_id, manifest, given, None if removed else before, reset=reset, record=record_name
+        )
         record = _new_record(manifest, user, one, explicit, before)
         _check_size(app_id, record)
         added = None
@@ -524,13 +530,41 @@ def _recorded_user(name: str, found: Mapping[str, Any] | None) -> str:
     return user
 
 
+def _left(
+    ec2: EC2Client, service: Service, name: str, found: Mapping[str, Any] | None, one: Instance
+) -> Record | None:
+    """外したあとに残す記録。アプリが起動テンプレートの AMI に焼いてなければ None。
+
+    焼いてあれば、外したインスタンス one を書く。そのまま残すと、status と app list が
+    焼いてあるとしか出さず、AMI に残っていることが分からないからである。記録が無いか
+    読めなければ、焼いてあるか分からないので None。書き換えた記録が SSM パラメータに
+    収まらなければ、警告して None とする。残そうとすると、やり直しても書けないからである。
+    """
+    if found is None:
+        return None
+    record = app.parse_record(name, str(found.get("Value") or ""))
+    image_id = record.fields.get("baked_image")
+    if not image_id or image_id != resources.default_image(ec2, service):
+        return None
+    app.mark_removed(record, one.id)
+    size = app.record_size(record)
+    if size > app.RECORD_MAX:
+        msg.warn(
+            f"the deploy record {name} would be {size} bytes, over the {app.RECORD_MAX} bytes "
+            f"that SSM allows; deleting it, although the app stays in the AMI until baked"
+        )
+        return None
+    return record
+
+
 def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes: bool) -> None:
     """アプリを動いているインスタンスから外す。baking なら、続けて AMI にする。
 
     uninstall の無いアプリは外さない。中途半端に消すと、何が残ったか分からなくなる。
-    インスタンスにディレクトリが無ければ、記録だけを消す。user は --user の値で、省けば
+    インスタンスにディレクトリが無ければ、記録だけを扱う。user は --user の値で、省けば
     deploy の記録にある install を実行したユーザー、それも無ければ root で uninstall を
-    実行する。
+    実行する。記録は、アプリが起動テンプレートの AMI に焼いてあれば外したことを書いて
+    残し（_left）、そうでなければ消す。
     """
     proc.require(SSH)
     values = conf.load(service)
@@ -568,7 +602,7 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
             _has_user(service, one, runner, "give another user with --user")
             what += f" as {runner}"
         else:
-            msg.warn(f"{directory} is not on {one.id}; removing the record")
+            msg.warn(f"{directory} is not on {one.id}; updating only the record")
         if baking:
             bake.check(ec2, service, values, one)
             _confirm(service, one, what, yes=yes)
@@ -582,10 +616,14 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
                 )
             msg.info(f"{directory} on {one.id}: {resources.DELETED}")
         # 状態も消す。残すと、status が外したアプリの古い状態を出し続ける。記録を最後に
-        # 消すのは、途中で失敗しても、記録が残っていればやり直しで続きから進めるため
+        # 扱うのは、途中で失敗しても、記録が残っていればやり直しで続きから進めるため
         try:
             msg.info(f"parameter {state}: {app.delete(ssm, state)}")
-            msg.info(f"parameter {record}: {app.delete(ssm, record)}")
+            left = _left(ec2, service, record, found, one)
+            if left is None:
+                msg.info(f"parameter {record}: {app.delete(ssm, record)}")
+            else:
+                msg.info(f"parameter {record}: {app.put(ssm, record, app.record_value(left))}")
         except (ClientError, BotoCoreError) as e:
             raise TemtError(
                 f"{table.aws_error(e)}; {app_id} is off {one.id} but its parameters are left; "

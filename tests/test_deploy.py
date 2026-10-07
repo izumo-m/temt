@@ -945,9 +945,152 @@ def test_remove_deletes_the_record_when_the_app_is_not_there(
     aws_stubs.done()
     err = told(capsys.readouterr().err)
     assert (
-        f"temt: warning: /opt/temt/apps/jupyter is not on {INSTANCE}; removing the record"
+        f"temt: warning: /opt/temt/apps/jupyter is not on {INSTANCE}; updating only the record"
     ) in err
     assert f"parameter {RECORD}: deleted" in err
+
+
+def template_image(stubs: Stubs, image: str) -> None:
+    """app remove が読む、起動テンプレートの既定バージョンの AMI。"""
+    stubs.ec2.add_response(
+        "describe_launch_template_versions",
+        {
+            "LaunchTemplateVersions": [
+                {
+                    "VersionNumber": 1,
+                    "DefaultVersion": True,
+                    "LaunchTemplateData": {"ImageId": image},
+                }
+            ]
+        },
+        {"LaunchTemplateName": TEMPLATE},
+    )
+
+
+BAKED_RECORD = {
+    "name": "Jupyter Lab",
+    "version": "1.3",
+    "user": "root",
+    "deployed": "2026-09-27T03:04:05Z",
+    "instance": INSTANCE,
+    "options": {"port": "9999"},
+    "baked_version": "1.2",
+    "baked_image": "ami-0123456789abcdef0",
+    "baked_options": {"port": "8080"},
+}
+
+
+def test_remove_keeps_the_record_of_an_app_in_the_ami(
+    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """起動テンプレートの AMI に焼いてあれば、外したインスタンスを書いて記録を残す。
+
+    最後に入れた版とオプションは、AMI に焼いた版とオプションにする。
+    """
+    ready(aws_stubs)
+    aws_stubs.ssm.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": RECORD, "Value": json.dumps(BAKED_RECORD)}},
+        {"Name": RECORD},
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    template_image(aws_stubs, "ami-0123456789abcdef0")
+    kept = {
+        "name": "Jupyter Lab",
+        "version": "1.2",
+        "user": "root",
+        "removed": INSTANCE,
+        "options": {"port": "8080"},
+        "baked_version": "1.2",
+        "baked_image": "ami-0123456789abcdef0",
+        "baked_options": {"port": "8080"},
+    }
+    aws_stubs.ssm.add_response(
+        "put_parameter",
+        {"Version": 3},
+        {"Name": RECORD, "Value": json.dumps(kept), "Type": "String", "Overwrite": True},
+    )
+
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+    assert f"parameter {RECORD}: updated" in told(capsys.readouterr().err)
+
+
+def test_remove_deletes_the_record_of_an_app_in_another_ami(
+    aws_stubs: Stubs, configured: Service, ssh: Ssh
+) -> None:
+    """焼いた AMI が起動テンプレートの AMI でなければ、次のインスタンスには入らない。"""
+    ready(aws_stubs)
+    aws_stubs.ssm.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": RECORD, "Value": json.dumps(BAKED_RECORD)}},
+        {"Name": RECORD},
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    template_image(aws_stubs, "ami-0fedcba9876543210")
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
+
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+
+
+def test_remove_again_rewrites_a_record_already_removed_from_the_instance(
+    aws_stubs: Stubs, configured: Service, ssh: Ssh
+) -> None:
+    """記録を書けずにやり直したときなど。ディレクトリが無くても打ち間違いとはせず、書き直す。"""
+    ready(aws_stubs)
+    kept = {
+        "name": "Jupyter Lab",
+        "version": "1.2",
+        "user": "root",
+        "removed": INSTANCE,
+        "baked_version": "1.2",
+        "baked_image": "ami-0123456789abcdef0",
+    }
+    aws_stubs.ssm.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": RECORD, "Value": json.dumps(kept)}},
+        {"Name": RECORD},
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    template_image(aws_stubs, "ami-0123456789abcdef0")
+    aws_stubs.ssm.add_response(
+        "put_parameter",
+        {"Version": 4},
+        {"Name": RECORD, "Value": json.dumps(kept), "Type": "String", "Overwrite": True},
+    )
+    ssh.codes = [deploy.ABSENT_CODE]
+
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+
+
+def test_remove_deletes_a_record_too_large_to_keep(
+    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """焼いたオプションを options にも写すと SSM に収まらなければ、警告して消す。"""
+    ready(aws_stubs)
+    large = {"port": "x" * 2100}
+    before = {**BAKED_RECORD, "options": {}, "baked_options": large}
+    aws_stubs.ssm.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": RECORD, "Value": json.dumps(before)}},
+        {"Name": RECORD},
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    template_image(aws_stubs, "ami-0123456789abcdef0")
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
+
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+    assert any(
+        line.startswith(f"temt: warning: the deploy record {RECORD} would be ")
+        for line in told(capsys.readouterr().err)
+    )
 
 
 def test_remove_leaves_everything_when_uninstall_fails(
@@ -1561,6 +1704,64 @@ def test_deploy_keeps_the_options_of_the_last_deploy(
     assert "TEMT_OPTION_PORT=9999\nTEMT_OPTION_GREETING=hello\n" in sent_options(ssh)
     lines = told(capsys.readouterr().err)
     assert lines[2:4] == ["option port=9999 (kept)", "option greeting=hello (default)"]
+
+
+@pytest.mark.parametrize(
+    ("removed", "port", "kept"),
+    [
+        # このインスタンスから外したアプリは、外す前のオプションを引き継がない
+        pytest.param(INSTANCE, "8888", {}, id="removed here"),
+        # 外したインスタンスが終了し、AMI の版がこのインスタンスに戻っている
+        pytest.param(OTHER, "8000", {"options": {"port": "8000"}}, id="removal lost"),
+    ],
+)
+def test_deploy_after_remove_keeps_the_options_only_when_the_removal_was_lost(
+    aws_stubs: Stubs,
+    configured: Service,
+    jupyter_options: Path,
+    ssh: Ssh,
+    removed: str,
+    port: str,
+    kept: dict[str, Any],
+) -> None:
+    """外した記録の removed は書き直すときに落とし、焼いた分は引き継ぐ。"""
+    ready(aws_stubs)
+    baked = {"baked_version": "1.1", "baked_image": IMAGE, "baked_options": {"port": "8000"}}
+    before = {"name": "Jupyter Lab", "version": "1.1", "removed": removed}
+    recorded(
+        aws_stubs, before={**before, "options": {"port": "8000"}, **baked}, kept={**kept, **baked}
+    )
+
+    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+    assert f"TEMT_OPTION_PORT={port}\n" in sent_options(ssh)
+
+
+def test_deploy_after_remove_ignores_options_it_cannot_read(
+    aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
+) -> None:
+    """外したときに写した読めないオプションでも、このインスタンスなら引き継がないので止めない。"""
+    ready(aws_stubs)
+    before = {
+        "name": "Jupyter Lab",
+        "version": "1.1",
+        "removed": INSTANCE,
+        "options": ["bad"],
+        "baked_version": "1.1",
+        "baked_image": IMAGE,
+        "baked_options": ["bad"],
+    }
+    recorded(
+        aws_stubs,
+        before=before,
+        kept={"baked_version": "1.1", "baked_image": IMAGE, "baked_options": ["bad"]},
+    )
+
+    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
+
+    aws_stubs.done()
+    assert "TEMT_OPTION_PORT=8888\n" in sent_options(ssh)
 
 
 def test_deploy_with_reset_keeps_no_option(

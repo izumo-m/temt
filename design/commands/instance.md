@@ -77,8 +77,13 @@ is a usage error. Writing the same ID twice is also a usage error.
      and exit without doing anything.
 3. Confirm, listing the chosen instances' IDs and states. Before that, if apps were
    deployed to a chosen instance and not yet baked (deploy records whose `instance` is
-   that ID), warn that they will be lost by terminating. If the records cannot be read,
-   warn and continue.
+   that ID), warn that they will be lost by terminating
+   (`unbaked apps will be lost: <app IDs>`). If apps were removed from a chosen instance
+   without baking (records whose `removed` is that ID) and their `baked_image` is the
+   template's default-version AMI, warn that they come back from the AMI
+   (`apps removed without baking come back from the AMI: <app IDs>`); the template is
+   read only when such records exist, and if it cannot be read, they are not listed. If
+   the records cannot be read, warn and continue.
 4. Terminate each chosen instance and delete its known_hosts
    ([Terminating](../topics/instance.md#terminating)). Do this for all of them even if
    there are two or more.
@@ -171,8 +176,10 @@ nor AWS. Shows:
   ([Status display](../topics/sshd-ports.md#status-display)).
 - Unbaked apps, on the `apps:` line, only when the launch template exists. Decided from
   the deploy records by the same rule as `STATE` of [`app list`](app.md#app-list):
-  `unbaked` and `lost` apps are listed in that order
-  (`apps: unbaked timezone-tokyo; lost mise`). If there are neither, show `all baked` if
+  `unbaked`, `lost`, and `removed` apps are listed in that order, and `removed` gets
+  ` (still in the AMI; bake to drop it)`
+  (`apps: unbaked timezone-tokyo; lost mise; removed swapfile (still in the AMI; bake to
+  drop it)`). If there are none of them, show `all baked` if
   any app is `baked`, otherwise `none`. Records for which it is unknown whether they
   were baked are not counted.
 - App status. The parameters with key `status` under `/<name>`, i.e.
