@@ -108,7 +108,7 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
    戻す。
 2. `main` で `git merge --no-ff develop` する。
 3. マージした commit に、軽量の git のタグ `v<番号>` を付ける。
-4. `git push origin main develop v<番号>` で push する。
+4. `git push origin main develop v<番号>` で push し、`develop` に戻る。
 5. `gh release create v<番号> --verify-tag --generate-notes` で GitHub Release を
    作る。mise の `pypi` バックエンドは、`latest` を最新の GitHub Release に解決する。
 
