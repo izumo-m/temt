@@ -135,7 +135,7 @@ def _ssm_ready(ssm: SSMClient, service: Service, one: Instance, *, fresh: bool) 
     のを待つ。
     """
     instance_id = one.id
-    hint = f"see 'temt status --svc {service.svc}' or run 'temt reboot --svc {service.svc} --async'"
+    hint = instances.login_hint(service)
     if fresh:
         instances.wait_online(
             ssm,

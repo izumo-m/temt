@@ -69,6 +69,10 @@ CONNECT_TIMEOUT = 5
 NOT_FOUND = "InvalidInstanceID.NotFound"
 # インスタンスの状態が合わないために、AWS が状態を変える要求を断ったときの誤りの名前
 WRONG_STATE = ("IncorrectInstanceState", "IncorrectState")
+# 起動テンプレートのインスタンスプロファイルを EC2 が見つけられないときに、run-instances
+# が返す誤りの名前と、その文に含まれる語
+INVALID_PARAMETER = "InvalidParameterValue"
+PROFILE_PARAMETER = "iamInstanceProfile"
 
 
 @dataclass(frozen=True)
@@ -230,10 +234,29 @@ def recent(one: Instance) -> bool:
     return one.age is not None and one.age < LOGIN_DEADLINE
 
 
+def _profile_unseen(e: ClientError, service: Service) -> bool:
+    """run-instances の誤り e が、EC2 がインスタンスプロファイル <名前> を見つけられないためか。
+
+    apply が作った直後で IAM から EC2 に届いていないときと、本当に無いときの両方で
+    返る。文が別の名前を挙げていれば（テンプレートを手で替えたなど）、当たらない。
+    """
+    error = e.response.get("Error") or {}
+    text = error.get("Message") or ""
+    return (
+        error.get("Code") == INVALID_PARAMETER
+        and PROFILE_PARAMETER in text
+        and f"({service.name})" in text
+    )
+
+
 def launch(ec2: EC2Client, service: Service) -> str:
     """起動テンプレートの既定バージョンから 1 台起動し、その ID を返す。
 
-    タグは起動テンプレートが付けるので、ここでは付けない。
+    タグは起動テンプレートが付けるので、ここでは付けない。EC2 がインスタンス
+    プロファイルを見つけられずに断れば、待ってやり直さず、知らせて止まる。apply の
+    直後なら、少しあけて利用者がやり直すころには、ロールの資格情報も使えるように
+    なっている。いちばん早い時点で起動すると、SSM エージェントが資格情報を取れずに、
+    取り直しまで最長 30 分待つことがあるからである（設計書）。
     """
     try:
         made = ec2.run_instances(
@@ -247,6 +270,12 @@ def launch(ec2: EC2Client, service: Service) -> str:
             ClientToken=uuid.uuid4().hex,
         )
     except ClientError as e:
+        if _profile_unseen(e, service):
+            raise TemtError(
+                f"EC2 does not see the instance profile {service.name} yet; if you just ran "
+                f"'temt apply', wait a minute and start again; otherwise run "
+                f"'temt apply --svc {service.svc}'"
+            ) from None
         if error_code(e) != resources.NO_SUCH_TEMPLATE:
             raise
         raise resources.not_applied(service) from None
@@ -482,6 +511,22 @@ def wait_online(
         _noticing(notice, lambda: True if is_online(ssm, instance_id, since) else None),
         hint=hint,
     )
+
+
+def login_hint(service: Service) -> str:
+    """動いていたインスタンスの SSM エージェントを待ち切れなかったときの手がかり。"""
+    return f"see 'temt status --svc {service.svc}' or run 'temt reboot --svc {service.svc} --async'"
+
+
+def relaunch_hint(service: Service) -> str:
+    """起動したばかりのインスタンスの SSM エージェントを待ち切れなかったときの手がかり。
+
+    apply の直後の起動では、エージェントがロールの資格情報を取れなかったか、destroy の
+    直後に作り直したプロファイルの、消えた古いものが付いたことがある。どちらも、終了
+    して起動し直せば直る。後者は EC2 が新しいものを引くまで数分かかるので、数分あける
+    よう添える。
+    """
+    return f"run 'temt terminate --svc {service.svc}', wait a few minutes, and start again"
 
 
 def wait_sshd_ports(

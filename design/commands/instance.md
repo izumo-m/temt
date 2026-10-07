@@ -21,6 +21,12 @@ commands (finding, intermediate states, terminating, waiting and deadlines, lock
      so launch template changes made by `apply` after the stop (AMI, instance type, ...)
      do not take effect.
    - None: launch with `run-instances` from the default version of `<name>-template`.
+     If EC2 refuses because it does not see the instance profile `<name>`
+     (`InvalidParameterValue` whose message names `iamInstanceProfile` and `(<name>)`),
+     exit with `EC2 does not see the instance profile <name> yet; if you just ran 'temt
+     apply', wait a minute and start again; otherwise run 'temt apply --svc <svc>'`.
+     Do not wait and retry ([Right after apply](#right-after-apply)). A message naming
+     another profile is raised as is.
 3. With `--async`, finish here. Otherwise, if a resume was requested, wait until the old
    state is no longer visible ([Until the previous state
    disappears](../topics/instance.md#until-the-previous-state-disappears)). Then wait
@@ -29,7 +35,45 @@ commands (finding, intermediate states, terminating, waiting and deadlines, lock
    is reported `Online`, report that the instance is ready for login, and finish. Only
    an `Online` whose last ping (`LastPingDateTime`) is later than the instance's
    `LaunchTime` counts (`LaunchTime` becomes the resume time on a resume), because right
-   after a stop and resume, the `Online` report from before the stop may remain.
+   after a stop and resume, the `Online` report from before the stop may remain. Past
+   the deadline, the error adds a hint: for an instance this `start` launched,
+   `run 'temt terminate --svc <svc>', wait a few minutes, and start again`
+   ([Right after apply](#right-after-apply)); otherwise, as `proxy` does,
+   `see 'temt status --svc <svc>' or run 'temt reboot --svc <svc> --async'`.
+
+### Right after apply
+
+Observed on real AWS when `start` launches right after `apply` created the role and
+instance profile:
+
+1. EC2 does not know the new instance profile name yet: `run-instances` is refused
+   (`Invalid IAM Instance Profile name`) for a few seconds.
+2. After `destroy` and an `apply` that recreates the profile under the same name, EC2
+   may still resolve the name to the deleted profile's ID. The launch succeeds, but the
+   instance's `IamInstanceProfile` ID differs from IAM's `InstanceProfileId`, so it can
+   never get credentials; waiting or rebooting does not help. AWS documents this check
+   and the fix (attach a valid profile). Observed: 6 minutes after the recreation,
+   EC2 resolved the name to the new ID.
+3. With the right profile, the SSM agent may still fail to get the role's credentials at
+   its first try (`SSM Agent unable to acquire credentials` on the console) and then
+   back off up to 30 minutes. Seen when launched about 8 seconds after `apply`; a reboot
+   20 minutes later fixed it.
+
+Decided (with the user): `start` does not recover automatically. For 1 it exits with a
+message to wait a minute and start again; by then the credentials are usually usable,
+which also avoids 3. For 2 and 3 the deadline hint says to terminate, wait a few
+minutes, and start again; 2 needs the wait (observed: still the deleted ID right after
+the recreation, the new one 6 minutes later), and the hint cannot tell 2 from 3. These
+happen only right after an `apply` that creates the
+profile, so a manual retry is enough. Rejected:
+
+- Waiting until EC2 accepts the profile and retrying `run-instances`: it launches at
+  the earliest moment, which makes 3 more likely (it happened in 1 of 2 runs).
+- Rebooting once when the console shows the credentials failure: fixes 3 only.
+- Comparing the profile IDs after the launch and replacing the association: fixes 2
+  only, adds IAM reads and association changes to every launch.
+- Keeping the role and instance profile on `destroy`, or a unique instance profile name
+  per creation: avoids 2 only, and changes what `destroy` leaves or the naming.
 
 `--async` waits only until AWS accepts `run-instances` or `start-instances`. If the user
 connects with ssh while the instance is `pending`, `proxy` waits until it can connect.

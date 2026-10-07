@@ -844,14 +844,94 @@ def test_it_gives_up_when_the_agent_stays_offline(
     for _ in range(6):
         aws_stubs.ssm.add_response("describe_instance_information", agent(""), AGENT)
 
+    # 動いていたインスタンスなので、status を見るか再起動するよう添える
     with pytest.raises(
         TemtError,
-        match=f"timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online",
+        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come "
+        "online; see 'temt status --svc dev-main' or run 'temt reboot --svc dev-main "
+        "--async'$",
     ):
         start.run(configured, is_async=False)
 
     aws_stubs.done()
     assert clock.slept == [60] * 5
+
+
+def test_it_tells_to_launch_again_when_a_new_agent_stays_offline(
+    aws_stubs: Stubs, configured: Service, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """起動したばかりなら、終了して起動し直すよう添える。
+
+    apply の直後に起動すると、エージェントがロールの資格情報を取れずに止まったり、
+    消えた古いインスタンスプロファイルが付いたりする。どちらも起動し直せば直る。
+    """
+    monkeypatch.setattr(wait, "INTERVAL", 60)
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    launched(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), BY_ID
+    )
+    for _ in range(6):
+        aws_stubs.ssm.add_response("describe_instance_information", agent(""), AGENT)
+
+    with pytest.raises(
+        TemtError,
+        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come "
+        "online; run 'temt terminate --svc dev-main', wait a few minutes, and start again$",
+    ):
+        start.run(configured, is_async=False)
+
+    aws_stubs.done()
+
+
+def profile_refused(stubs: Stubs, name: str) -> None:
+    """EC2 がインスタンスプロファイル name を見つけられずに run-instances を断る。"""
+    stubs.ec2.add_client_error(
+        "run_instances",
+        service_error_code=instances.INVALID_PARAMETER,
+        service_message=f"Value ({name}) for parameter iamInstanceProfile.name is invalid. "
+        "Invalid IAM Instance Profile name",
+        http_status_code=400,
+        expected_params=LAUNCH,
+    )
+
+
+def test_it_tells_to_wait_when_ec2_does_not_see_the_instance_profile(
+    aws_stubs: Stubs, configured: Service, clock: Clock
+) -> None:
+    """apply の直後は、待ってやり直さず、少しあけて start し直すよう知らせて止まる。
+
+    いちばん早い時点で起動すると、エージェントがロールの資格情報を取れないことがある。
+    """
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    profile_refused(aws_stubs, NAME)
+
+    with pytest.raises(
+        TemtError,
+        match=f"^EC2 does not see the instance profile {NAME} yet; if you just ran "
+        "'temt apply', wait a minute and start again; otherwise run "
+        "'temt apply --svc dev-main'$",
+    ):
+        start.run(configured, is_async=False)
+
+    aws_stubs.done()
+    assert clock.slept == []
+
+
+def test_it_passes_on_a_refused_instance_profile_of_another_name(
+    aws_stubs: Stubs, configured: Service
+) -> None:
+    """テンプレートを手で別のプロファイルに替えていれば、AWS の誤りをそのまま上げる。"""
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    profile_refused(aws_stubs, "other")
+
+    with pytest.raises(ClientError, match=r"Value \(other\)"):
+        start.run(configured, is_async=False)
+
+    aws_stubs.done()
 
 
 def test_the_deadlines_are_the_ones_in_the_design() -> None:

@@ -78,8 +78,8 @@ If it stops during the update phase, whatever was already written stays.
      its content was updated ([topics/sshd-ports.md](../topics/sshd-ports.md)).
    - Right after creating the instance profile, wait for IAM to propagate it with the
      boto3 waiter `instance-profile-exists` (a mechanism that polls until the state
-     changes). Even so, a `start` right after may fail because the instance profile is
-     not found; running `start` again is enough.
+     changes). Even so, EC2 may not see it yet right after; `start` then says to wait
+     a minute ([instance.md](instance.md#right-after-apply)).
 7. Detect adding or updating the `Host <name>` block in the ssh directory's `config`
    to match the config file. Detect making the line after the marker in
    `~/.ssh/config` an `Include` that points to that `config`. When replacing the

@@ -38,7 +38,9 @@ def run(service: Service, *, is_async: bool) -> None:
         running = None
         # 再開を求めたときの、見つけた状態
         resumed: str | None = None
-        if not found:
+        # 新しく起動したか。待ち切れなかったときの手がかりが違う
+        launched = not found
+        if launched:
             instance_id = instances.launch(ec2, service)
         elif found[0].state in instances.RESUMABLE_STATES:
             # 停止の途中でも止まるのを待たず、再開を求める。断るかは AWS が決める
@@ -72,5 +74,6 @@ def run(service: Service, *, is_async: bool) -> None:
         if running is None:
             running = instances.wait_running(ec2, instance_id)
         # 停止してすぐ再開したときに残っている、止まる前の Online の報告を数えない
-        instances.wait_online(session.client("ssm"), instance_id, since=running.launched)
+        hint = instances.relaunch_hint(service) if launched else instances.login_hint(service)
+        instances.wait_online(session.client("ssm"), instance_id, since=running.launched, hint=hint)
         msg.info(f"{instance_id} is ready for login")
