@@ -28,31 +28,39 @@ python 3.14 でのテストは、別の環境 `.venv314` で動かす。
 AWS とのやり取りを本物で通しで確かめるときは、自分の `~/.ssh` と `~/.config/temt` に
 触れないよう、仮のホームで試験用のサービスを 1 つ立てる。AWS の料金がかかる。
 
+リポジトリのディレクトリで、仮のホームを作り、それを `HOME` にしたシェルを開く。
+`KeyName` は、自分のキーペア `temt` とぶつけないよう別の名前にする。
+
     home=$(mktemp -d)
-    region=ap-northeast-1
     ln -s ~/.aws "$home/.aws"
-    mkdir -p "$home/.config/temt"
-    printf 'AwsRegion = "%s"\nKeyName = "temt-verify"\n' "$region" \
+    mkdir -p "$home/.config/temt" "$home/bin"
+    printf 'AwsRegion = "ap-northeast-1"\nKeyName = "temt-verify"\n' \
         > "$home/.config/temt/verify.toml"
-    HOME="$home" temt apply --svc verify --yes
-    HOME="$home" temt start --svc verify
+    cat > "$home/bin/ssh" <<EOF
+    #!/bin/sh
+    sed "s|~/|$home/|g" "$home/.ssh/temt/config" > "$home/.ssh/verify-config"
+    exec $(command -v ssh) -F "$home/.ssh/verify-config" "\$@"
+    EOF
+    chmod +x "$home/bin/ssh"
+    HOME="$home" PATH="$home/bin:$PWD/.venv/bin:$PATH" bash
 
-`KeyName` を別の名前にして、自分のキーペア `temt` とぶつけない。どのコマンドも
-リポジトリのディレクトリで打つ。そこでは `.venv` の `temt` が動き、ssh の
-ProxyCommand もそれを呼ぶ。
+ssh は、`~/.ssh/config` をログインユーザーのホームから読み、設定ファイルの `~` も
+そこで展開する。`$home/bin/ssh` は、仮のホームの ssh の設定の `~/` を書き換えた写しを
+`-F` で読ませる。`deploy` などで temt が呼ぶ ssh も、これを使う。
 
-ssh は、設定ファイルの `~` を `HOME` でなくログインユーザーのホームで展開する。
-仮のホームの ssh の設定の `~/` を書き換え、`-F` で指してつなぐ。
+開いたシェルで試す。
 
-    sed -i "s|~/|$home/|g" "$home/.ssh/temt/config"
-    HOME="$home" ssh -F "$home/.ssh/temt/config" temt-verify
+    temt apply --svc verify --yes
+    temt start --svc verify
+    ssh temt-verify
 
 終わったら、作ったものを消す。`bake` したなら、AMI も消す。キーペアはサービスに
 属さないので、リージョンを `--region` で指す。
 
-    HOME="$home" temt destroy --svc verify --yes
-    HOME="$home" temt ami delete <AMI の ID> --svc verify --yes
-    HOME="$home" temt --region "$region" keypair delete temt-verify --yes
+    temt destroy --svc verify --yes
+    temt ami delete <AMI の ID> --svc verify --yes
+    temt --region ap-northeast-1 keypair delete temt-verify --yes
+    exit
     rm -rf "$home"
 
 ## 手元の temt の入れ替え
