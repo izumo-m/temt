@@ -397,6 +397,6 @@ app ID given is not in `apps/` of the conf directory.
 
 | App ID | Contents |
 | --- | --- |
-| `idle-shutdown` | Powers off when nobody is using the instance ([docs/apps/idle-shutdown.md](../../docs/apps/idle-shutdown.md)) |
-| `swapfile` | Uses `/swapfile` as swap ([docs/apps/swapfile.md](../../docs/apps/swapfile.md)) |
-| `timezone-tokyo` | Sets the time zone to Asia/Tokyo ([docs/apps/timezone-tokyo.md](../../docs/apps/timezone-tokyo.md)) |
+| `idle-shutdown` | Powers off when nobody is using the instance ([apps/idle-shutdown.md](../apps/idle-shutdown.md)) |
+| `swapfile` | Uses `/swapfile` as swap ([apps/swapfile.md](../apps/swapfile.md)) |
+| `timezone-tokyo` | Sets the time zone to Asia/Tokyo ([apps/timezone-tokyo.md](../apps/timezone-tokyo.md)) |

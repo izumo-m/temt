@@ -5,8 +5,7 @@ written in English and may record rationale, rejected alternatives, and review
 findings that were declined. The user docs are Japanese and live in docs/:
 [usage.md](../docs/usage.md) (how to use), [conf.md](../docs/conf.md) (the config
 file: format, keys, defaults, what `apply` writes), [apps.md](../docs/apps.md) (how to
-write an app), and [apps/](../docs/apps/) (the bundled apps; for now also their design, in each file's
-`## 設計` section). design/ refers to them
+write an app), and [apps/](../docs/apps/) (the bundled apps). design/ refers to them
 instead of repeating them. [glossary.md](glossary.md) maps the English terms here to
 the Japanese terms there.
 
@@ -17,7 +16,7 @@ Where this and the code disagree, decide which is right before changing either.
 temt builds the cycle of preparing a service, launching its instance, logging in
 with ssh, installing apps (`deploy`), turning the instance into an AMI (`bake`),
 terminating it, and cleaning up. An unused instance terminates itself through the
-bundled app `idle-shutdown` ([docs/apps/idle-shutdown.md](../docs/apps/idle-shutdown.md)).
+bundled app `idle-shutdown` ([apps/idle-shutdown.md](apps/idle-shutdown.md)).
 
 ## Files
 
@@ -45,6 +44,9 @@ bundled app `idle-shutdown` ([docs/apps/idle-shutdown.md](../docs/apps/idle-shut
 | [topics/security-group.md](topics/security-group.md) | Security group, ingress rules, global IP address |
 | [topics/ssh.md](topics/ssh.md) | known_hosts, the ssh config, the `Include` in `~/.ssh/config` |
 | [topics/sshd-ports.md](topics/sshd-ports.md) | sshd listening ports through a State Manager association |
+| [apps/idle-shutdown.md](apps/idle-shutdown.md) | Bundled app `idle-shutdown`: in-use checks, limit, reporting, login message |
+| [apps/swapfile.md](apps/swapfile.md) | Bundled app `swapfile` |
+| [apps/timezone-tokyo.md](apps/timezone-tokyo.md) | Bundled app `timezone-tokyo` |
 
 ## Conventions
 

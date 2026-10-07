@@ -79,6 +79,11 @@ avoid the ones marked "not".
 | app status | アプリの状態 | SSM parameter `/<name>/<app ID>/status` |
 | key (of an app value), `<key>` | キー、`<キー>` | Not 項目 |
 | idle shutdown | 自動終了 | The bundled app `idle-shutdown` |
+| idle limit | 制限時間 | |
+| last activity | 最終利用時刻、最後に使われた時刻 | |
+| in use | 使用中 | |
+| check (by the timer), in-use check (in-use.d) | 判定、使用中の判定 | |
+| power off | 電源を切る | |
 
 ## TOML
 

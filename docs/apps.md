@@ -387,7 +387,7 @@ aws ssm put-parameter --region "$region" --name "/$name/myapp/status" \
 インスタンスが終了しても値は残る（`app remove` と `destroy` で消える）ので、最後の
 状態が後から見える。今動いているインスタンスが書いたとみなせない値には、`temt-<svc>
 status` が `stale` を添える。`idle-shutdown` は、これで電源を切る予定を知らせる
-（[apps/idle-shutdown.md](apps/idle-shutdown.md#状態を知らせる)）。
+（[apps/idle-shutdown.md](apps/idle-shutdown.md#手元から状態を見る)）。
 
 ## 自動終了と組み合わせる
 
@@ -401,8 +401,7 @@ status` が `stale` を添える。`idle-shutdown` は、これで電源を切�
 
 temt と一緒に配る `idle-shutdown` も同じ形のアプリである。systemd のタイマー、PAM、
 sshd の設定、ログインのメッセージを入れて外す `install` と `uninstall` がある。
-仕組みは [apps/idle-shutdown.md](apps/idle-shutdown.md#設計) にある。入っている
-temt の中のディレクトリは、`temt app list` の `PATH` に出る。temt の中なので、
+入っている temt の中のディレクトリは、`temt app list` の `PATH` に出る。temt の中なので、
 そこで直さない。土台にするなら、写してから直す。
 
     temt app list

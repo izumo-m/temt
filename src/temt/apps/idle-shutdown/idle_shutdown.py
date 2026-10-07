@@ -575,8 +575,8 @@ def report(text: str) -> None:
 def judge(*, skip_self: bool, past: str) -> tuple[str, str]:
     """判定し、その種類（IN_USE、NEVER、WAITING、PAST）と、結果の 1 行を返す。
 
-    1 行は journal と SSM パラメータに書く形で、docs/apps/idle-shutdown.md の
-    「状態を知らせる」にある。past は、制限時間を過ぎているときの行の頭。
+    1 行は journal と SSM パラメータに書く形で、design/apps/idle-shutdown.md の
+    Reporting にある。past は、制限時間を過ぎているときの行の頭。
     """
     found = reasons(skip_self=skip_self)
     limit, _ = read_limit()

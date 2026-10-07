@@ -136,7 +136,7 @@ The marker means `SshdPorts` differs from `ami-ports`, i.e. sshd listens on port
 than the AMI's. The file's content is the message itself; Ubuntu's `pam_motd` prints the
 contents of `/run/motd.d/` at every ssh login that opens a terminal without a command.
 It appears under the same conditions as idle shutdown's
-[login message](../../docs/apps/idle-shutdown.md#ログインのメッセージ).
+[login message](../apps/idle-shutdown.md#login-message).
 
 ```
 temt: sshd ports were changed from the AMI's (22 -> 2222); run 'temt bake --svc <svc>' to keep them in the AMI

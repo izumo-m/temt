@@ -147,8 +147,8 @@ The boot_id is read on each poll as follows, the same in 4 and 7.
   is old, send again on the next poll.
 
 The local credentials need `ssm:SendCommand` and `ssm:GetCommandInvocation`. The default
-of the instance role `temt-ec2` ([conf.md](../../docs/conf.md#role)) includes the
-permissions Run Command needs.
+inline policy `temt-ec2` of the instance role ([conf.md](../../docs/conf.md#role))
+includes the permissions Run Command needs.
 
 ## `status`
 
