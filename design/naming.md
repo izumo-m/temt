@@ -7,8 +7,10 @@ defined by one config file and has one instance. To run the same purpose with
 different settings, make it another service with another name.
 
 The service name `<svc>` starts with a lowercase letter, continues with lowercase
-letters, digits, and hyphens, and ends with a lowercase letter or digit. `temt`
-checks the argument against this rule (usage error `invalid service name: <svc>`).
+letters, digits, and hyphens, and ends with a lowercase letter or digit. `defaults` is
+not a service name, as it names the defaults file `defaults.toml`. `temt` checks the
+argument against this rule (usage error `invalid service name: <svc>`, with
+` (reserved for the file defaults.toml)` for `defaults`).
 
 ## Resource names
 
@@ -28,7 +30,7 @@ Every resource name derives from `temt-<svc>`, written `<name>`. `<name>` is at 
 | App values and deploy record | `/<name>/<app ID>/<key>`. Key `deploy` is the deploy record; `status` is the app status the app writes |
 | Role policies | Inline policies `temt-<policy name>` of the role. `<policy name>` comes from `[[role.policy.<policy name>]]` in the config file. `temt-ec2` holds the permissions of the instance itself; if the config file has none, `apply` writes the default |
 | Apps on the instance | `/opt/temt/apps/<app ID>/`, owned by root |
-| Config file | `~/.config/temt/<svc>.toml` |
+| Config file | `~/.config/temt/<svc>.toml`; the defaults file is `~/.config/temt/defaults.toml` ([config.md](config.md#defaults-file)) |
 | ssh `Host` | `<name>` (a block in `~/.ssh/temt/config`) |
 | known_hosts | `~/.ssh/temt/known_hosts.d/<name>/` |
 | AMI and the `Name` tag of its snapshots | `temt-<svc>-<YYMMDDHHMM>` (`<svc>` is the baked service; the time is the client's local time) |

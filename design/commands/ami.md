@@ -130,8 +130,8 @@ before rewriting the config file and the user will `bake` again, losing it does 
 Lists temt's AMIs, one per row ([List tables](../cli.md#list-tables)). temt's AMIs are
 AMIs in the user's own account that have the `temt:service` tag. With `--svc`, the
 service's config file decides the environment and only `temt:service=<svc>` AMIs are
-listed. Without it, all temt AMIs in the environment decided by `--profile` and
-`--region` are listed ([Commands without --svc](../config.md#commands-without---svc)).
+listed. Without it, all temt AMIs in the environment decided as in [Commands without
+--svc](../config.md#commands-without---svc) are listed.
 
 | Column | Default | Value |
 | --- | --- | --- |
@@ -160,7 +160,7 @@ Deregisters temt's AMIs that no version of any launch template refers to, and de
 their snapshots. The environment and the range of AMIs are as in `ami list`: with
 `--svc`, the service's config file decides the environment and only
 `temt:service=<svc>` AMIs are handled; without it, all temt AMIs in the environment
-decided by `--profile` and `--region`. No lock is taken at the start; in 4, the lock of
+decided as in [Commands without --svc](../config.md#commands-without---svc). No lock is taken at the start; in 4, the lock of
 the AMI's service is taken for each AMI deleted. The value of `TEMT_SSH_DIR`, which
 decides where the locks are, is checked before starting so that the command does not
 stop after the confirmation.
@@ -215,8 +215,8 @@ the re-read template refers to it, so it is kept (step 4).
 `ami delete [--svc <svc>] <AMI ID or name> [--force] [--yes]`
 
 Deregisters one temt AMI given by ID or name and deletes its snapshots. The environment
-is as in `ami prune`: decided by the service's config file with `--svc`, otherwise by
-`--profile` and `--region`. No per-service lock is taken.
+is as in `ami prune`: decided by the service's config file with `--svc`, otherwise as in [Commands without
+--svc](../config.md#commands-without---svc). No per-service lock is taken.
 
 1. Find the AMI. Telling ID from name and finding by name are as for the `ImageId` value
    ([Referring by name](../topics/ami.md#referring-by-name)), except that IDs too are

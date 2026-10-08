@@ -111,7 +111,8 @@ def _check_size(ec2: EC2Client, service: Service, values: Conf, one: Instance) -
     key = conf.launch_template_key("VolumeSize")
     raise TemtError(
         f"the root volume of {one.id} is {size} GiB, larger than {key} {wanted}; "
-        f"raise it to {size} or more or remove it in {printable(tilde(service.conf_path))}, "
+        f"raise it to {size} or more or remove it in "
+        f"{printable(tilde(conf.source(service, key)))}, "
         f"then run 'temt apply --svc {service.svc}' and bake again"
     )
 

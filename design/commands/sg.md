@@ -4,7 +4,8 @@ The `sg` commands handle the ingress rules of the security group
 ([topics/security-group.md](../topics/security-group.md)).
 
 - `sg list`, `sg add`, and `sg remove` read and write only `[[security-group.ingress]]`
-  in the config file and do not call AWS. Only `apply` changes AWS; run `apply` after
+  and do not call AWS. `sg list` reads the config file over the defaults file; `sg add`
+  and `sg remove` write only the config file. Only `apply` changes AWS; run `apply` after
   `sg add` and `sg remove` to bring the change to AWS.
 - `sg diff` and `sg show` read AWS but write nothing.
 - None of them takes the lock.
@@ -52,8 +53,8 @@ write the `[security-group]` header apart from its rules, or use an empty inline
 
 `sg list --svc <svc> [--format <columns>]`
 
-Lists the ingress rules of the config file in written order, one per line
-([cli.md](../cli.md#list-tables)).
+Lists the ingress rules in effect, those of the defaults file first, each file in
+written order, one per line ([cli.md](../cli.md#list-tables)).
 
 | Column | Default | Value |
 | --- | --- | --- |
@@ -70,6 +71,9 @@ Adds a rule to the config file.
 - With `<CIDR>` omitted and both IPv4 and IPv6 addresses found, adds two rules.
 - If a rule with the same protocol, port, and CIDR exists, it is not added; with
   `--description`, only its description is rewritten.
+- A rule of the defaults file is not added either, and reported as already in that
+  file. With `--description` that differs from its description, exit before writing
+  with `<rule> is in <defaults file>; edit its Description there`.
 - The description follows the same constraints as `Description` in the config file;
   violations are usage errors. An empty description removes the description.
 - Reports the added rules and the rules whose description was rewritten, and adds a hint
@@ -83,6 +87,9 @@ Removes rules from the config file.
 
 - With `<CIDR>` omitted, removes the rules for the CIDRs made from the global IP
   addresses.
+- If a named rule is in the defaults file, exit before removing anything with
+  `<rule> is in <defaults file>; remove it there`. The defaults file applies to every
+  service, so `sg` does not edit it.
 - Reports rules that do not exist as missing. Reports the removed rules and adds a hint
   to run `apply`.
 - If no rule was removed, exits with code 1.
@@ -110,7 +117,7 @@ belongs to.
     an IPv4 source is `icmpv6`.
   - The source is the ID of another security group or of a prefix list, or `?` if it
     cannot be read.
-- Order: `+`, then `~`, then `-`. `+` and `~` follow the config file order; `-`
+- Order: `+`, then `~`, then `-`. `+` and `~` follow the order of `sg list`; `-`
   follows the order read from AWS.
 - No differences: write nothing to stdout and report that on stderr. The exit code is 0
   whether or not there are differences.

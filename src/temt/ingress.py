@@ -19,7 +19,7 @@ from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from temt import conf, msg, table
 from temt.conf import RULE_PORT, Conf, Ingress
 from temt.msg import TemtError
-from temt.names import PREFIX, Service, tilde
+from temt.names import PREFIX, Service, defaults_path, tilde
 
 COLUMNS = table.Columns(defaults=("PORT", "CIDR", "DESCRIPTION"))
 
@@ -51,7 +51,7 @@ def _label(rule: Ingress) -> str:
 
 
 def list_rules(service: Service, spec: str | None) -> None:
-    """設定ファイルの受信規則を、書かれた順に 1 つ 1 行の表で挙げる。"""
+    """受信規則を、共通ファイル、設定ファイルの順に、書かれた順で 1 つ 1 行の表で挙げる。"""
     chosen = COLUMNS.choose(spec)
     values = conf.load(service)
     table.write(
@@ -151,6 +151,30 @@ def _positions(values: Conf) -> dict[tuple[str, RULE_PORT, str], int]:
     return {conf.rule_key(one): index for index, one in enumerate(values.security_group.ingress)}
 
 
+def _own(service: Service) -> Conf:
+    """書き換える設定ファイルを、共通ファイルを重ねずに読む。
+
+    重ねて読めない設定ファイル（共通ファイルと同じ規則を書いたものなど）は、ほかの
+    コマンドと同じく、その誤りで止まる。
+    """
+    _ = conf.load(service)
+    return conf.load(service, common=False)
+
+
+def _shared() -> dict[tuple[str, RULE_PORT, str], Ingress]:
+    """共通ファイルの受信規則を、見分ける組から引けるようにしたもの。
+
+    sg add と sg remove は、サービスの設定ファイルだけを書き換える。共通ファイルの規則は
+    全サービスに効くので、そちらを直すよう告げる。
+    """
+    return {conf.rule_key(one): one for one in conf.common_rules()}
+
+
+def _defaults() -> str:
+    """知らせる行に書く共通ファイル。"""
+    return table.printable(tilde(defaults_path()))
+
+
 def _apply_hint(service: Service) -> None:
     """設定ファイルを書き換えたあと、AWS に反映する手を示す。"""
     msg.info(f"run '{PREFIX} apply --svc {service.svc}' to update the security group")
@@ -165,18 +189,27 @@ def add(
 ) -> None:
     """設定ファイルに規則を足す。同じ規則があれば、description があるときだけ説明を書き換える。
 
+    共通ファイルにある規則は足さない。その説明を変えるときは、共通ファイルを直すよう
+    告げて終了する。
+
     cidr は正規化したもの。省かれていれば、グローバル IP アドレスから作る。
     """
-    values = conf.load(service)
+    values = _own(service)
     path = table.printable(tilde(service.conf_path))
     positions = _positions(values)
+    shared = _shared()
     rules = values.security_group.ingress
     added: list[Ingress] = []
     described: dict[int, str] = {}
     lines: list[str] = []
     for rule in _rules(protocol, port, cidr, description or ""):
         index = positions.get(conf.rule_key(rule))
-        if index is None:
+        found = shared.get(conf.rule_key(rule))
+        if found is not None:
+            if description is not None and found.Description != description:
+                raise TemtError(f"{_label(rule)} is in {_defaults()}; edit its Description there")
+            lines.append(f"{_label(rule)} is already in {_defaults()}")
+        elif index is None:
             added.append(rule)
             lines.append(f"added {_label(rule)} to {path}")
         elif description is not None and rules[index].Description != description:
@@ -195,15 +228,20 @@ def add(
 def remove(service: Service, protocol: str, port: RULE_PORT, cidr: str | None) -> None:
     """設定ファイルから規則を消す。1 つも消せなければ終了する。
 
+    共通ファイルにある規則を指せば、何も消さずに、共通ファイルを直すよう告げて終了する。
+
     cidr は正規化したもの。省かれていれば、グローバル IP アドレスから作る。
     """
-    values = conf.load(service)
+    values = _own(service)
     path = table.printable(tilde(service.conf_path))
     positions = _positions(values)
+    shared = _shared()
     removed: list[int] = []
     missing: list[str] = []
     for rule in _rules(protocol, port, cidr, ""):
         index = positions.get(conf.rule_key(rule))
+        if conf.rule_key(rule) in shared:
+            raise TemtError(f"{_label(rule)} is in {_defaults()}; remove it there")
         if index is None:
             missing.append(_label(rule))
         else:

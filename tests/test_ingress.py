@@ -10,7 +10,7 @@ import pytest
 from temt import conf, ingress
 from temt.conf import Ingress
 from temt.msg import TemtError, UsageError
-from temt.names import Service
+from temt.names import Service, defaults_path
 
 INGRESS = "[[security-group.ingress]]\n"
 HOME = INGRESS + 'Port = 22\nCidr = "203.0.113.10/32"\nDescription = "home"\n'
@@ -342,3 +342,88 @@ def test_an_address_that_cannot_be_a_rule(
     assert "no IPv6 egress address: https://api6.ipify.org did not answer an address\n" in out
     assert out.isascii()
     assert "\x1b" not in out
+
+
+def write_defaults(text: str) -> None:
+    """共通ファイルを用意する。"""
+    defaults_path().parent.mkdir(parents=True, exist_ok=True)
+    defaults_path().write_text(text, encoding="utf-8")
+
+
+OFFICE = INGRESS + 'Port = 22\nCidr = "198.51.100.0/24"\nDescription = "office"\n'
+
+
+def test_list_shows_the_common_rules_first(
+    service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_defaults(OFFICE)
+    write(service, HOME)
+    ingress.list_rules(service, "cidr")
+    assert capsys.readouterr().out.splitlines() == ["CIDR", "198.51.100.0/24", "203.0.113.10/32"]
+
+
+def test_add_leaves_a_common_rule(service: Service, capsys: pytest.CaptureFixture[str]) -> None:
+    write_defaults(OFFICE)
+    write(service, HOME)
+    ingress.add(service, "tcp", (22, 22), "198.51.100.0/24", None)
+    assert service.conf_path.read_text(encoding="utf-8") == HOME
+    out = capsys.readouterr().out
+    assert "22/tcp 198.51.100.0/24 is already in ~/.config/temt/defaults.toml\n" in out
+    assert "apply" not in out
+
+
+def test_add_does_not_rewrite_the_description_of_a_common_rule(service: Service) -> None:
+    write_defaults(OFFICE)
+    write(service, HOME)
+    with pytest.raises(TemtError) as caught:
+        ingress.add(service, "tcp", (22, 22), "198.51.100.0/24", "branch")
+    assert str(caught.value) == (
+        "22/tcp 198.51.100.0/24 is in ~/.config/temt/defaults.toml; edit its Description there"
+    )
+    assert service.conf_path.read_text(encoding="utf-8") == HOME
+
+
+def test_add_writes_only_the_rule_of_the_service(service: Service) -> None:
+    """共通ファイルの規則は、サービスの設定ファイルに写さない。"""
+    write_defaults(OFFICE)
+    write(service, "")
+    ingress.add(service, "tcp", (22, 22), "203.0.113.10/32", "home")
+    assert conf.load(service, common=False).security_group.ingress == [
+        Ingress(Port=(22, 22), Cidr="203.0.113.10/32", Description="home")
+    ]
+    assert [one.Cidr for one in conf.load(service).security_group.ingress] == [
+        "198.51.100.0/24",
+        "203.0.113.10/32",
+    ]
+
+
+def test_remove_refuses_a_common_rule(service: Service) -> None:
+    """共通ファイルの規則を指せば、ほかの規則も消さずに止まる。"""
+    write_defaults(OFFICE)
+    write(service, HOME)
+    with pytest.raises(TemtError) as caught:
+        ingress.remove(service, "tcp", (22, 22), "198.51.100.0/24")
+    assert str(caught.value) == (
+        "22/tcp 198.51.100.0/24 is in ~/.config/temt/defaults.toml; remove it there"
+    )
+    assert service.conf_path.read_text(encoding="utf-8") == HOME
+
+
+def test_remove_a_rule_beside_common_rules(service: Service) -> None:
+    write_defaults(OFFICE)
+    write(service, HOME)
+    ingress.remove(service, "tcp", (22, 22), "203.0.113.10/32")
+    assert conf.load(service, common=False).security_group.ingress == []
+
+
+@pytest.mark.parametrize("command", ["add", "remove"])
+def test_a_rule_in_both_files_stops_the_edit(service: Service, command: str) -> None:
+    """共通ファイルと同じ規則を書いた設定ファイルは、ほかのコマンドと同じく読めずに止まる。"""
+    write_defaults(OFFICE)
+    write(service, OFFICE)
+    with pytest.raises(TemtError, match="repeats a rule in .*; remove one of them$"):
+        if command == "add":
+            ingress.add(service, "tcp", (22, 22), "198.51.100.0/24", None)
+        else:
+            ingress.remove(service, "tcp", (22, 22), "198.51.100.0/24")
+    assert service.conf_path.read_text(encoding="utf-8") == OFFICE

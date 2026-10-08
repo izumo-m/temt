@@ -17,6 +17,7 @@ from temt.names import (
     USER_NAME_RULE,
     Service,
     app_dir,
+    defaults_path,
     is_instance_id,
     is_label,
     is_user_name,
@@ -245,9 +246,9 @@ NOTES = (
         """\
 <port> of sg add and sg remove is a port or a range with an optional /tcp or
 /udp, such as 22, 8000-8010 or 53/udp, or icmp. Without <cidr>, they use the
-egress IP address of this machine. sg list reads, and sg add and sg remove edit,
-only the config file, and take no --profile or --region; run apply to update the
-security group.""",
+egress IP address of this machine. sg list reads the config file and
+defaults.toml; sg add and sg remove edit only the config file. They take no
+--profile or --region; run apply to update the security group.""",
     ),
     (
         INSTANCE_ID_COMMANDS,
@@ -761,10 +762,13 @@ def parse(args: list[str]) -> Request:
 def _profile_hint(service: Service | None) -> str:
     """資格情報でつまずいたときに、プロファイルを選べる場所を伝える。"""
     if service is None:
-        return f"give {PROFILE_OPTION} or set AWS_PROFILE"
+        return (
+            f"give {PROFILE_OPTION}, write AwsProfile in {printable(str(defaults_path()))}, "
+            f"or set AWS_PROFILE"
+        )
     return (
         f"give {PROFILE_OPTION}, set AWS_PROFILE, or write AwsProfile in "
-        f"{printable(str(service.conf_path))}"
+        f"{printable(str(conf.source(service, 'AwsProfile')))}"
     )
 
 

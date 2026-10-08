@@ -27,7 +27,7 @@ baked, an unused instance terminates itself
 | [glossary.md](glossary.md) | English and Japanese terms |
 | [naming.md](naming.md) | Service names, resource names, tags, `--svc` |
 | [local-files.md](local-files.md) | Repository layout, files in the user's home, location environment variables |
-| [config.md](config.md) | The config file, profile, region, account |
+| [config.md](config.md) | The config file, the defaults file, profile, region, account |
 | [resources.md](resources.md) | The AWS resources of a service and how `apply` and `destroy` treat them |
 | [cli.md](cli.md) | Command grammar, the command table, behavior common to all commands, list tables |
 | [commands/service.md](commands/service.md) | `apply`, `diff`, `destroy`, `service list` |
@@ -62,9 +62,10 @@ baked, an unused instance terminates itself
 
 ## Premises
 
-- The config file is the definition of a service shared as IaC: it is kept in git and
-  used from several machines. Config files drifting apart between machines is not a
-  design issue and not a review finding.
+- The config file and the defaults file are the definition of a service shared as IaC:
+  they are kept in sync across the machines that use them, by whatever means the user
+  chooses (git, NFS, ...), which temt does not manage. These files drifting apart
+  between machines is not a design issue and not a review finding.
 - Rare races from concurrent runs or from AWS's eventual consistency are acceptable
   when `status` shows the result and running the command again converges. Races caused
   by operating the same service from another PC are out of scope for review.

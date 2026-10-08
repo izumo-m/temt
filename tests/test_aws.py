@@ -19,7 +19,7 @@ from types_boto3_ssm.client import SSMClient
 from temt import aws, conf
 from temt.conf import Conf
 from temt.msg import TemtError
-from temt.names import Service
+from temt.names import Service, defaults_path
 
 REGION = "ap-northeast-1"
 DEFAULT_VPC = {"Filters": [{"Name": "is-default", "Values": ["true"]}]}
@@ -139,8 +139,58 @@ def test_env_session_leaves_the_profile_to_the_environment(
 
 
 def test_env_session_without_a_region() -> None:
-    with pytest.raises(TemtError, match="no region; give --region, set AWS_REGION"):
+    with pytest.raises(TemtError) as caught:
         aws.env_session(None)
+    assert str(caught.value) == (
+        f"no region; give --region, write AwsRegion in {defaults_path()}, set AWS_REGION, "
+        f"or write region in the AWS profile"
+    )
+
+
+def write_defaults(text: str) -> None:
+    """共通ファイルを用意する。"""
+    defaults_path().parent.mkdir(parents=True, exist_ok=True)
+    defaults_path().write_text(text, encoding="utf-8")
+
+
+def test_env_session_takes_the_common_file_over_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """作業中のプロジェクトが設定した環境変数より、共通ファイルを先に使う。"""
+    profile("us-east-1")
+    write_defaults('AwsProfile = "work"\nAwsRegion = "eu-west-1"\n')
+    monkeypatch.setenv("AWS_PROFILE", "other")
+    monkeypatch.setattr(conf, "ENV_REGION", "us-west-2")
+    made = aws.env_session(None)
+    assert (made.profile_name, made.region_name) == ("work", "eu-west-1")
+
+
+def test_env_session_takes_the_options_over_the_common_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile("us-east-1")
+    write_defaults('AwsProfile = "other"\nAwsRegion = "eu-west-1"\n')
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    made = aws.env_session("ap-southeast-2")
+    assert (made.profile_name, made.region_name) == ("work", "ap-southeast-2")
+
+
+def test_env_session_looks_further_without_values_in_the_common_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """書かれていない項目は既定を補わず、今までの順に探す。"""
+    profile("us-east-1")
+    write_defaults('AwsProfile = ""\n[launch-template]\nInstanceType = "t3.small"\n')
+    monkeypatch.setenv("AWS_PROFILE", "work")
+    monkeypatch.setattr(conf, "ENV_REGION", "us-west-2")
+    made = aws.env_session(None)
+    assert (made.profile_name, made.region_name) == ("work", "us-west-2")
+
+
+def test_env_session_stops_at_a_broken_common_file() -> None:
+    write_defaults('Foo = "x"\n')
+    with pytest.raises(TemtError, match=f"^{defaults_path()}: unknown key: Foo$"):
+        aws.env_session("us-east-1")
 
 
 class StsSession:

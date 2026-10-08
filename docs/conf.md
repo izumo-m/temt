@@ -5,11 +5,12 @@
 読んで並べる。`--svc` を付けない `instance list`、`ami list`、`ami prune`、
 `ami delete`、`app list` は読まない。`apply` はこの
 ファイルを正として、AWS リソースと手元の環境を揃える。複数のマシンから同じサービスを
-使うときは、同じ内容のファイルを各マシンに置く。ssh の経路はマシンごとに違うので、
+使うときは、同じ内容のファイルを各マシンに置く。共通ファイルも同じである。ssh の経路はマシンごとに違うので、
 このファイルではなく環境変数で与える（[設定ファイルに
 書かないもの](#設定ファイルに書かないもの)）。AWS のプロファイルは書けるが、
 マシンごとに違うなら書かずに、各マシンで環境変数 `AWS_PROFILE` を設定する。場所は環境変数 `TEMT_CONF_DIR` で
-変えられる（[場所を変える環境変数](#場所を変える環境変数)）。
+変えられる（[場所を変える環境変数](#場所を変える環境変数)）。全サービスに共通の値は、
+同じ場所の `defaults.toml` に書ける（[全サービスに共通の値](#全サービスに共通の値)）。
 
 ## 形式
 
@@ -25,6 +26,41 @@ TOML として読めない記述があれば、エラーにして終了する。
 使う。文字列の項目で値が空文字列のものと、`SshdPorts` と `[security-group]` の
 `Port` で値が空の配列のものは、書かれていないものとして扱う。
 
+## 全サービスに共通の値
+
+同じ場所の `defaults.toml`（共通ファイル）に、全サービスに共通の値を書ける。形式と
+書ける項目は設定ファイルと同じで、`<svc>.toml` に書いていない項目には共通ファイルの
+値が使われる。この名前のため、`defaults` はサービス名に使えない。
+
+```toml
+AwsProfile = "work"
+
+[launch-template]
+InstanceType = "t3.small"
+
+[[security-group.ingress]]
+Port = 22
+Cidr = "203.0.113.10/32"
+Description = "home"
+```
+
+- 受信規則は、共通ファイルの規則の後ろに `<svc>.toml` の規則を足したものになる。同じ
+  規則を両方に書くとエラーになる。`sg add` と `sg remove` が書き換えるのは
+  `<svc>.toml` だけで、共通ファイルの規則を消すときや説明を変えるときは、共通ファイルを
+  直すよう告げて止まる。
+- ポリシーは名前ごとに重ねる。同じ名前のポリシーは、`<svc>.toml` のものだけを使う。
+- 空の値は書かれていないのと同じなので、共通ファイルの値を `<svc>.toml` で消すことは
+  できない。
+- `apply` は、共通ファイルの値も既定と同じように `<svc>.toml` に書く
+  （[`apply` が書くこと](#apply-が書くこと)）。`AwsRegion`、`InstanceType`、
+  `ImageId`、`SubnetId` は最初の `apply` で書かれるので、あとで共通ファイルを直しても、作ってあるサービスは変わらない。
+  書かれない `AwsProfile`、`SshdPorts`、`VolumeSize`、受信規則、ポリシーは、直せば
+  すべてのサービスに効く。AWS に反映するのは、サービスごとの `apply` である。
+- `--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も、
+  共通ファイルの `AwsProfile` と `AwsRegion` を使う。環境変数 `AWS_PROFILE` や
+  `AWS_REGION` より優先するので、作業中のプロジェクトが環境変数で別のアカウントを
+  指していても、temt はつられない。
+
 ## 項目
 
 ### 最上位
@@ -34,8 +70,8 @@ TOML として読めない記述があれば、エラーにして終了する。
 
 | 項目 | 読むコマンド | 既定 |
 | --- | --- | --- |
-| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて | 無し。書かなければプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
-| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて | `ap-northeast-1` |
+| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | 無し。書かなければプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
+| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `ap-northeast-1` |
 | `SshdPorts` | `apply`、`diff` | `[22]`。インスタンスの sshd が待ち受けるポートの配列（`[2222]`、`[2222, 443]`）。1 から 65535 の整数で、重ねて書けない。先頭が ssh の Host ブロックの `Port` になる |
 
 **`AwsProfile`。** 書かなければ、temt はプロファイルを指定しない。資格情報は AWS の
@@ -46,12 +82,13 @@ TOML として読めない記述があれば、エラーにして終了する。
 - `--profile <プロファイル>` を付ける（`temt apply --svc <svc> --profile work`）。
   `apply` はその値を `AwsProfile` に書くので、次からは付けなくてよい。`apply` 以外の
   コマンドでは、その実行のあいだだけ効く。
-- `AwsProfile = "work"` と書く。
+- `AwsProfile = "work"` と書く。共通ファイルに書けば、全サービスに効く。
 - 環境変数 `AWS_PROFILE` を設定する。`AWS_DEFAULT_PROFILE` と両方に別の値を
   入れると、temt は `AWS_DEFAULT_PROFILE` を使う。aws-cli v2 を単独で使うときは
   `AWS_PROFILE` が先なので、両方を使うなら同じ値にする。
 
-固定をやめるときは、`AwsProfile` の行を消すか、値を空文字列にする。`--profile` を
+固定をやめるときは、`AwsProfile` の行を消すか、値を空文字列にする。共通ファイルに
+書いた値は、共通ファイルから消す。`--profile` を
 付けずに `apply` を実行しても、この項目が書き直されることはない。複数のマシンで
 同じファイルを使うときは、各マシンでプロファイル名を揃える。揃えられないなら
 `AwsProfile` を書かずに、各マシンで `AWS_PROFILE` を設定する。ssh は環境変数を
@@ -59,9 +96,9 @@ ProxyCommand に渡すので、ログインにも効く。`--profile` は ssh �
 届かず、`apply` に付けると `AwsProfile` に書かれるので、この使い方には向かない。
 
 **`AwsRegion`。** 無ければ `ap-northeast-1` になり、最初の `apply` がその値を書く。
-どのリージョンを使うかはこのファイルだけで決まり、`--svc` を付けたコマンドは、環境
-変数 `AWS_REGION` と `AWS_DEFAULT_REGION` を見ない。1 つのファイルは 1 つの
-インスタンスに対応するので、別のリージョンを使うときは `AwsRegion` を書いてから
+どのリージョンを使うかはこのファイルと共通ファイルだけで決まり、`--svc` を付けた
+コマンドは、環境変数 `AWS_REGION` と `AWS_DEFAULT_REGION` を見ない。1 つのファイルは
+1 つのインスタンスに対応するので、別のリージョンを使うときは `AwsRegion` を書いてから
 最初の `apply` を実行するか、別の `<svc>` として立てる。
 
 ログインに使う鍵は、このファイルには書かない。マシンごとの ssh の設定の
@@ -136,7 +173,7 @@ Ubuntu の AMI（とそこから焼いた AMI）では、起動するとイン�
 
 セキュリティグループの受信規則。`[[security-group.ingress]]` を規則の数だけ繰り返して
 書く。`apply` が AWS 側の受信規則をここに書いたものに揃え、書いていない規則（手で
-足したものを含む）は消す。1 つも書かなければ受信規則は無く、ログインは Session
+足したものを含む）は消す。共通ファイルにも 1 つも無ければ受信規則は無く、ログインは Session
 Manager 経由だけになる。変えたら `apply` を実行する。動いているインスタンスにも
 すぐ効く。手で書くほか、`sg add` と `sg remove` でも書き換えられる
 （[usage.md](usage.md#セキュリティグループ)）。`sg add` と `sg remove` を使うなら、規則は
@@ -212,8 +249,8 @@ VPC で立つ。古い VPC に残ったセキュリティグループは `destro
 **`ec2`。** ポリシー名 `ec2` は、アプリに結びつかない、インスタンスそのものの権限に
 使う。temt が動くのに要る SSM エージェントの権限と、自分の階層 `/temt-<svc>/` の SSM
 パラメータを読み書きする権限が入り、そのインスタンスで何をしたいかに応じて足す。
-`apply` は、設定ファイルに `[[role.policy.ec2]]` が 1 つも無ければ、次の既定を書いて
-から付ける。あれば、書かれたものをそのまま使うので、絞ることも足すこともできる。
+`apply` は、設定ファイルにも共通ファイルにも `[[role.policy.ec2]]` が 1 つも無ければ、
+次の既定を設定ファイルに書いてから付ける。あれば、書かれたものをそのまま使うので、絞ることも足すこともできる。
 
 ```toml
 # Permissions of the instance role that are not tied to one app. temt needs
@@ -267,7 +304,7 @@ Resource = [
 
 足すときは、既定の 2 つの Statement を残す。消すと、ssh も `reboot` も sshd の
 ポートの同期も効かなくなる。`[[role.policy.ec2]]` をすべて消して `apply` すれば、
-既定に戻る。
+既定に戻る（共通ファイルに `ec2` があれば、そちらになる）。
 
 アプリが使う権限は、アプリごとに別の名前で書く。`deploy` はロールに触らないので、
 権限を変える時点とアプリを入れ替える時点を分けられる。例えば、先に `apply` で
@@ -343,7 +380,7 @@ Resource = "arn:aws:s3:::my-bucket/*"
 最後の項目の次に足すので、その後ろのコメントは、次の見出しの前に残る。以後はこの
 ファイルの内容を正として進める。
 
-- `AwsRegion`、`InstanceType` は、既定を使ったときもその値を書く。
+- `AwsRegion`、`InstanceType` は、既定や共通ファイルの値を使ったときもその値を書く。
 - `ImageId` には選んだ AMI の名前を書く。Ubuntu 24.04 の公開 AMI は自分の
   アカウントのものではなく名前では指せないので、ID を書く。
 - `SubnetId` には選んだサブネットの ID を書く。既定のサブネットが見つからなければ
@@ -351,7 +388,8 @@ Resource = "arn:aws:s3:::my-bucket/*"
   用意するよう告げて、何も書かずに終了する。
 - `SshdPorts` と `VolumeSize` は書かない。
 - `AwsProfile` は、`--profile` が指定されたときだけその値を書く。
-- `[[role.policy.ec2]]` は、1 つも無ければ既定を、コメントとともに書く
+- `[[role.policy.ec2]]` は、このファイルにも共通ファイルにも 1 つも無ければ既定を、
+  コメントとともに書く
   （[`[role]`](#role)）。項目を書き終えたあとに書くので、新しく作るファイルでは
   項目の次、例のコメントより前に、既にあるファイルでは末尾に置かれる。書いたら
   `wrote the default [[role.policy.ec2]] in <ファイル>` と知らせる。足したあとの中身を
@@ -436,7 +474,7 @@ Resource = [
 | 名前 | 読むコマンド | 値 |
 | --- | --- | --- |
 | `TEMT_LOGIN` | `proxy` | ssh でインスタンスへつなぐ経路。`ssm`（Session Manager 経由）か `direct`（パブリック IP へ直接）。無ければ `ssm`。それ以外の値はエラー |
-| `TEMT_CONF_DIR` | `--svc` を付けたすべてと、`service list`、`app list` | 設定ファイルとアプリを置くディレクトリ。無ければ `~/.config/temt` |
+| `TEMT_CONF_DIR` | すべて | 設定ファイルとアプリを置くディレクトリ。無ければ `~/.config/temt` |
 | `TEMT_SSH_DIR` | `--svc` を付けたもののうち ssh の設定、鍵、ロックを使うもの（`apply`、`proxy` など）と、`ami prune` | ssh の設定・鍵・known_hosts を置くディレクトリ。無ければ `~/.ssh/temt` |
 | `AWS_PROFILE` | AWS を使うすべて（`proxy` を含む） | `--profile` も `AwsProfile` も無いときに使うプロファイル（[最上位](#最上位)） |
 

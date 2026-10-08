@@ -19,7 +19,7 @@ from types_boto3_ec2.client import EC2Client
 from temt import aws, conf, home, images, lock
 from temt.conf import Conf
 from temt.msg import TemtError, UsageError
-from temt.names import SSH_DIR_ENV, Service
+from temt.names import SSH_DIR_ENV, Service, defaults_path
 from temt.resources import TemplateVersion
 
 ACCOUNT = "123456789012"
@@ -457,7 +457,13 @@ def test_prune_counts_one_image(stubs: Stubs) -> None:
 
 
 @pytest.mark.parametrize(
-    "setting", [("option", "work"), ("AWS_PROFILE", "work"), ("AWS_DEFAULT_PROFILE", "work")]
+    "setting",
+    [
+        ("option", "work"),
+        ("defaults", "work"),
+        ("AWS_PROFILE", "work"),
+        ("AWS_DEFAULT_PROFILE", "work"),
+    ],
 )
 def test_the_environment_shows_a_chosen_profile(
     stubs: Stubs,
@@ -470,6 +476,9 @@ def test_the_environment_shows_a_chosen_profile(
     monkeypatch.setattr(Session, "profile_name", value)
     if name == "option":
         monkeypatch.setattr(conf, "OPTION_PROFILE", value)
+    elif name == "defaults":
+        defaults_path().parent.mkdir(parents=True, exist_ok=True)
+        defaults_path().write_text(f'AwsProfile = "{value}"\n', encoding="utf-8")
     else:
         monkeypatch.setenv(name, value)
     identified(stubs)

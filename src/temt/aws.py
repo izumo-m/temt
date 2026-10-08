@@ -29,6 +29,7 @@ from botocore.exceptions import ClientError
 from temt import conf, msg
 from temt.conf import Conf
 from temt.msg import TemtError
+from temt.names import defaults_path
 from temt.table import printable
 
 if TYPE_CHECKING:
@@ -91,18 +92,31 @@ def session(values: Conf) -> boto3.Session:
     return boto3.Session(profile_name=profile(values), region_name=values.AwsRegion)
 
 
-def env_session(region: str | None) -> boto3.Session:
-    """--svc の無いコマンドの Session。設定ファイルは読まない。
+def _env_profile(common: Mapping[str, Any]) -> str | None:
+    """--svc の無いコマンドのプロファイル。--profile、共通ファイルの AwsProfile の順。"""
+    return conf.OPTION_PROFILE or common.get("AwsProfile")
 
-    プロファイルは --profile で、省けば AWS の既定の規則で決まる。リージョンは、
-    aws-cli と同じく region（--region）、AWS_REGION、AWS_DEFAULT_REGION、プロファイルの
-    region の順に探す。環境変数は main が取り除く前に conf.ENV_REGION に控えてある。
+
+def env_session(region: str | None) -> boto3.Session:
+    """--svc の無いコマンドの Session。サービスの設定ファイルは読まず、共通ファイルを読む。
+
+    プロファイルは --profile、共通ファイルの AwsProfile の順で、どちらも無ければ AWS の
+    既定の規則で決まる。リージョンは region（--region）、共通ファイルの AwsRegion、
+    AWS_REGION、AWS_DEFAULT_REGION、プロファイルの region の順に探す。共通ファイルを
+    環境変数より先にするのは、作業中のプロジェクトが設定した環境変数に temt がつられない
+    ようにするためである。環境変数は main が取り除く前に conf.ENV_REGION に控えてある。
     boto3 は AWS_REGION を読まないので、temt が読んで渡す。決まらなければエラーにする。
     """
-    session = boto3.Session(profile_name=conf.OPTION_PROFILE, region_name=region or conf.ENV_REGION)
+    common = conf.common_values()
+    session = boto3.Session(
+        profile_name=_env_profile(common),
+        region_name=region or common.get("AwsRegion") or conf.ENV_REGION,
+    )
     if not session.region_name:
         raise TemtError(
-            "no region; give --region, set AWS_REGION, or write region in the AWS profile"
+            f"no region; give --region, write AwsRegion in "
+            f"{printable(str(defaults_path()))}, set AWS_REGION, or write region in the "
+            f"AWS profile"
         )
     return session
 
@@ -117,7 +131,7 @@ def environment(region: str | None) -> boto3.Session:
     session = env_session(region)
     # boto3 はプロファイルを選んでいなくても default と答えるので、選んだときだけ出す。
     # 選んでいなければ、資格情報は環境変数の鍵などから来ていることがある
-    chosen = conf.OPTION_PROFILE or any(os.environ.get(name) for name in PROFILE_ENV)
+    chosen = _env_profile(conf.common_values()) or any(os.environ.get(name) for name in PROFILE_ENV)
     # 表だけを標準出力に残すよう、標準エラー出力に書く
     msg.tell(
         f"account {account(session)}, region {printable(session.region_name)}, "

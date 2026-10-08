@@ -7,7 +7,7 @@ import pytest
 
 from temt import names, services
 from temt.msg import TemtError, UsageError
-from temt.names import Service, conf_dir
+from temt.names import Service, conf_dir, defaults_path
 
 HEADER = "SERVICE    PROFILE   REGION           IMAGE                   TYPE"
 
@@ -243,3 +243,32 @@ def test_list_of_a_service_without_its_config_file(home_dir: Path) -> None:
     written("dev-main", "")
     with pytest.raises(TemtError, match="no config file: .*; run 'temt apply --svc web' first"):
         services.list_services(Service("web"), None)
+
+
+def test_list_reads_the_common_file_but_not_as_a_service(
+    home_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ = home_dir
+    written("web", 'AwsRegion = "us-east-1"\n')
+    defaults_path().write_text('AwsProfile = "work"\nAwsRegion = "eu-west-1"\n', encoding="utf-8")
+
+    services.list_services(None, "SERVICE,PROFILE,REGION")
+
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert out.splitlines() == ["SERVICE   PROFILE   REGION", "web       work      us-east-1"]
+
+
+def test_list_stops_at_a_broken_common_file(
+    home_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ファイルごとに同じ警告を並べず、共通ファイルを挙げて止まる。"""
+    _ = home_dir
+    written("web", "")
+    written("db", "")
+    defaults_path().write_text('Foo = "x"\n', encoding="utf-8")
+
+    with pytest.raises(TemtError, match=f"^{defaults_path()}: unknown key: Foo$"):
+        services.list_services(None, "SERVICE")
+
+    assert capsys.readouterr() == ("", "")

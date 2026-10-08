@@ -7,6 +7,10 @@
 値が空文字列の項目と、配列を書ける項目の空の配列は、書かれていないものとして扱う。
 項目は「書かれている」か「無い」かのどちらかとする。
 
+conf ディレクトリの共通ファイル defaults.toml は、同じ形で全サービスに共通の値を持つ。
+load は設定ファイルを共通ファイルの上に重ねて読む（_merge）。書き換えるのは設定ファイル
+だけで、共通ファイルには書かない。
+
 書ける項目と既定は Conf の定義がすべてである。テーブルは dataclass のフィールドで、
 フィールド名はテーブル名のハイフンをアンダースコアにしたもの（launch-template なら
 launch_template）。同じ名前のテーブルを繰り返し書くテーブルの配列
@@ -43,6 +47,7 @@ from temt.msg import TemtError
 from temt.names import (
     LABEL_RULE,
     Service,
+    defaults_path,
     is_label,
     make_dir,
     replace_text,
@@ -585,13 +590,123 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
     return values
 
 
-def _parse(text: str, path: Path) -> dict[str, Any]:
-    """設定ファイルの中身を Conf に渡す対応に変える。"""
+def _document(text: str, path: Path) -> dict[str, Any]:
+    """設定ファイルの中身を、TOML のまま辞書に読む。項目は確かめない。"""
     try:
-        document = tomlkit.parse(text)
+        return tomlkit.parse(text).unwrap()
     except TOMLKitError as error:
         raise TemtError(f"{printable(str(path))}: {printable(str(error))}") from None
-    return _read(document.unwrap(), Conf, path, "")
+
+
+def _built(document: dict[str, Any], path: Path) -> Conf:
+    """_document で読んだ中身から Conf を作る。誤りはファイル名を添えて知らせる。"""
+    try:
+        return Conf(**_read(document, Conf, path, ""))
+    except ValueError as error:
+        raise TemtError(f"{printable(str(path))}: {error}") from None
+
+
+def _text(path: Path) -> str | None:
+    """ファイルの中身。無ければ None。UTF-8 として読めなければ TemtError。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError as error:
+        raise TemtError(f"{printable(str(path))}: not valid UTF-8: {error.reason}") from None
+
+
+def _common() -> tuple[dict[str, Any], Conf] | None:
+    """共通ファイルの中身と、それだけを読んだ Conf。ファイルが無ければ None。
+
+    中身の誤りは、共通ファイルの名前を添えて知らせる。行き先の無いシンボリックリンクも
+    誤りとする。
+    """
+    path = defaults_path()
+    text = _text(path)
+    if text is None:
+        # 行き先の無いシンボリックリンクを無いものとすると、共通ファイルの AwsProfile を
+        # 使わずに環境変数のプロファイルへ黙って移ってしまう
+        if path.is_symlink():
+            raise TemtError(f"{printable(str(path))}: broken symlink")
+        return None
+    document = _document(text, path)
+    return document, _built(document, path)
+
+
+def common_values() -> dict[str, Any]:
+    """共通ファイルの最上位に書かれている項目の値。既定は補わない。
+
+    --svc の無いコマンドが AwsProfile と AwsRegion を読む。ファイルが無ければ空。
+    """
+    found = _common()
+    if found is None:
+        return {}
+    return _read(found[0], Conf, defaults_path(), "")
+
+
+def common_rules() -> list[Ingress]:
+    """共通ファイルの受信規則。ファイルが無ければ空。"""
+    found = _common()
+    return [] if found is None else found[1].security_group.ingress
+
+
+def _blank(value: Any) -> bool:
+    """書かれていないものとして扱う値か。空文字列と空の配列。"""
+    return value == "" or value == []
+
+
+def _merge(cls: type, base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """cls のテーブルの中身 base に over を重ねる。どちらも確かめ済みの、TOML のままの辞書。
+
+    項目は over に書かれていれば over の値にする。テーブルは中の項目ごとに重ね、テーブルの
+    配列（受信規則）は base の後ろに over を足し、[role.policy] はポリシー名ごとに over
+    の方を使う。
+    """
+    keys = _keys(cls)
+    merged = dict(base)
+    for key, value in over.items():
+        kind = keys[key]
+        table_class = _table_class(kind)
+        if table_class is not None:
+            merged[key] = _merge(table_class, base.get(key, {}), value)
+        elif _element(kind) is not None:
+            merged[key] = [*base.get(key, []), *value]
+        elif kind == POLICIES:
+            merged[key] = {**base.get(key, {}), **value}
+        elif not _blank(value):
+            merged[key] = value
+    return merged
+
+
+def _combined(document: dict[str, Any], path: Path) -> Conf:
+    """設定ファイル path の中身を、共通ファイルの上に重ねて読む。
+
+    どちらのファイルも、まず単独で確かめる。誤りをそれぞれのファイル名で知らせるためで
+    ある。共通ファイルと同じ受信規則を書いていれば、重ねると 2 つになるので誤りにする。
+    """
+    own = _built(document, path)
+    common = _common()
+    if common is None:
+        return own
+    base, shared = common
+    keys = {rule_key(one) for one in shared.security_group.ingress}
+    for index, one in enumerate(own.security_group.ingress):
+        if rule_key(one) in keys:
+            raise TemtError(
+                f"{printable(str(path))}: {SECURITY_GROUP}{SEPARATOR}{INGRESS}[{index}] "
+                f"repeats a rule in {printable(str(defaults_path()))}; remove one of them"
+            )
+    return _built(_merge(Conf, base, document), path)
+
+
+def _conf_in(text: str, path: Path, *, common: bool = True) -> Conf:
+    """設定ファイル path の中身 text を読む。common なら共通ファイルの上に重ねる。
+
+    読めなければ TemtError。
+    """
+    document = _document(text, path)
+    return _combined(document, path) if common else _built(document, path)
 
 
 def write_example(service: Service) -> None:
@@ -645,23 +760,22 @@ def write_ec2_default(service: Service, values: Conf) -> None:
     values.role.policy[EC2] = done.role.policy[EC2]
 
 
-def load(service: Service, *, missing_ok: bool = False) -> Conf:
-    """設定ファイルを読む。missing_ok なら、ファイルが無いとき既定だけの Conf を返す。"""
+def load(service: Service, *, missing_ok: bool = False, common: bool = True) -> Conf:
+    """設定ファイルを、共通ファイルの上に重ねて読む。
+
+    missing_ok なら、ファイルが無いとき共通ファイルと既定だけの Conf を返す。common が
+    偽なら、共通ファイルを重ねず、設定ファイルに書かれたものだけを読む。
+    """
     path = service.conf_path
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        if missing_ok:
-            return Conf()
-        raise TemtError(
-            f"no config file: {printable(str(path))}; run 'temt apply --svc {service.svc}' first"
-        ) from None
-    except UnicodeDecodeError as error:
-        raise TemtError(f"{printable(str(path))}: not valid UTF-8: {error.reason}") from None
-    try:
-        return Conf(**_parse(text, path))
-    except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {error}") from None
+    text = _text(path)
+    if text is None:
+        if not missing_ok:
+            raise TemtError(
+                f"no config file: {printable(str(path))}; "
+                f"run 'temt apply --svc {service.svc}' first"
+            )
+        text = ""
+    return _conf_in(text, path, common=common)
 
 
 def written(service: Service, key: str) -> Any:
@@ -669,17 +783,39 @@ def written(service: Service, key: str) -> Any:
 
     key は update と同じく項目の位置。書かれたままの値を返し、既定は補わない。
     """
-    *parents, name = key.split(SEPARATOR)
     try:
         text = service.conf_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    table: Any = tomlkit.parse(text).unwrap()
+    return _lookup(tomlkit.parse(text).unwrap(), key)
+
+
+def _lookup(document: dict[str, Any], key: str) -> Any:
+    """TOML のままの辞書 document の、位置 key の値。無ければ None。"""
+    *parents, name = key.split(SEPARATOR)
+    table: Any = document
     for parent in parents:
         table = table.get(parent)
         if not isinstance(table, dict):
             return None
     return table.get(name)
+
+
+def source(service: Service, key: str) -> Path:
+    """項目 key の値を書いたファイル。直すよう告げるときに名前を出す。
+
+    設定ファイルに無く（空の値を含む）、共通ファイルにあれば、共通ファイルとする。
+    どちらにも無ければ、設定ファイルとする。
+    """
+    value = written(service, key)
+    if value is not None and not _blank(value):
+        return service.conf_path
+    common = _common()
+    if common is not None:
+        value = _lookup(common[0], key)
+        if value is not None and not _blank(value):
+            return defaults_path()
+    return service.conf_path
 
 
 def assign(values: Conf, key: str, value: str) -> None:
@@ -924,14 +1060,6 @@ def _previous_table(document: Any) -> Any:
     return None
 
 
-def _conf_in(text: str, path: Path) -> Conf:
-    """設定ファイルの中身を読む。読めなければ TemtError。"""
-    try:
-        return Conf(**_parse(text, path))
-    except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {error}") from None
-
-
 def edit_ingress(
     service: Service,
     values: Conf,
@@ -941,6 +1069,8 @@ def edit_ingress(
     removed: Sequence[int] = (),
 ) -> None:
     """設定ファイルの受信規則を書き換え、Conf にも同じ変更を映す。
+
+    values は、共通ファイルを重ねずに読んだ設定ファイル（load の common=False）である。
 
     described は規則の位置から新しい説明への対応で、空の説明は Description を消す。
     removed は消す規則の位置。位置はどちらも書き換える前の values の並びで数える。
@@ -955,7 +1085,7 @@ def edit_ingress(
     path = service.conf_path
     text = path.read_text(encoding="utf-8")
     rules = values.security_group.ingress
-    current = _conf_in(text, path)
+    current = _conf_in(text, path, common=False)
     if current.security_group.ingress != rules:
         raise TemtError(f"{printable(tilde(path))} changed while running; run the command again")
     wanted = [replace(one) for one in rules]
@@ -981,7 +1111,7 @@ def edit_ingress(
         # 無かった末尾の空行は落とす
         if written.endswith("\n\n") and not text.endswith("\n\n"):
             written = written.rstrip("\n") + "\n"
-        done: Conf | None = _conf_in(written, path)
+        done: Conf | None = _conf_in(written, path, common=False)
     except (TemtError, *EDIT_ERRORS):
         written, done = "", None
     if (

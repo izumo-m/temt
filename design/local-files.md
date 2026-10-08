@@ -29,6 +29,8 @@ reuse a cached build, which it did not), so CONTRIBUTING.md just says to run it 
     <name>                      service command; apply writes it if absent, destroy removes it
 ~/.config/temt/                 conf directory; mode 700 when temt creates it
     <svc>.toml                  config file of the service; apply writes it if absent
+    defaults.toml               defaults file: values common to every service; placed by
+                                the user, never written by temt
     apps/<app ID>/              app that deploy looks up first by app ID; placed by the user
 ~/.ssh/temt/                    ssh directory; mode 700
     config                      ssh config; apply adds and updates Host blocks;
@@ -75,8 +77,11 @@ Who reads them:
   the ssh directory is used (the default login key, locks, the ssh config), so a
   command that uses none of them does not notice a wrong value.
 - `service list`: only `TEMT_CONF_DIR`, which locates the config files.
-- `ami prune` without `--svc`: only `TEMT_SSH_DIR`, which locates the locks. A wrong
-  value is an error before the confirmation.
+- `instance list`, `ami list`, `ami prune`, and `ami delete` without `--svc`:
+  `TEMT_CONF_DIR`, which locates the defaults file
+  ([config.md](config.md#commands-without---svc)). `ami prune` also reads
+  `TEMT_SSH_DIR`, which locates the locks; a wrong value is an error before the
+  confirmation.
 - `app list` without `--svc`: only `TEMT_CONF_DIR`, which locates the apps.
 
 Values are absolute paths; the rules for values are in

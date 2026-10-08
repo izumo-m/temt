@@ -10,7 +10,7 @@ from pathlib import Path
 from temt import conf, msg, table
 from temt.conf import UNSET, Conf
 from temt.msg import TemtError
-from temt.names import Service, conf_dir, exists
+from temt.names import Service, conf_dir, defaults_path, exists
 
 # 設定ファイルの拡張子
 SUFFIX = ".toml"
@@ -48,7 +48,7 @@ def _files(place: Path) -> list[Path]:
     """conf ディレクトリの設定ファイル。サービス名の順。ディレクトリが無ければ空。
 
     . で始まるファイルは、シェルの * と同じく含めない。エディタのロックファイル
-    （.#<svc>.toml）などで警告しないためである。
+    （.#<svc>.toml）などで警告しないためである。共通ファイルも含めない。
     """
     if not exists(place):
         return []
@@ -56,7 +56,9 @@ def _files(place: Path) -> list[Path]:
         (
             path
             for path in place.iterdir()
-            if path.name.endswith(SUFFIX) and not path.name.startswith(HIDDEN)
+            if path.name.endswith(SUFFIX)
+            and not path.name.startswith(HIDDEN)
+            and path.name != defaults_path().name
         ),
         key=lambda path: path.name.removesuffix(SUFFIX),
     )
@@ -67,13 +69,16 @@ def list_services(service: Service | None, spec: str | None) -> None:
 
     service があれば、その設定ファイルだけを読み、1 行を出す。無ければ、読めない
     ファイルと、名前がサービス名の規則に合わないファイルは、警告して飛ばし、残りを
-    並べてから誤りとして終える。
+    並べてから誤りとして終える。共通ファイルが読めなければ、何も並べずに終える。
     """
     chosen = COLUMNS.choose(spec)
     if service is not None:
         # 無いか読めなければ、他の --svc のコマンドと同じく、apply を促すか理由を告げて止まる
         table.write(chosen, [_row(service, conf.load(service))])
         return
+    # どのファイルも共通ファイルを重ねて読むので、共通ファイルが読めなければ、ファイル
+    # ごとに同じ警告を並べずに、ここで止まる
+    _ = conf.common_values()
     rows: list[dict[str, str]] = []
     files = _files(conf_dir())
     skipped = 0

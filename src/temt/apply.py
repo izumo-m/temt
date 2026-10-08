@@ -154,12 +154,12 @@ def _root_device(service: Service, values: Conf, found: Mapping[str, Any]) -> st
     if root is None:
         raise TemtError(
             f"the AMI {image_id} has no EBS root volume; remove {key} from "
-            f"{printable(str(service.conf_path))}"
+            f"{printable(str(conf.source(service, key)))}"
         )
     if size < root.size:
         raise TemtError(
             f"{key} {size} is smaller than the root volume of {image_id} ({root.size} GiB); "
-            f"raise it or remove it in {printable(str(service.conf_path))}"
+            f"raise it or remove it in {printable(str(conf.source(service, key)))}"
         )
     return root.device
 
@@ -183,8 +183,8 @@ def _resolve(ec2: EC2Client, service: Service, values: Conf) -> Resolved:
         raise TemtError(
             f"no {conf.launch_template_key('ImageId')} in {printable(str(service.conf_path))}"
         )
-    subnet = aws.subnet(ec2, subnet_id, service.conf_path)
-    found = aws.image(ec2, image_id, service.conf_path)
+    subnet = aws.subnet(ec2, subnet_id, conf.source(service, conf.launch_template_key("SubnetId")))
+    found = aws.image(ec2, image_id, conf.source(service, conf.launch_template_key("ImageId")))
     return Resolved(
         field(found, "ImageId"), subnet_id, subnet, _root_device(service, values, found)
     )

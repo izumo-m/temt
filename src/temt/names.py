@@ -56,6 +56,9 @@ SSH_DIR_ENV = "TEMT_SSH_DIR"
 SSH_DIR_DEFAULT = f"~/.ssh/{PREFIX}"
 # 利用者のアプリを置く、conf ディレクトリの下のディレクトリ
 USER_APPS = "apps"
+# 全サービスに共通の値を書く、conf ディレクトリの共通ファイル <DEFAULTS>.toml。この名前は
+# サービス名に使えない
+DEFAULTS = "defaults"
 # temt と一緒に配るアプリの場所
 BUNDLED_APPS = Path(__file__).parent / "apps"
 # 場所を表すパスに使えない文字。ssh の設定は空白で語を分け、% をトークンとして、
@@ -94,6 +97,11 @@ def _place(env: str, default: str) -> Path:
 def conf_dir() -> Path:
     """設定ファイルを置くディレクトリ。"""
     return _place(CONF_DIR_ENV, CONF_DIR_DEFAULT)
+
+
+def defaults_path() -> Path:
+    """共通ファイルのパス。"""
+    return conf_dir() / f"{DEFAULTS}.toml"
 
 
 def default_conf_dir() -> Path:
@@ -299,6 +307,10 @@ class Service:
     def __post_init__(self) -> None:
         if not SVC_RE.fullmatch(self.svc):
             raise UsageError(f"invalid service name: {printable(self.svc)}")
+        if self.svc == DEFAULTS:
+            raise UsageError(
+                f"invalid service name: {DEFAULTS} (reserved for the file {DEFAULTS}.toml)"
+            )
         if len(self.name) > NAME_MAX:
             raise UsageError(f"name longer than {NAME_MAX} characters: {self.name}")
 

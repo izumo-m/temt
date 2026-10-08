@@ -41,7 +41,9 @@ def _vpc(ec2: EC2Client, service: Service, values: Conf, *, quiet: bool = False)
                 f"{table.printable(tilde(service.conf_path))}; the next apply picks a subnet"
             )
         return None
-    return aws.subnet(ec2, subnet_id, service.conf_path).vpc_id
+    return aws.subnet(
+        ec2, subnet_id, conf.source(service, conf.launch_template_key("SubnetId"))
+    ).vpc_id
 
 
 def _split(

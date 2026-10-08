@@ -13,6 +13,7 @@ avoid the ones marked "not".
 | service name, `<svc>` | サービス名、`<svc>` | |
 | `<name>` (`temt-<svc>`) | 名前、`<名前>` | Base of every resource name |
 | config file (`<svc>.toml`) | 設定ファイル | |
+| defaults file (`defaults.toml`) | 共通ファイル | Values common to every service |
 | conf directory | `TEMT_CONF_DIR` のディレクトリ、設定ファイルとアプリを置くディレクトリ | `~/.config/temt` by default |
 | ssh directory | ssh ディレクトリ、`TEMT_SSH_DIR` のディレクトリ | `~/.ssh/temt` by default |
 | service command (`~/.local/bin/<name>`) | サービスのコマンド | |

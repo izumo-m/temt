@@ -12,7 +12,7 @@ import tomlkit
 from temt import conf
 from temt.conf import Conf, Ingress, LaunchTemplate, SecurityGroup
 from temt.msg import TemtError
-from temt.names import LABEL_RULE, Service
+from temt.names import LABEL_RULE, Service, defaults_path
 
 TEMPLATE = conf.LAUNCH_TEMPLATE
 
@@ -1289,3 +1289,135 @@ def test_update_makes_a_new_file_with_the_usual_mode(service: Service) -> None:
     finally:
         os.umask(before)
     assert service.conf_path.stat().st_mode & 0o777 == 0o644
+
+
+def write_defaults(text: str) -> None:
+    """共通ファイルを用意する。"""
+    defaults_path().parent.mkdir(parents=True, exist_ok=True)
+    defaults_path().write_text(text, encoding="utf-8")
+
+
+EC2_COMMON = '[[role.policy.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n'
+RULE = '[[security-group.ingress]]\nPort = 22\nCidr = "{}"\n'
+
+
+def test_the_common_file_fills_what_the_service_does_not_write(service: Service) -> None:
+    write_defaults(
+        'AwsProfile = "work"\nAwsRegion = "us-east-1"\nSshdPorts = [2222]\n\n'
+        '[launch-template]\nInstanceType = "t3.small"\nVolumeSize = 16\n'
+    )
+    write(service, 'AwsRegion = "eu-west-1"\n\n[launch-template]\nSubnetId = "subnet-1"\n')
+    assert conf.load(service) == Conf(
+        AwsProfile="work",
+        AwsRegion="eu-west-1",
+        SshdPorts=[2222],
+        launch_template=LaunchTemplate(InstanceType="t3.small", SubnetId="subnet-1", VolumeSize=16),
+    )
+
+
+def test_a_blank_value_of_the_service_leaves_the_common_one(service: Service) -> None:
+    """空の値は書かれていないものなので、共通ファイルの値が効く。"""
+    write_defaults('AwsProfile = "work"\nSshdPorts = [2222]\n')
+    write(service, 'AwsProfile = ""\nSshdPorts = []\n')
+    loaded = conf.load(service)
+    assert (loaded.AwsProfile, loaded.SshdPorts) == ("work", [2222])
+
+
+def test_rules_of_both_files_are_joined(service: Service) -> None:
+    write_defaults(RULE.format("198.51.100.0/24"))
+    write(service, RULE.format("203.0.113.10/32"))
+    assert [one.Cidr for one in conf.load(service).security_group.ingress] == [
+        "198.51.100.0/24",
+        "203.0.113.10/32",
+    ]
+
+
+def test_a_rule_written_in_both_files_is_an_error(service: Service) -> None:
+    write_defaults(RULE.format("198.51.100.0/24"))
+    write(service, RULE.format("203.0.113.10/32") + RULE.format("198.51.100.0/24"))
+    with pytest.raises(TemtError) as caught:
+        conf.load(service)
+    assert str(caught.value) == (
+        f"{service.conf_path}: security-group.ingress[1] repeats a rule in {defaults_path()}; "
+        f"remove one of them"
+    )
+
+
+def test_policies_are_joined_by_name(service: Service) -> None:
+    """同じ名前のポリシーは、サービスの設定ファイルのものを使う。"""
+    write_defaults(
+        '[[role.policy.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n\n'
+        '[[role.policy.logs]]\nAction = ["logs:PutLogEvents"]\nResource = "*"\n'
+    )
+    write(service, '[[role.policy.ec2]]\nAction = ["ec2:DescribeTags"]\nResource = "*"\n')
+    assert conf.load(service).role.policy == {
+        "ec2": [{"Action": ["ec2:DescribeTags"], "Resource": "*"}],
+        "logs": [{"Action": ["logs:PutLogEvents"], "Resource": "*"}],
+    }
+
+
+def test_an_error_in_the_common_file_names_it(service: Service) -> None:
+    write_defaults("[launch-template]\nInstanceType = 3\n")
+    write(service, "")
+    with pytest.raises(TemtError) as caught:
+        conf.load(service)
+    assert str(caught.value) == f"{defaults_path()}: launch-template.InstanceType must be a string"
+
+
+def test_without_a_config_file_the_common_file_still_counts(service: Service) -> None:
+    """apply は、まだ無い設定ファイルを共通ファイルと既定から始める。"""
+    write_defaults('[launch-template]\nInstanceType = "t3.small"\n')
+    assert conf.load(service, missing_ok=True).launch_template.InstanceType == "t3.small"
+    with pytest.raises(TemtError, match="no config file"):
+        conf.load(service)
+
+
+def test_load_can_leave_the_common_file_out(service: Service) -> None:
+    write_defaults('AwsProfile = "work"\n' + RULE.format("198.51.100.0/24"))
+    write(service, RULE.format("203.0.113.10/32"))
+    loaded = conf.load(service, common=False)
+    assert loaded.AwsProfile is None
+    assert [one.Cidr for one in loaded.security_group.ingress] == ["203.0.113.10/32"]
+
+
+def test_common_values_are_only_what_is_written() -> None:
+    assert conf.common_values() == {}
+    write_defaults('AwsProfile = "work"\nAwsRegion = ""\n')
+    assert conf.common_values() == {"AwsProfile": "work"}
+
+
+def test_the_default_ec2_policy_is_added_beside_common_policies(service: Service) -> None:
+    write_defaults('[[role.policy.logs]]\nAction = ["logs:PutLogEvents"]\nResource = "*"\n')
+    write(service, 'AwsRegion = "us-east-1"\n')
+    values = conf.load(service)
+    conf.write_ec2_default(service, values)
+    assert set(values.role.policy) == {"logs", conf.EC2}
+    assert "role.policy.logs" not in read(service)
+
+
+def test_a_broken_symlink_as_the_common_file_is_an_error(service: Service) -> None:
+    """無いものとすると、環境変数のプロファイルへ黙って移ってしまう。"""
+    defaults_path().parent.mkdir(parents=True, exist_ok=True)
+    defaults_path().symlink_to(defaults_path().parent / "gone.toml")
+    write(service, "")
+    with pytest.raises(TemtError) as caught:
+        conf.load(service)
+    assert str(caught.value) == f"{defaults_path()}: broken symlink"
+    with pytest.raises(TemtError, match="broken symlink"):
+        conf.common_values()
+
+
+def test_source_names_the_file_that_holds_the_value(service: Service) -> None:
+    key = conf.launch_template_key("VolumeSize")
+    write_defaults("[launch-template]\nVolumeSize = 16\n")
+    write(service, 'AwsProfile = ""\n')
+    assert conf.source(service, key) == defaults_path()
+    assert conf.source(service, "AwsProfile") == service.conf_path
+    write(service, "[launch-template]\nVolumeSize = 32\n")
+    assert conf.source(service, key) == service.conf_path
+
+
+def test_the_common_ec2_policy_keeps_apply_from_adding_the_default(service: Service) -> None:
+    write_defaults(EC2_COMMON)
+    write(service, 'AwsRegion = "us-east-1"\n')
+    assert conf.EC2 in conf.load(service).role.policy

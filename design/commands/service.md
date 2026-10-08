@@ -31,7 +31,8 @@ If it stops during the update phase, whatever was already written stays.
    another conf directory, and the service's config file still exists there (unless it
    is the same file as the one in the current location), exit naming that location
    ([topics/ssh.md](../topics/ssh.md#services-across-conf-directories)).
-2. Read the config file; if it does not exist, start from the defaults alone. Detect keys
+2. Read the config file over the defaults file ([config.md](../config.md#defaults-file));
+   if it does not exist, start from the defaults file and the built-in defaults. Detect keys
    that are missing or have a different value, deciding each value as it goes.
    Missing `ImageId` and `SubnetId` are chosen from AWS here. If there is no
    `[[role.policy.ec2]]`, plan to add the default and check that it can be added
@@ -230,16 +231,19 @@ It does not call AWS. For the AWS side, use [`instance list`](instance.md#instan
 for instances and [`template show`](template.md) for the launch template. `--profile`
 and `--region` are usage errors.
 
-With `--svc`, it reads only that service's config file and prints one row. If the file
+With `--svc`, it reads only that service's config file (over the defaults file) and
+prints one row. If the file
 does not exist, it tells the user to run `apply`; if it cannot be read, it gives the
 reason; either way it exits with code 1.
 
-Without `--svc`, it reads `*.toml` in the conf directory. Files not ending in `.toml`
-and files starting with `.` (such as the editor lock file `.#<svc>.toml`) are skipped
-silently. If the conf directory does not exist, only the header is printed. Files that
-cannot be read, and files whose name minus `.toml` does not satisfy the service-name
-rules, are warned about and skipped; the rest are listed, then temt reports the number
-skipped and exits with code 1.
+Without `--svc`, it reads `*.toml` in the conf directory. Files not ending in `.toml`,
+files starting with `.` (such as the editor lock file `.#<svc>.toml`), and the defaults
+file `defaults.toml` are skipped silently. If the conf directory does not exist, only
+the header is printed. Files that cannot be read, and files whose name minus `.toml`
+does not satisfy the service-name rules, are warned about and skipped; the rest are
+listed, then temt reports the number skipped and exits with code 1. Every file is read
+over the defaults file, so a defaults file that cannot be read (including a broken
+symlink) stops the command before listing, naming the defaults file.
 
 | Column | Default | Value |
 | --- | --- | --- |
@@ -253,7 +257,7 @@ skipped and exits with code 1.
 | `SSHDPORTS` | | `SshdPorts` joined with `,` |
 | `VOLUMESIZE` | | `VolumeSize` |
 
-Values are the effective values when the config file is read: keys with a default
-show the default when not written. Keys with no value (unwritten `AwsProfile` and
-`VolumeSize`; `ImageId` and `SubnetId` before `apply`) show `-`. `ImageId` is shown as
+Values are the effective values when the config file is read over the defaults file:
+keys with a default show the default when not written. Keys with no value (unwritten
+`AwsProfile` and `VolumeSize`; `ImageId` and `SubnetId` before `apply`) show `-`. `ImageId` is shown as
 written and not resolved to an AMI ID.

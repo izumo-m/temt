@@ -33,7 +33,7 @@ from temt import (
     terminate,
 )
 from temt.msg import UsageError
-from temt.names import INSTANCE_ID_RULE, LABEL_RULE, USER_NAME_RULE, Service
+from temt.names import INSTANCE_ID_RULE, LABEL_RULE, USER_NAME_RULE, Service, defaults_path
 
 SVC = ["--svc", "dev-main"]
 
@@ -1085,7 +1085,9 @@ def test_main_says_where_the_profile_can_be_chosen_without_a_service(
 
     monkeypatch.setattr(images, "prune", fail)
     assert cli.main(["temt", "ami", "prune"]) == 1
-    assert capsys.readouterr().err.endswith("; give --profile or set AWS_PROFILE\n")
+    assert capsys.readouterr().err.endswith(
+        f"; give --profile, write AwsProfile in {defaults_path()}, or set AWS_PROFILE\n"
+    )
 
 
 def test_ami_delete_refuses_what_aws_cannot_take() -> None:

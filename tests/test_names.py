@@ -274,3 +274,12 @@ def test_user_name_accepted(name: str) -> None:
 @pytest.mark.parametrize("name", ["", "a" * 33, "1a", "-a", "Ubuntu", "a$", "a b", "a.b"])
 def test_user_name_rejected(name: str) -> None:
     assert not names.is_user_name(name)
+
+
+def test_defaults_is_not_a_service_name() -> None:
+    """共通ファイル defaults.toml と取り違えないよう、サービス名には使えない。"""
+    with pytest.raises(UsageError) as caught:
+        Service("defaults")
+    assert (
+        str(caught.value) == "invalid service name: defaults (reserved for the file defaults.toml)"
+    )

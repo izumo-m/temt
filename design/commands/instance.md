@@ -276,9 +276,8 @@ nor AWS. Shows:
 Lists temt's instances, one per row ([List tables](../cli.md#list-tables)). temt's
 instances are those that have the `temt:service` tag and are not `terminated`. With
 `--svc`, the service's config file decides the environment and only `temt:service=<svc>`
-instances are listed. Without it, all services' instances in the environment decided by
-`--profile` and `--region` are listed ([Commands without
---svc](../config.md#commands-without---svc)). Instances of services without a config
+instances are listed. Without it, all services' instances in the environment decided as in
+[Commands without --svc](../config.md#commands-without---svc) are listed. Instances of services without a config
 file also appear. Instances without the `temt:service` tag (e.g. launched by hand with
 `Name=<name>`) do not appear; `status` finds by `Name`, so they appear there. Rows are
 ordered by the `temt:service` value, launch time, and ID. The SSM agent is not looked

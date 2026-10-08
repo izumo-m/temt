@@ -28,9 +28,9 @@ and `app remove` do not touch the role.
 
 `temt-ec2` holds the permissions of the instance itself, not tied to any app. By
 default it includes the SSM Agent permissions temt needs (Session Manager, Run
-Command, State Manager) and read/write of the SSM parameters under `/<name>`. If the
-config file has no `[[role.policy.ec2]]`, `apply` writes the default; if it has one,
-that is used.
+Command, State Manager) and read/write of the SSM parameters under `/<name>`. If
+neither the config file nor the defaults file has `[[role.policy.ec2]]`, `apply` writes
+the default into the config file; if one has it, that is used.
 
 For each `[[role.policy.<policy name>]]`, `apply` adds `Allow` to statements without
 `Effect`, substitutes the variables, compares the result with the current content of

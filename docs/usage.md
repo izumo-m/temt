@@ -19,7 +19,7 @@ AWS の資格情報は、EC2、IAM、SSM を操作できる権限と、ロール
 IAM Access Analyzer の `access-analyzer:ValidatePolicy`、ログインの鍵をインスタンスに
 送る EC2 Instance Connect の `ec2-instance-connect:SendSSHPublicKey` を持つプロファイルとして
 `~/.aws/` に設定しておく。サービスのリージョンは環境変数では与えられない。設定
-ファイルで指定する（[conf.md](conf.md)）。
+ファイルか共通ファイルで指定する（[conf.md](conf.md)）。
 
 ## 入れ方
 
@@ -76,7 +76,7 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 
 サービスの名前は利用者が決める。サービス名は英小文字で始まり、英小文字・数字・
 ハイフンが続き、英小文字か数字で終わる（`dev-main` など）。`temt-<svc>` が 64 文字に
-収まる長さにする。
+収まる長さにする。`defaults` は共通ファイルの名前なので使えない。
 
 以下、サービス名を `<svc>` と書く。ssh の Host 名や AWS のリソース名はすべて
 `temt-<svc>` になる。
@@ -88,6 +88,8 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 （[ファイルの場所を変える](#ファイルの場所を変える)）。
 
 - 設定ファイル `~/.config/temt/<svc>.toml`（[conf.md](conf.md)）
+- 全サービスに共通の値を書く共通ファイル `~/.config/temt/defaults.toml`
+  （[conf.md](conf.md#全サービスに共通の値)）
 - 自分のアプリ `~/.config/temt/apps/<アプリID>/`（[アプリを入れる](#アプリを入れる)）
 - ssh の設定、鍵、known_hosts `~/.ssh/temt/`（[`~/.ssh/temt/` の中身](#sshtemt-の中身)）
 - サービスのコマンド `~/.local/bin/temt-<svc>`（[サービスのコマンド](#サービスのコマンド)）
@@ -166,17 +168,18 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 
 AWS のプロファイルを選ぶ `--profile <プロファイル>` は、AWS を呼ぶどの
 コマンドにも付けられる。リージョンを選ぶ `--region <リージョン>` は、`--svc` を
-付けないときだけ使える。`--svc` を付けたコマンドのリージョンは、設定ファイルで
-決まる。AWS に問い合わせない `service list`、`sg list`、`sg add`、
+付けないときだけ使える。`--svc` を付けたコマンドのリージョンは、設定ファイルと
+共通ファイルで決まる。AWS に問い合わせない `service list`、`sg list`、`sg add`、
 `sg remove` と、`--svc` を付けない `app list` は、どちらも付けられない。
 
 `--svc` を付けない `ami list`、`instance list`、`ami prune`、`ami delete` は
-設定ファイルを読まないので、アカウントとリージョンを `--profile` と
-`--region` で選ぶ。省けば、AWS の既定の規則（`AWS_PROFILE`、`AWS_REGION`、
-プロファイルの `region` など）で決まる。どの環境を使ったかは、最初の行に出る。
-`profile` は、`--profile` か `AWS_PROFILE`、`AWS_DEFAULT_PROFILE` で
-選んだときだけ名前が出る。選んでいなければ `(none)` と出て、資格情報は
-`[default]` プロファイルや環境変数の鍵などから来ている。
+サービスの設定ファイルを読まないので、アカウントとリージョンを `--profile` と
+`--region` で選ぶ。省けば、共通ファイルの `AwsProfile` と `AwsRegion`
+（[conf.md](conf.md#全サービスに共通の値)）、AWS の既定の規則（`AWS_PROFILE`、
+`AWS_REGION`、プロファイルの `region` など）の順で決まる。どの環境を使ったかは、
+最初の行に出る。`profile` は、`--profile`、共通ファイル、`AWS_PROFILE`、
+`AWS_DEFAULT_PROFILE` のどれかで選んだときだけ名前が出る。選んでいなければ
+`(none)` と出て、資格情報は `[default]` プロファイルや環境変数の鍵などから来ている。
 
     temt --profile work --region us-east-1 ami prune
 
@@ -280,8 +283,8 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 
     temt service list
 
-手元の設定ファイル（`~/.config/temt/*.toml`）を 1 つ 1 サービスとして、一覧を
-表示する。設定ファイルを読むだけで、AWS には問い合わせない。`--profile` と
+手元の設定ファイル（`~/.config/temt/*.toml`。共通ファイルを除く）を 1 つ
+1 サービスとして、一覧を表示する。値は共通ファイルを重ねたものである。設定ファイルを読むだけで、AWS には問い合わせない。`--profile` と
 `--region` は付けられない。`temt-<svc> service list`（`temt service list --svc
 <svc>` と同じ）は、そのサービスの行だけを表示する。
 
@@ -813,10 +816,11 @@ ssh に効くのは IPv4 の規則である。CIDR を自分で決めるなら�
     temt-<svc> sg diff
     temt-<svc> apply
 
-`apply` を実行すると、セキュリティグループの受信規則が設定ファイルの内容になる。
-動いているインスタンスにもすぐ効く。手で足した規則は消えるので、許したいものは
-すべて設定ファイルに書く。設定ファイルの規則は `sg list` で見られ、手で直しても
-よい。書き方は [conf.md](conf.md#security-group) にある。
+`apply` を実行すると、セキュリティグループの受信規則が設定ファイルと共通ファイルの
+規則になる。動いているインスタンスにもすぐ効く。手で足した規則は消えるので、許したい
+ものはすべてどちらかのファイルに書く。規則は `sg list` で見られ、手で直してもよい。
+書き方は [conf.md](conf.md#security-group) にある。共通ファイルの規則は全サービスに
+効き、`sg add` と `sg remove` では変えられないので、共通ファイルを直す。
 
     temt-<svc> sg list
 
@@ -857,6 +861,7 @@ temt-<svc>` のようにその接続だけ変えることもできる。どち�
 
 グローバル IP アドレスは変わることがある。つながらなくなったら、`sg list` で古い規則の
 CIDR を確かめて、IPv6 のものも含めてすべて消し、新しいアドレスで足し直してから
+`apply` を実行する。共通ファイルの規則なら、共通ファイルを直してから、各サービスで
 `apply` を実行する。
 
     temt-<svc> sg remove 22 203.0.113.10/32

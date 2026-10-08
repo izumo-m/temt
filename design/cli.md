@@ -29,10 +29,12 @@ The service is selected with `--svc <svc>`:
 - Commands written `--svc <svc>` in the table require it. Those written `[--svc <svc>]`
   (`service list`, `instance list`, `ami list`, `ami prune`, `ami delete`, `app list`)
   may omit it.
-- With `--svc`, the service's config file decides the environment (region and profile),
-  and the command deals only with that service's things.
+- With `--svc`, the service's config file (over the defaults file) decides the
+  environment (region and profile), and the command deals only with that service's
+  things.
 - Without `--svc`, the command deals with the things of all services in the environment
-  given by `--profile` and `--region` ([config.md](config.md#commands-without---svc)).
+  given by `--profile` and `--region`, else the defaults file and AWS's rules
+  ([config.md](config.md#commands-without---svc)).
   Exception: `app list` without `--svc` deals only with the apps that can be named by app
   ID.
 - Commands that do not call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and
@@ -117,10 +119,10 @@ operations can be typed in this form.
 ### Profile and region
 
 - `--profile <profile>` uses that profile for this run only, over `AwsProfile` in the
-  config file ([config.md](config.md#profile)). `apply` writes the value to `AwsProfile`,
-  so later commands use the same profile. It is a usage error for the commands that do
-  not call AWS: `service list`, `sg list`, `sg add`, `sg remove`, and `app list` without
-  `--svc`.
+  config file and the defaults file ([config.md](config.md#profile)). `apply` writes the
+  value to `AwsProfile`, so later commands use the same profile. It is a usage error for
+  the commands that do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`,
+  and `app list` without `--svc`.
 - `--region <region>` is accepted only by commands run without `--svc`, except
   `service list` and `app list`. With `--svc` it is a usage error
   ([config.md](config.md#region)).

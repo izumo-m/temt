@@ -32,7 +32,7 @@ from types_boto3_ec2.client import EC2Client
 from temt import apply, aws, conf, home, keys, policy, resources
 from temt.conf import Conf, LaunchTemplate, Role
 from temt.msg import TemtError
-from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, keys_dir, ssh_dir
+from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, defaults_path, keys_dir, ssh_dir
 
 REGION = "ap-northeast-1"
 NAME = "temt-dev-main"
@@ -1097,6 +1097,21 @@ def test_it_stops_before_writing_to_aws_when_the_volume_size_is_too_small(
     assert not keys.default_path().exists()
 
 
+def test_the_volume_size_hint_names_the_common_file(aws_stubs: Stubs, service: Service) -> None:
+    """VolumeSize が共通ファイルから来ていれば、直す先として共通ファイルを挙げる。"""
+    _ = write_conf(service)
+    defaults_path().write_text("[launch-template]\nVolumeSize = 6\n", encoding="utf-8")
+    subnet = {"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "10.0.0.0/24"}
+    aws_stubs.ec2.add_response("describe_subnets", {"Subnets": [subnet]}, THE_SUBNET)
+    aws_stubs.ec2.add_response("describe_images", sized_image(8), THE_IMAGE)
+
+    with pytest.raises(TemtError) as caught:
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value).endswith(f"; raise it or remove it in {defaults_path()}")
+
+
 def test_it_stops_when_the_image_has_no_ebs_root_volume(aws_stubs: Stubs, service: Service) -> None:
     _ = write_conf(service)
     write_volume_size(service, 30)
@@ -1289,6 +1304,41 @@ def test_a_new_config_file_gets_the_option_as_the_profile(
         + conf_text({"AwsProfile": "work", **WRITTEN})
         + conf.EC2_DEFAULT
         + conf.EXAMPLE
+    )
+
+
+def test_a_new_config_file_gets_values_from_the_common_file(
+    aws_stubs: Stubs, service: Service
+) -> None:
+    """共通ファイルの値は既定と同じく書き、共通ファイルの ec2 があれば既定の ec2 を書かない。
+
+    AwsProfile は --profile で選んだときだけ書くので、共通ファイルにあっても書かない。
+    """
+    defaults_path().parent.mkdir(parents=True, exist_ok=True)
+    defaults_path().write_text(
+        'AwsProfile = ""\n[launch-template]\nInstanceType = "t3.small"\n' + conf.EC2_DEFAULT,
+        encoding="utf-8",
+    )
+    written = {**WRITTEN, "launch-template.InstanceType": "t3.small"}
+    step2_ami(aws_stubs)
+    aws_stubs.ec2.add_response("describe_vpcs", {"Vpcs": [{"VpcId": VPC}]}, DEFAULT_VPC)
+    aws_stubs.ec2.add_response(
+        "describe_subnets",
+        {"Subnets": [{"SubnetId": SUBNET, "AvailabilityZone": f"{REGION}a", "VpcId": VPC}]},
+        PUBLIC_SUBNETS,
+    )
+    step4(aws_stubs)
+    step5(aws_stubs, written, associated=False)
+    aws_stubs.ssm.add_client_error(
+        "create_association", service_error_code="AccessDeniedException", http_status_code=400
+    )
+
+    with pytest.raises(ClientError):
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == (
+        conf.HEADER + conf_text(written) + conf.EXAMPLE
     )
 
 
