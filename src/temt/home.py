@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from temt import msg
+from temt import keys, msg
 from temt.change import ADD, ARROW, UPDATE, Change, lines_diff
 from temt.conf import Conf
 from temt.msg import TemtError
@@ -39,6 +39,9 @@ from temt.table import printable
 LOGIN_USER = "ubuntu"
 # temt が管理する項目。ブロックに足すときはこの順に並べる
 MANAGED = ("User", "Port", "IdentityFile", "IdentitiesOnly", "UserKnownHostsFile", "ProxyCommand")
+# 管理する項目のうち、無いときだけ書き、あれば書かれたままにするもの。利用者が自分の
+# 鍵に替えられるようにする。ssh は並んだ行をすべて使うので、2 行目以降も残す
+KEPT = ("IdentityFile",)
 # ~/.ssh/config に置く目印。この次の行が temt の Include である
 MARK = "# ===== temt ===== do not remove; 'temt apply' owns the next line"
 # ssh は Include のパスを glob として読む。パスそのものに一致させるため \ を付ける文字。
@@ -232,18 +235,6 @@ def _item(keyword: str, value: str) -> str:
     return f"    {keyword.ljust(_WIDTH)} {value}"
 
 
-def _ssh_path(value: str) -> str:
-    """ssh の設定に書くパス。% を %% にし、半角スペースを含めば二重引用符で囲む。
-
-    ssh は % をトークンの目印として展開し、語を空白で分ける。二重引用符の中の空白は
-    語を分けない。空白の無い値は囲まず、これまでに書いた行を変えない。二重引用符の
-    中でも ssh が解釈する引用符、\\、$ と、行を壊す空白類や制御文字は、設定ファイルを
-    読むときに断ってある（conf.check_identity_file）。
-    """
-    escaped = value.replace("%", "%%")
-    return f'"{escaped}"' if " " in escaped else escaped
-
-
 def _proxy_command(service: Service) -> str:
     """ProxyCommand の値。2 つの場所を、既定のままでも env で proxy に渡す。
 
@@ -254,20 +245,25 @@ def _proxy_command(service: Service) -> str:
     ホームの下なら ~ で始まる形で書き、proxy が自分で展開する。ホームのパスそのもの
     （空白や % を含みうる）を ssh の設定に出さないためである。temt はパスでなく名前で
     書き、env が PATH から探す。入れ方や版で temt の場所が変わっても、書き直さずに済む。
+    %r は ssh がログインするユーザーで、proxy はそのユーザーに鍵を送る。ssh は %r を
+    そのまま埋めるので、シングルクォートで囲み、シェルに展開させない。シェルの記号を
+    断らない古い OpenSSH でも、ユーザー名からコマンドを差し込まれないようにする。
     """
     assigned = " ".join(f"{env}='{tilde(path)}'" for env, path in places().items())
-    return f"env {assigned} {PREFIX} proxy --svc {service.svc} %p"
+    return f"env {assigned} {PREFIX} proxy --svc {service.svc} --user '%r' %p"
 
 
 def _managed(service: Service, values: Conf) -> dict[str, str]:
     """temt が管理する項目の値。ProxyCommand はサービスのコマンドでなく temt を呼ぶ。
 
-    Port は SshdPorts の先頭で、ProxyCommand の %p になる。
+    Port は SshdPorts の先頭で、ProxyCommand の %p になる。IdentityFile は既定の鍵で、
+    無いときだけ書く。場所は TEMT_SSH_DIR の規則を通っており、ssh が空白で分けたり
+    展開したりする文字を含まないので、そのまま書ける。
     """
     return {
         "User": LOGIN_USER,
         "Port": str(values.SshdPorts[0]),
-        "IdentityFile": _ssh_path(values.IdentityFile),
+        "IdentityFile": tilde(keys.default_path()),
         "IdentitiesOnly": "yes",
         "UserKnownHostsFile": tilde(service.known_hosts_current),
         "ProxyCommand": _proxy_command(service),
@@ -443,10 +439,10 @@ def detect_host_block(service: Service, values: Conf) -> Edit:
     中身を求める。書くのは write_edit である。
 
     管理しない項目、他のブロック、コメントには手を付けない。管理する項目が 2 行
-    あれば先頭の行だけを残す。IdentityFile は ssh が並んだ行をすべて使うので、
-    temt の鍵だけを使わせるために後の行を落とす。管理する項目の行は、書かれた値を
-    読まずに、いつも temt が書く形で作り直し、ファイルの中身どうしを比べる。手で
-    引用符を付けた行など、ssh には同じ値に読める行も、temt が書く形に戻す。
+    あれば先頭の行だけを残す。管理する項目の行は、書かれた値を読まずに、いつも temt が
+    書く形で作り直し、ファイルの中身どうしを比べる。手で引用符を付けた行など、ssh には
+    同じ値に読める行も、temt が書く形に戻す。ただし KEPT の項目（IdentityFile）は、
+    無いときだけ既定の値で足し、あれば何行でも書かれたまま残す。
     """
     path = ssh_dir() / "config"
     text = _read(path)
@@ -466,11 +462,29 @@ def detect_host_block(service: Service, values: Conf) -> Edit:
         name = _LOWER.get(keyword)
         if name is None:
             kept.append(line)
+        elif name in KEPT:
+            if name not in seen:
+                seen.append(name)
+            kept.append(line)
         elif name not in seen:
             seen.append(name)
             kept.append(_item(name, wanted[name]))
     missing = [_item(key, wanted[key]) for key in MANAGED if key not in seen]
     return Edit(path, text, _joined(lines[: start + 1] + missing + kept + lines[end:]))
+
+
+def default_key(edit: Edit, service: Service) -> Path | None:
+    """書き換えた後の Host ブロックが既定の鍵を使うなら、その場所。
+
+    最初の IdentityFile の行が、temt が書く値のままなら既定の鍵を使う。利用者が別の鍵に
+    替えていれば None で、apply はその鍵を作らない。
+    """
+    wanted = tilde(keys.default_path())
+    for line in _block_lines(edit.after, service):
+        keyword, words = _keyword(line)
+        if keyword == "identityfile":
+            return keys.default_path() if " ".join(words) == wanted else None
+    return None
 
 
 def _block_lines(text: str, service: Service) -> list[str]:

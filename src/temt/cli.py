@@ -12,15 +12,12 @@ from temt.msg import TemtError, UsageError
 from temt.names import (
     DEPLOY_KEY,
     INSTANCE_ID_RULE,
-    KEY_NAME_RULE,
     LABEL_RULE,
-    PATH_MARK,
     PREFIX,
     USER_NAME_RULE,
     Service,
     app_dir,
     is_instance_id,
-    is_key_name,
     is_label,
     is_user_name,
 )
@@ -47,10 +44,6 @@ SG_ADD = "sg add"
 SG_REMOVE = "sg remove"
 SG_DIFF = "sg diff"
 SG_SHOW = "sg show"
-KEYPAIR_LIST = "keypair list"
-KEYPAIR_SHOW = "keypair show"
-KEYPAIR_CREATE = "keypair create"
-KEYPAIR_DELETE = "keypair delete"
 APP_LIST = "app list"
 APP_SHOW = "app show"
 APP_GET = "app get"
@@ -80,10 +73,6 @@ COMMANDS = (
     SG_REMOVE,
     SG_DIFF,
     SG_SHOW,
-    KEYPAIR_LIST,
-    KEYPAIR_SHOW,
-    KEYPAIR_CREATE,
-    KEYPAIR_DELETE,
     APP_LIST,
     APP_SHOW,
     APP_GET,
@@ -121,7 +110,6 @@ YES_COMMANDS = (
     SERVICE_DESTROY,
     AMI_PRUNE,
     AMI_DELETE,
-    KEYPAIR_DELETE,
     APP_DEPLOY,
     APP_REMOVE,
 )
@@ -136,8 +124,6 @@ TARGET_COMMANDS = BAKE_COMMANDS
 APP_OPTION_COMMANDS = (APP_DEPLOY,)
 # 接続先のポートを取るコマンド
 PORT_COMMANDS = (SSH_PROXY,)
-# --svc を取らないコマンド
-NO_SERVICE_COMMANDS = (KEYPAIR_LIST, KEYPAIR_SHOW, KEYPAIR_CREATE, KEYPAIR_DELETE)
 # --svc を省けるコマンド。付ければ、そのサービスのものだけを扱う。ほかのコマンドは
 # --svc が要る
 OPTIONAL_SERVICE_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, AMI_PRUNE, AMI_DELETE, APP_LIST)
@@ -149,16 +135,12 @@ LOCAL_WITHOUT_SERVICE_COMMANDS = (APP_LIST,)
 RULE_COMMANDS = (SG_ADD, SG_REMOVE)
 # 規則の説明を与える --description を取るコマンド
 DESCRIPTION_COMMANDS = (SG_ADD,)
-# 動詞の後ろにキーペア名を取るコマンド。keypair show はファイルも取る
-KEY_COMMANDS = (KEYPAIR_SHOW, KEYPAIR_CREATE, KEYPAIR_DELETE)
 # 動詞の後ろに AMI の ID か名前を取るコマンド
 IMAGE_COMMANDS = (AMI_DELETE,)
 # 動詞の後ろにインスタンス ID を 0 個以上取るコマンド
 INSTANCE_ID_COMMANDS = (INSTANCE_TERMINATE,)
-# 取ったキーペア名を手元の鍵のファイル名にするコマンド。名前を names の規則で確かめる
-KEY_NAME_COMMANDS = (KEYPAIR_CREATE, KEYPAIR_DELETE)
 # 表を出し、出す列を選ぶ --format を取るコマンド
-LIST_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, KEYPAIR_LIST, APP_LIST, SG_LIST)
+LIST_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, APP_LIST, SG_LIST)
 # 動詞の後ろにアプリ ID、キー、値を取るコマンドと、取る引数の名前。並びは引数の順。
 # app set はキーと値を <キー>=<値> の 1 語で取る
 KEY_VALUE = "<key>=<value>"
@@ -208,7 +190,7 @@ EMPTY_OK_OPTIONS = (DESCRIPTION_OPTION,)
 # --region は、parse がサービスと AWS を呼ぶかどうかから確かめる
 COMMAND_OPTIONS = {
     FORMAT_OPTION: LIST_COMMANDS,
-    USER_OPTION: TARGET_COMMANDS,
+    USER_OPTION: (*TARGET_COMMANDS, SSH_PROXY),
     DESCRIPTION_OPTION: DESCRIPTION_COMMANDS,
     ASYNC_OPTION: ASYNC_COMMANDS,
     YES_OPTION: YES_COMMANDS,
@@ -239,10 +221,6 @@ SYNOPSES = {
     SG_REMOVE: "<port> [<cidr>]",
     SG_DIFF: "",
     SG_SHOW: "",
-    KEYPAIR_LIST: "[--format <columns>]",
-    KEYPAIR_SHOW: "<name or file>",
-    KEYPAIR_CREATE: "<name>",
-    KEYPAIR_DELETE: "<name> [--yes]",
     APP_LIST: "[--format <columns>]",
     APP_SHOW: "<app id>",
     APP_GET: "<app id> <key>",
@@ -250,10 +228,10 @@ SYNOPSES = {
     APP_UNSET: "<app id> <key>",
     APP_DEPLOY: "<app> [<name>=<value>...] [<options>]",
     APP_REMOVE: "<app id> [<options>]",
-    SSH_PROXY: "[port]",
+    SSH_PROXY: "[port] [--user <user>]",
 }
 # 使い方で、短縮形の代わりにコマンドの行へ添える書き添え
-REMARKS = {SERVICE_LIST: "(no --profile/--region)", KEYPAIR_SHOW: "(a file if it has a '/')"}
+REMARKS = {SERVICE_LIST: "(no --profile/--region)"}
 # 使い方の末尾に書く注意と、それに関わるコマンド。対象の使い方には、その対象のコマンド
 # に関わる注意だけを書く
 NOTES = (
@@ -318,10 +296,8 @@ REGION_LINE = "  --region <region>   the AWS region; not with --svc"
 
 def _synopsis(command: str) -> str:
     """コマンドの行の左側を作る。--svc は、区分に合わせて動詞の直後に書く。"""
-    words = [command]
-    if command not in NO_SERVICE_COMMANDS:
-        svc = f"{SVC_OPTION} <svc>"
-        words.append(f"[{svc}]" if command in OPTIONAL_SERVICE_COMMANDS else svc)
+    svc = f"{SVC_OPTION} <svc>"
+    words = [command, f"[{svc}]" if command in OPTIONAL_SERVICE_COMMANDS else svc]
     if SYNOPSES[command]:
         words.append(SYNOPSES[command])
     return "  " + " ".join(words)
@@ -372,16 +348,19 @@ def usage(target: str | None = None) -> str:
         ]
         return "\n".join(lines) + "\n"
     commands = [c for c in COMMANDS if c.split()[0] == target]
-    with_service = any(c not in NO_SERVICE_COMMANDS for c in commands)
-    lines = [f"usage: temt {target} <verb> [args] [options]"]
-    if with_service:
-        lines.append(f"       temt-<svc> {target} <verb> [args] [options]   (temt ... --svc <svc>)")
-    lines += ["", "options may come anywhere after the program name:", HELP_LINE, VERSION_LINE]
-    if with_service:
-        lines += [SVC_LINE, PROFILE_LINE, REGION_LINE]
-    else:
-        lines += ["  --profile <name>    the AWS profile", "  --region <region>   the AWS region"]
-    lines += ["", *_table([commands])]
+    lines = [
+        f"usage: temt {target} <verb> [args] [options]",
+        f"       temt-<svc> {target} <verb> [args] [options]   (temt ... --svc <svc>)",
+        "",
+        "options may come anywhere after the program name:",
+        HELP_LINE,
+        VERSION_LINE,
+        SVC_LINE,
+        PROFILE_LINE,
+        REGION_LINE,
+        "",
+        *_table([commands]),
+    ]
     notes = _notes(commands)
     if notes:
         lines += ["", *notes]
@@ -406,8 +385,6 @@ class Request:
     profile: str | None = None
     # --region で選ばれたリージョン。サービスの無いときだけ取る
     region: str | None = None
-    # keypair の show、create、delete が取るキーペア名。show ではファイルのこともある
-    key: str | None = None
     # ami delete が取る AMI の ID か名前
     image: str | None = None
     # INSTANCE_ID_COMMANDS が取るインスタンス ID。並びは打たれた順。省かれていれば空
@@ -537,13 +514,11 @@ def _command(words: list[str]) -> tuple[str, str, list[str]]:
 
 
 def _service(command: str, typed: str, svc: str | None) -> Service | None:
-    """--svc の値から、サービスを決める。取らないか省いたときは None。"""
+    """--svc の値から、サービスを決める。省いたときは None。"""
     if svc is None:
-        if command in NO_SERVICE_COMMANDS or command in OPTIONAL_SERVICE_COMMANDS:
+        if command in OPTIONAL_SERVICE_COMMANDS:
             return None
         raise UsageError(f"{typed}: missing {SVC_OPTION}")
-    if command in NO_SERVICE_COMMANDS:
-        raise UsageError(f"{typed}: {SVC_OPTION} is not allowed; key pairs belong to no service")
     return Service(svc)
 
 
@@ -631,18 +606,6 @@ def _instance_ids(typed: str, words: list[str]) -> tuple[str, ...]:
         if word in words[:i]:
             raise UsageError(f"{typed}: repeated instance id: {word}")
     return tuple(words)
-
-
-def _key(command: str, typed: str, words: list[str]) -> str:
-    """キーペア名（keypair show ではファイルも）を読む。"""
-    what = "key pair name or file" if command == KEYPAIR_SHOW else "key pair name"
-    key = _one(typed, words, what)
-    if command in KEY_NAME_COMMANDS and not is_key_name(key):
-        raise UsageError(f"{typed}: the key pair name {KEY_NAME_RULE}: {printable(key)}")
-    if PATH_MARK not in key and not options.is_utf8(key):
-        # AWS に送れない。ファイルなら、Python がファイル名と同じく扱える
-        raise UsageError(f"{typed}: the key pair name is not valid UTF-8: {printable(key)}")
-    return key
 
 
 def _app(command: str, typed: str, words: list[str]) -> tuple[str, str | None, str | None]:
@@ -766,8 +729,6 @@ def parse(args: list[str]) -> Request:
         user=_user(typed, cli_options.get(USER_OPTION)),
         reset=RESET_OPTION in cli_options,
     )
-    if command in KEY_COMMANDS:
-        return replace(request, key=_key(command, typed, words))
     if command in IMAGE_COMMANDS:
         image = _one(typed, words, "AMI id or name")
         if not options.is_utf8(image):
@@ -842,7 +803,7 @@ def _run_service(request: Request) -> None:
     elif request.command == SG_SHOW:
         sg.show(service)
     elif request.command == SSH_PROXY:
-        proxy.run(service, request.port)
+        proxy.run(service, request.port, request.user)
     else:
         # parse が COMMANDS の中だけを通すので、振り分けを書き忘れない限り来ない
         raise TemtError(f"not implemented: {request.command}")
@@ -928,27 +889,6 @@ def _run_ami_delete(request: Request) -> None:
     )
 
 
-def _run_keypair(request: Request) -> None:
-    """keypair のコマンドを実行する。"""
-    from temt import keypairs
-
-    if request.command == KEYPAIR_LIST:
-        keypairs.list_keypairs(request.region, request.format)
-        return
-    key = request.key
-    if key is None:
-        # parse が KEY_COMMANDS の名前を必ず読むので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing key pair name")
-    if request.command == KEYPAIR_SHOW:
-        keypairs.show(key, request.region)
-    elif request.command == KEYPAIR_CREATE:
-        keypairs.create(key, request.region)
-    elif request.command == KEYPAIR_DELETE:
-        keypairs.delete(key, request.region, yes=request.yes)
-    else:
-        raise TemtError(f"not implemented: {request.command}")
-
-
 def run(request: Request) -> int:
     """要求を実行し、終了コードを返す。
 
@@ -983,8 +923,6 @@ def run(request: Request) -> int:
             images.prune(request.service, request.region, yes=request.yes)
         elif request.command == AMI_DELETE:
             _run_ami_delete(request)
-        elif request.command in (KEYPAIR_LIST, *KEY_COMMANDS):
-            _run_keypair(request)
         else:
             _run_service(request)
     except (ProfileNotFound, NoCredentialsError) as e:

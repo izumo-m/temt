@@ -2,7 +2,6 @@
 
 import copy
 import errno
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -10,11 +9,10 @@ from typing import Any
 import pytest
 import tomlkit
 
-from temt import conf, names
+from temt import conf
 from temt.conf import Conf, Ingress, LaunchTemplate, SecurityGroup
 from temt.msg import TemtError
 from temt.names import LABEL_RULE, Service
-from temt.table import printable
 
 TEMPLATE = conf.LAUNCH_TEMPLATE
 
@@ -33,11 +31,12 @@ def read(service: Service) -> str:
 def test_reads_items(service: Service) -> None:
     write(
         service,
-        '# comment\nKeyName = "temt"\n\n[launch-template]\nInstanceType="t3.small"\n'
+        '# comment\nAwsRegion = "us-east-1"\n\n[launch-template]\nInstanceType="t3.small"\n'
         'SubnetId = "subnet-1"\n',
     )
     assert conf.load(service) == Conf(
-        KeyName="temt", launch_template=LaunchTemplate(InstanceType="t3.small", SubnetId="subnet-1")
+        AwsRegion="us-east-1",
+        launch_template=LaunchTemplate(InstanceType="t3.small", SubnetId="subnet-1"),
     )
 
 
@@ -48,7 +47,7 @@ def test_reads_a_table_written_with_dotted_keys(service: Service) -> None:
 
 
 def test_unknown_key_reports_the_key(service: Service) -> None:
-    write(service, 'KeyName = "temt"\nFoo = "bar"\n')
+    write(service, 'AwsRegion = "us-east-1"\nFoo = "bar"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == f"{service.conf_path}: unknown key: Foo"
@@ -68,7 +67,7 @@ def test_unknown_key_in_a_table_reports_the_table_too(service: Service) -> None:
     assert str(caught.value) == f"{service.conf_path}: unknown key: launch-template.Foo"
 
 
-@pytest.mark.parametrize("key", ["InstanceType", "SubnetId", "Login"])
+@pytest.mark.parametrize("key", ["InstanceType", "SubnetId", "Login", "KeyName", "IdentityFile"])
 def test_the_old_top_level_keys_are_unknown(service: Service, key: str) -> None:
     """古い形のファイル（テーブルに移った項目、廃した項目）は、未知のキーとして止まる。
 
@@ -105,8 +104,8 @@ def test_value_in_a_table_that_is_not_a_string_rejected(service: Service) -> Non
 
 
 def test_item_written_as_a_table_rejected(service: Service) -> None:
-    write(service, '[KeyName]\nname = "temt"\n')
-    with pytest.raises(TemtError, match="KeyName must be a string"):
+    write(service, '[AwsRegion]\nname = "us-east-1"\n')
+    with pytest.raises(TemtError, match="AwsRegion must be a string"):
         conf.load(service)
 
 
@@ -117,13 +116,13 @@ def test_table_written_as_a_string_rejected(service: Service) -> None:
 
 
 def test_broken_toml_rejected(service: Service) -> None:
-    write(service, 'KeyName = "temt"\nAwsRegion =\n')
+    write(service, 'AwsProfile = "work"\nAwsRegion =\n')
     with pytest.raises(TemtError, match=str(service.conf_path)):
         conf.load(service)
 
 
 def test_duplicate_key_rejected(service: Service) -> None:
-    write(service, 'KeyName = "first"\nKeyName = "second"\n')
+    write(service, 'AwsRegion = "us-east-1"\nAwsRegion = "us-west-2"\n')
     with pytest.raises(TemtError, match="already exists"):
         conf.load(service)
 
@@ -135,7 +134,7 @@ def test_duplicate_key_in_a_table_rejected(service: Service) -> None:
         conf.load(service)
 
 
-@pytest.mark.parametrize("key", ["AwsProfile", "KeyName", "IdentityFile"])
+@pytest.mark.parametrize("key", ["AwsProfile", "AwsRegion"])
 def test_empty_value_means_unset(service: Service, key: str) -> None:
     write(service, f'{key} = ""\n')
     assert conf.load(service) == Conf()
@@ -190,8 +189,6 @@ def test_defaults() -> None:
     values = Conf()
     assert values.AwsProfile is None
     assert values.AwsRegion == "ap-northeast-1"
-    assert values.KeyName == "temt"
-    assert values.IdentityFile == "~/.ssh/temt/keys/temt"
     assert values.launch_template.InstanceType == "t3.micro"
     assert values.launch_template.SubnetId is conf.UNSET
     assert values.SshdPorts == [22]
@@ -287,43 +284,22 @@ def test_each_conf_has_its_own_table() -> None:
     assert other.launch_template.InstanceType == "t3.micro"
 
 
-def test_identity_file_follows_the_key_name() -> None:
-    assert Conf(KeyName="work").IdentityFile == "~/.ssh/temt/keys/work"
-
-
-def test_identity_file_follows_the_ssh_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(names.SSH_DIR_ENV, "/srv/temt/ssh")
-    assert Conf().IdentityFile == "/srv/temt/ssh/keys/temt"
-
-
-def test_identity_file_does_not_follow_the_conf_dir(
-    home_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _ = home_dir
-    monkeypatch.setenv(names.CONF_DIR_ENV, "/srv/temt/conf")
-    assert Conf().IdentityFile == "~/.ssh/temt/keys/temt"
-
-
-def test_written_values_win() -> None:
-    assert Conf(IdentityFile="~/.ssh/other").IdentityFile == "~/.ssh/other"
-
-
 def test_update_creates_the_file_with_a_header(service: Service) -> None:
     values = Conf()
-    assert conf.update(service, values, "KeyName", "temt") is True
-    assert read(service) == conf.HEADER + 'KeyName = "temt"\n'
+    assert conf.update(service, values, "AwsRegion", "us-east-1") is True
+    assert read(service) == conf.HEADER + 'AwsRegion = "us-east-1"\n'
 
 
 def test_update_makes_the_directory_private(service: Service) -> None:
     """temt が作るディレクトリは、どれも他人に見せないので 700 で作る。"""
-    conf.update(service, Conf(), "KeyName", "temt")
+    conf.update(service, Conf(), "AwsRegion", "us-east-1")
     assert service.conf_path.parent.stat().st_mode & 0o777 == 0o700
 
 
 def test_update_sets_the_field_too(service: Service) -> None:
     values = Conf()
-    conf.update(service, values, "KeyName", "work")
-    assert values.KeyName == "work"
+    conf.update(service, values, "AwsProfile", "work")
+    assert values.AwsProfile == "work"
 
 
 def test_update_sets_the_field_in_the_table_too(service: Service) -> None:
@@ -333,15 +309,15 @@ def test_update_sets_the_field_in_the_table_too(service: Service) -> None:
 
 
 def test_update_adds_the_key_when_it_is_absent(service: Service) -> None:
-    write(service, '# mine\nKeyName = "work"\n')
+    write(service, '# mine\nAwsProfile = "work"\n')
     assert conf.update(service, Conf(), "AwsRegion", "us-east-1") is True
-    assert read(service) == '# mine\nKeyName = "work"\nAwsRegion = "us-east-1"\n'
+    assert read(service) == '# mine\nAwsProfile = "work"\nAwsRegion = "us-east-1"\n'
 
 
 def test_update_adds_the_table_when_it_is_absent(service: Service) -> None:
-    write(service, 'KeyName = "work"\n')
+    write(service, 'AwsProfile = "work"\n')
     assert conf.update(service, Conf(), f"{TEMPLATE}.InstanceType", "t3.micro") is True
-    assert read(service) == 'KeyName = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n'
+    assert read(service) == 'AwsProfile = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n'
 
 
 def test_update_adds_the_key_to_the_existing_table(service: Service) -> None:
@@ -391,42 +367,42 @@ def test_update_adds_the_key_next_to_a_dotted_key(service: Service) -> None:
 
 def test_update_puts_a_top_level_key_before_the_tables(service: Service) -> None:
     """テーブルの後に足すと、そのテーブルの項目になってしまう。"""
-    write(service, 'KeyName = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n')
+    write(service, 'AwsProfile = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n')
     conf.update(service, Conf(), "AwsRegion", "us-east-1")
     assert read(service) == (
-        'KeyName = "work"\nAwsRegion = "us-east-1"\n'
+        'AwsProfile = "work"\nAwsRegion = "us-east-1"\n'
         '\n[launch-template]\nInstanceType = "t3.micro"\n'
     )
     assert conf.load(service).AwsRegion == "us-east-1"
 
 
 def test_update_adds_a_newline_when_the_file_lacks_one(service: Service) -> None:
-    write(service, 'KeyName = "work"')
+    write(service, 'AwsProfile = "work"')
     conf.update(service, Conf(), "AwsRegion", "us-east-1")
-    assert read(service) == 'KeyName = "work"\nAwsRegion = "us-east-1"\n'
+    assert read(service) == 'AwsProfile = "work"\nAwsRegion = "us-east-1"\n'
 
 
 def test_update_replaces_the_value(service: Service) -> None:
-    write(service, '# mine\nIdentityFile = "~/.ssh/a"\nKeyName = "work"\n')
-    assert conf.update(service, Conf(), "IdentityFile", "~/.ssh/b") is True
-    assert read(service) == '# mine\nIdentityFile = "~/.ssh/b"\nKeyName = "work"\n'
+    write(service, '# mine\nAwsProfile = "a"\nAwsRegion = "us-east-1"\n')
+    assert conf.update(service, Conf(), "AwsProfile", "b") is True
+    assert read(service) == '# mine\nAwsProfile = "b"\nAwsRegion = "us-east-1"\n'
 
 
 def test_update_keeps_the_order_and_the_comments(service: Service) -> None:
-    write(service, '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nKeyName = "work"\n')
-    conf.update(service, Conf(), "KeyName", "other")
+    write(service, '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nAwsProfile = "work"\n')
+    conf.update(service, Conf(), "AwsProfile", "other")
     assert read(service) == (
-        '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nKeyName = "other"\n'
+        '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nAwsProfile = "other"\n'
     )
 
 
 def test_update_keeps_the_file_when_the_value_is_the_same(service: Service) -> None:
     """利用者が書いた書式をそのまま残す。"""
-    write(service, '# mine\nKeyName   =   "work"\n')
+    write(service, '# mine\nAwsProfile   =   "work"\n')
     values = Conf()
-    assert conf.update(service, values, "KeyName", "work") is False
-    assert read(service) == '# mine\nKeyName   =   "work"\n'
-    assert values.KeyName == "work"
+    assert conf.update(service, values, "AwsProfile", "work") is False
+    assert read(service) == '# mine\nAwsProfile   =   "work"\n'
+    assert values.AwsProfile == "work"
 
 
 def test_update_keeps_the_file_when_the_table_value_is_the_same(service: Service) -> None:
@@ -447,8 +423,8 @@ def test_update_replaces_an_empty_value(service: Service) -> None:
 
 
 def test_update_writes_a_value_that_needs_quoting(service: Service) -> None:
-    conf.update(service, Conf(), "IdentityFile", "~/.ssh/a=b # c")
-    assert conf.load(service).IdentityFile == "~/.ssh/a=b # c"
+    conf.update(service, Conf(), "AwsProfile", "a=b # c")
+    assert conf.load(service).AwsProfile == "a=b # c"
 
 
 INGRESS = "[[security-group.ingress]]\n"
@@ -1219,109 +1195,10 @@ def test_take_region_env_without_any(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not [name for name in conf.REGION_ENV if name in os.environ]
 
 
-@pytest.mark.parametrize("name", ["work/key", ".hidden", "-x", "my key", "a.pub", "a" * 252])
-def test_a_key_name_that_cannot_be_a_file_name_rejected(service: Service, name: str) -> None:
-    """KeyName は IdentityFile の既定のファイル名になるので、keypair create と同じ規則に従う。"""
-    write(service, f'KeyName = "{name}"\n')
-    with pytest.raises(TemtError) as caught:
-        conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: KeyName {names.KEY_NAME_RULE}: {name}"
-
-
-def test_a_key_name_with_a_control_character_is_shown_safely(service: Service) -> None:
-    """利用者が書いた値は、表示できない文字を ? にして誤りに入れる。日本語はそのまま出す。"""
-    write(service, 'KeyName = "\\u001b[2J鍵\\u202e"\n')
-    with pytest.raises(TemtError) as caught:
-        conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: KeyName {names.KEY_NAME_RULE}: ?[2J鍵?"
-
-
-@pytest.mark.parametrize("name", ["a", "Work.key_1-2", "9", "a.pubx", "pub", "a" * 251])
-def test_key_names_that_can_be_file_names(service: Service, name: str) -> None:
-    write(service, f'KeyName = "{name}"\n')
-    assert conf.load(service).KeyName == name
-
-
-@pytest.mark.parametrize(
-    "value",
-    ["~/my keys/temt", "~/keys/50%off", "/srv/keys/temt", "~/.ssh/id_ed25519", "~/鍵/temt"],
-)
-def test_identity_files_that_ssh_can_read(service: Service, value: str) -> None:
-    """空白と % は、apply が ssh の設定に書くときに守るので使える。"""
-    write(service, f"IdentityFile = {json.dumps(value)}\n")
-    assert conf.load(service).IdentityFile == value
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        '~/my"key',
-        "~/my'key",
-        "~/keys\\temt",
-        "~/${HOME}/temt",
-        "~/keys/a\tb",
-        "~/keys/a\nb",
-        "~/keys/a　b",
-        "~/keys/a\x00b",
-        "~/keys/a\x7fb",
-        "~/keys/a\u202eb",
-    ],
-)
-def test_an_identity_file_that_ssh_would_read_otherwise_rejected(
-    service: Service, value: str
-) -> None:
-    """引用符、\\、$ は、二重引用符の中でも ssh が解釈する。表示できない文字は、行を壊すか
-    端末の表示を乱す。"""
-    write(service, f"IdentityFile = {json.dumps(value)}\n")
-    with pytest.raises(TemtError) as caught:
-        conf.load(service)
-    assert str(caught.value) == (
-        f"{service.conf_path}: IdentityFile must not contain a quote, a backslash, "
-        f"a dollar sign, or a character that is not printable (a space is fine): "
-        f"{printable(value)}"
-    )
-
-
-def test_an_empty_identity_file_reads_as_not_written(service: Service) -> None:
-    """空の文字列は、ほかの項目と同じく書かれていないものとして読み、既定を使う。"""
-    write(service, 'IdentityFile = ""\n')
-    assert conf.load(service).IdentityFile == "~/.ssh/temt/keys/temt"
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "keys/temt",
-        "./temt",
-        "~",
-        "~user/keys/temt",
-        "~keys",
-        "~/",
-        "/",
-        "~/keys/temt/",
-        "/srv/keys/.",
-        "/srv/keys/..",
-    ],
-)
-def test_an_identity_file_that_is_not_a_file_path_rejected(service: Service, value: str) -> None:
-    """temt と ssh で起点のディレクトリが違うので、~/ か / で始める。~user は展開しない。
-
-    末尾の / や . は、temt は Path で畳むが、ssh は書かれたまま開くので、ファイル名で
-    終える。
-    """
-    write(service, f'IdentityFile = "{value}"\n')
-    with pytest.raises(TemtError) as caught:
-        conf.load(service)
-    assert str(caught.value) == (
-        f"{service.conf_path}: IdentityFile must start with '~/' or '/' and end with a "
-        f"file name: {value}"
-    )
-
-
 def test_written_reads_the_item_as_it_is_written(service: Service) -> None:
     """既定は補わない。空の文字列も書かれたまま返す。"""
-    write(service, 'KeyName = "mine"\n\n[launch-template]\nInstanceType = ""\n')
-    assert conf.written(service, "KeyName") == "mine"
+    write(service, 'AwsProfile = "mine"\n\n[launch-template]\nInstanceType = ""\n')
+    assert conf.written(service, "AwsProfile") == "mine"
     assert conf.written(service, "launch-template.InstanceType") == ""
     assert conf.written(service, "AwsRegion") is None
     assert conf.written(service, "launch-template.ImageId") is None
@@ -1329,28 +1206,28 @@ def test_written_reads_the_item_as_it_is_written(service: Service) -> None:
 
 
 def test_written_is_none_without_the_file(service: Service) -> None:
-    assert conf.written(service, "KeyName") is None
+    assert conf.written(service, "AwsRegion") is None
 
 
 def test_assign_changes_only_the_conf(service: Service) -> None:
     """設定ファイルには書かない。diff が、apply が書く値を後の手順で使うのに使う。"""
-    text = 'KeyName = "mine"\n'
+    text = 'AwsProfile = "mine"\n'
     write(service, text)
     values = conf.load(service)
     conf.assign(values, "launch-template.SubnetId", "subnet-0")
-    conf.assign(values, "KeyName", "other")
+    conf.assign(values, "AwsProfile", "other")
     assert values.launch_template.SubnetId == "subnet-0"
-    assert values.KeyName == "other"
+    assert values.AwsProfile == "other"
     assert read(service) == text
 
 
 # --- 書き換えの置き換え ---
 
 # 書き換える前の設定ファイル
-BEFORE = 'KeyName = "temt"\n'
+BEFORE = 'AwsProfile = "work"\n'
 # 設定ファイルを書き換える関数。どれも replace_text で置き換える
 WRITERS = {
-    "update": lambda service, values: conf.update(service, values, "KeyName", "work"),
+    "update": lambda service, values: conf.update(service, values, "AwsProfile", "other"),
     "ec2 default": lambda service, values: conf.write_ec2_default(service, values),
     "ingress": lambda service, values: conf.edit_ingress(service, values, added=[HOME]),
     "example": lambda service, values: conf.write_example(service),
@@ -1408,7 +1285,7 @@ def test_update_makes_a_new_file_with_the_usual_mode(service: Service) -> None:
     """無いファイルは、umask に従うふつうのモードで作る。"""
     before = os.umask(0o022)
     try:
-        conf.update(service, Conf(), "KeyName", "temt")
+        conf.update(service, Conf(), "AwsRegion", "us-east-1")
     finally:
         os.umask(before)
     assert service.conf_path.stat().st_mode & 0o777 == 0o644

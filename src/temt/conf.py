@@ -41,13 +41,9 @@ from tomlkit.items import AoT, Comment, Null, Table, Whitespace
 from temt import policy
 from temt.msg import TemtError
 from temt.names import (
-    KEY_NAME_RULE,
     LABEL_RULE,
-    PREFIX,
     Service,
-    is_key_name,
     is_label,
-    keys_dir,
     make_dir,
     replace_text,
     tilde,
@@ -152,11 +148,6 @@ Resource = [
 DESCRIPTION_MAX = 255
 DESCRIPTION_CHARS = "a-z, A-Z, 0-9, spaces and ._-:/()#,@[]+=&;{}!$*"
 DESCRIPTION_RE = re.compile(r"[a-zA-Z0-9 ._\-:/()#,@\[\]+=&;{}!$*]*")
-
-# IdentityFile に使えない文字。ssh は二重引用符の中でも、引用符と \ を自前で解釈し、
-# ${NAME} を環境変数として展開する。\ は、いまの temt が Linux だけで動くので、パスの
-# 区切りとしても要らない。空白（半角スペース）と % は、ssh の設定に書くときに守る
-IDENTITY_FILE_FORBIDDEN = "\"'\\$"
 
 # apply が新しく作るファイルの末尾に置く、受信規則とロールの権限の書き方の例。apply は
 # これを書き換えない
@@ -263,26 +254,6 @@ def check_description(value: str) -> None:
         raise ValueError(f"Description must use only {DESCRIPTION_CHARS}")
 
 
-def check_identity_file(value: str) -> None:
-    """IdentityFile が、ssh の設定に書ける鍵のパスかを確かめる。
-
-    表示できない文字（半角スペース以外の空白類、制御文字、書式を変える文字）は、ssh の
-    設定の 1 行を壊すか、端末の表示を乱すので断る。相対パスは、temt と ssh で解く起点の
-    ディレクトリが違うので断る。~user は names.expand と同じく展開しないので、相対パス
-    として扱う。末尾の / と、. や .. で終わるパスは、temt は Path で畳んで鍵のファイルと
-    読むが、ssh は書かれたまま開いて読めないので断る。
-    """
-    if any(char in IDENTITY_FILE_FORBIDDEN or not char.isprintable() for char in value):
-        raise ValueError(
-            "IdentityFile must not contain a quote, a backslash, a dollar sign, "
-            f"or a character that is not printable (a space is fine): {printable(value)}"
-        )
-    if not value.startswith(("~/", "/")) or value.rpartition("/")[2] in ("", ".", ".."):
-        raise ValueError(
-            f"IdentityFile must start with '~/' or '/' and end with a file name: {value}"
-        )
-
-
 @dataclass
 class Ingress:
     """[[security-group.ingress]]。セキュリティグループの受信規則 1 つ。
@@ -368,30 +339,11 @@ class Conf:
     # 資格情報は AWS の既定の規則で決まる
     AwsProfile: str | None = None
     AwsRegion: str = "ap-northeast-1"
-    KeyName: str = PREFIX
-    # ssh がインスタンスへの認証に使う秘密鍵。設定ファイルに書いた形のまま持ち、ssh の
-    # 設定には、apply が % と空白を守って書く
-    IdentityFile: str = UNSET
     # インスタンスの sshd が待ち受けるポート。先頭が ssh の Host ブロックの Port になる
     SshdPorts: PORTS = field(default_factory=lambda: [SSHD_PORT])
     launch_template: LaunchTemplate = field(default_factory=LaunchTemplate)
     security_group: SecurityGroup = field(default_factory=SecurityGroup)
     role: Role = field(default_factory=Role)
-
-    def __post_init__(self) -> None:
-        """KeyName と IdentityFile を確かめ、書かれていない IdentityFile を KeyName から導く。
-
-        KeyName は IdentityFile の既定のファイル名になり、apply は無ければそこに鍵を
-        作るので、keypair create と同じ規則に従わせる。導いた値は ssh の設定にも
-        そのまま書くので、鍵の場所がホームの下なら ~ で始まる形にする。場所は
-        TEMT_SSH_DIR の規則を通っているので、確かめ直さない。
-        """
-        if not is_key_name(self.KeyName):
-            raise ValueError(f"KeyName {KEY_NAME_RULE}: {printable(self.KeyName)}")
-        if self.IdentityFile is UNSET:
-            self.IdentityFile = f"{tilde(keys_dir())}/{self.KeyName}"
-        else:
-            check_identity_file(self.IdentityFile)
 
 
 def take_region_env() -> None:
@@ -742,7 +694,7 @@ def assign(values: Conf, key: str, value: str) -> None:
 def update(service: Service, values: Conf, key: str, value: str) -> bool:
     """Conf と設定ファイルの項目を更新する。ファイルを書き換えたら True を返す。
 
-    key は項目の位置で、最上位なら "KeyName"、テーブルの中なら
+    key は項目の位置で、最上位なら "AwsRegion"、テーブルの中なら
     "launch-template.InstanceType" のようにテーブル名と区切りを前に置く。
     書かれている値が既に同じなら、ファイルには触らない。書き換えるときも、既に書かれて
     いる項目の順序と、項目に付いたコメントは変えない。最上位の項目は最初のテーブルの

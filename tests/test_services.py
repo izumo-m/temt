@@ -49,7 +49,6 @@ def test_list_shows_the_chosen_columns(home_dir: Path, capsys: pytest.CaptureFix
     _ = home_dir
     written(
         "web",
-        'KeyName = "work"\n'
         "[launch-template]\n"
         'SubnetId = "subnet-0123456789abcdef0"\n'
         "[[security-group.ingress]]\n"
@@ -60,11 +59,11 @@ def test_list_shows_the_chosen_columns(home_dir: Path, capsys: pytest.CaptureFix
         'Cidr = "203.0.113.10/32"\n',
     )
 
-    services.list_services(None, "service,keyname,identityfile,subnet,ingress")
+    services.list_services(None, "service,subnet,ingress")
 
     assert capsys.readouterr().out.splitlines() == [
-        "SERVICE   KEYNAME   IDENTITYFILE            SUBNET                     INGRESS",
-        "web       work      ~/.ssh/temt/keys/work   subnet-0123456789abcdef0   2",
+        "SERVICE   SUBNET                     INGRESS",
+        "web       subnet-0123456789abcdef0   2",
     ]
 
 
@@ -109,7 +108,7 @@ def test_list_skips_what_it_cannot_read(home_dir: Path, capsys: pytest.CaptureFi
     """読めないファイルと規則に合わない名前は、警告して飛ばし、残りを並べてから止まる。"""
     _ = home_dir
     written("web", "")
-    broken = written("broken", "KeyName = [\n")
+    broken = written("broken", "AwsRegion = [\n")
     odd = written("Odd", "")
 
     with pytest.raises(TemtError, match="skipped 2 of 3 config files"):
@@ -125,18 +124,9 @@ def test_list_skips_what_it_cannot_read(home_dir: Path, capsys: pytest.CaptureFi
 
 def test_list_checks_the_columns_first(home_dir: Path) -> None:
     _ = home_dir
-    written("broken", "KeyName = [\n")
+    written("broken", "AwsRegion = [\n")
     with pytest.raises(UsageError, match="unknown column in --format: account"):
         services.list_services(None, "account")
-
-
-def test_list_stops_at_a_bad_place(home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """場所を変える環境変数の誤りは、ファイルごとに飛ばさず、一度だけ知らせて止まる。"""
-    _ = home_dir
-    written("web", "")
-    monkeypatch.setenv(names.SSH_DIR_ENV, "relative")
-    with pytest.raises(TemtError, match="TEMT_SSH_DIR must be an absolute path"):
-        services.list_services(None, None)
 
 
 def test_list_follows_the_service_names(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:

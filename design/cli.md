@@ -18,8 +18,7 @@ later) package `src/temt/`. The repository's `.venv` is for development and is m
 
 The form is `temt <target> <verb> [args] [options]`. The target is a noun for the kind
 of thing temt handles; the verb is the operation on it. Positional arguments after the
-verb name what is operated on (an AMI, instance IDs, a key pair name, an app ID, a port,
-etc.).
+verb name what is operated on (an AMI, instance IDs, an app ID, a port, etc.).
 
 Some commands have a one-word short form, typed as `temt <short form> [args] [options]`.
 A short form takes the same arguments and command-line options as the command it stands
@@ -29,7 +28,7 @@ The service is selected with `--svc <svc>`:
 
 - Commands written `--svc <svc>` in the table require it. Those written `[--svc <svc>]`
   (`service list`, `instance list`, `ami list`, `ami prune`, `ami delete`, `app list`)
-  may omit it. The `keypair` commands do not take it.
+  may omit it.
 - With `--svc`, the service's config file decides the environment (region and profile),
   and the command deals only with that service's things.
 - Without `--svc`, the command deals with the things of all services in the environment
@@ -70,11 +69,7 @@ The service is selected with `--svc <svc>`:
 | | `app unset --svc <svc> <app ID> <key>` | |
 | | `app deploy --svc <svc> <app ID or path> [<name>=<value>...] [--reset] [--user <user>] [--bake] [--yes]` | `deploy` |
 | | `app remove --svc <svc> <app ID> [--user <user>] [--bake] [--yes]` | |
-| `keypair` | `keypair list [--format <columns>]` | |
-| | `keypair show <key pair name or file>` | |
-| | `keypair create <key pair name>` | |
-| | `keypair delete <key pair name> [--yes]` | |
-| `ssh` | `ssh proxy --svc <svc> [<port>]` | `proxy` |
+| `ssh` | `ssh proxy --svc <svc> [<port>] [--user <user>]` | `proxy` |
 
 ## Parsing
 
@@ -112,8 +107,7 @@ operations can be typed in this form.
 
 - A command that may omit `--svc` behaves, when called through the service command, as
   if `--svc` were given.
-- Giving `--svc` again to the service command, or calling a `keypair` command (which takes
-  no `--svc`) through it, is a usage error.
+- Giving `--svc` again to the service command is a usage error.
 - `temt` does not look at the name it was called by.
 - `proxy` runs as ssh's ProxyCommand; ssh calls `temt` directly, not through the service
   command ([topics/ssh.md](topics/ssh.md)).
@@ -143,8 +137,7 @@ operations can be typed in this form.
   commands without `--svc` ([List tables](#list-tables)), and every message of `diff`
   and `sg diff`, `no differences` included (empty stdout means no differences).
 - Lines that belong to a warning or an error go to stderr with it: the instances found
-  before a too-many or unknown-ID error, the fingerprints and matching keys after a key
-  pair mismatch, the state `bake` leaves before its error, and the newline that closes
+  before a too-many or unknown-ID error, the state `bake` leaves before its error, and the newline that closes
   `^C` on an interrupt.
 - If stdout is closed at start (`>&-`), messages that would go to stdout go to stderr,
   and data for other programs (tables, `app get`, diff changes, `--help`, `--version`)
@@ -194,18 +187,16 @@ and file names) as lone surrogates. temt treats them the same way everywhere:
 - Shown (messages, tables, `app get`): replaced by `?`, like other unprintable
   characters. An `OSError` is shown as its reason and its paths, not as Python's text,
   which writes paths in `repr` form (`\udcff`).
-- Output of an external command that temt reads (`ssh-keygen`): decoded as file names
-  are, and shown with `?`. The public-key line of `ssh-keygen -y` goes to EC2 as the
-  bytes it printed, since a key comment may hold such bytes; `ssh-keygen -l` is given
-  only the key type and body.
+- Output of an external command that temt reads (`ssh-keygen`, `ssh -G`): decoded as
+  file names are, and shown with `?`.
 - Files temt reads (config files, `manifest.toml`, the ssh config): must be UTF-8;
-  otherwise the command stops naming the file. A key file that `keypair show` reads is
-  shown, with `?` for such bytes.
+  otherwise the command stops naming the file. From the `.pub` that `proxy` sends, only
+  the key type and body go to AWS; the comment, which may hold such bytes, is not sent.
 - Values that would be written to a file or sent to AWS stop the command where they are
   read, before anything changes: `TEMT_CONF_DIR` and `TEMT_SSH_DIR` (no unprintable
-  characters), the key pair name of `keypair show` and the AMI id or name of
-  `ami delete` (valid UTF-8), and the `app set` value and app options (valid UTF-8).
-  Names checked by a rule (services, apps, key pairs, instance IDs) never hold them.
+  characters), the AMI id or name of `ami delete` (valid UTF-8), and the `app set` value
+  and app options (valid UTF-8). Names checked by a rule (services, apps, instance IDs)
+  never hold them.
   A file path given as an argument may hold them.
 - A `[y/N]` answer that cannot be read is not `y`.
 - temt expects a UTF-8 locale (C included, where Python uses UTF-8). Under a locale with
@@ -224,10 +215,9 @@ and file names) as lone surrogates. temt treats them the same way everywhere:
 Before running, a command checks that the external commands it uses exist; if one is
 missing, it exits naming it.
 
-- `ssh-keygen`: `apply`, `diff`, `keypair show`, `keypair create`, and `keypair list`
-  when it outputs the `FINGERPRINT` or `LOCAL` column.
-- `proxy`: `aws` and `session-manager-plugin` when `TEMT_LOGIN` is `ssm`; none when it is
-  `direct`.
+- `ssh-keygen`: `apply` and `diff`, only when the default login key must be created.
+- `proxy`: `ssh` (for `ssh -G`), and `aws` and `session-manager-plugin` when
+  `TEMT_LOGIN` is `ssm`.
 - `ssh`: `deploy` and `app remove`.
 
 If boto3 cannot be imported, every command exits saying so, except those that do not
@@ -252,8 +242,8 @@ failure surfaces as the botocore error.
 - A command run with `--svc` other than `apply` and `destroy` exits, prompting to run
   `apply`, if the config file is missing. `apply` starts from the defaults.
 - `destroy` does not prompt `apply`, since it would delete what `apply` makes. It needs
-  the config file for the region and profile (`AwsRegion`, `AwsProfile`) and for the
-  keys it reports as kept (`KeyName`, `IdentityFile`); if the file is missing, it exits
+  the config file for the region and profile (`AwsRegion`, `AwsProfile`); if the file is
+  missing, it exits
   with `no config file: <path>; destroy needs AwsRegion from it`.
 
 ### Not applied
@@ -309,7 +299,7 @@ as absent for most commands. The rules are in
 
 - Before changing anything, these list the targets and ask for confirmation with
   `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami prune`,
-  `ami delete`, `keypair delete`, and `deploy` and `app remove` with `--bake`.
+  `ami delete`, and `deploy` and `app remove` with `--bake`.
 - `apply` ends without asking if there are no differences.
 - The list of targets goes to stdout and the prompt to stderr; `stop`, `terminate`, and
   `reboot` print no separate list and name their targets in the prompt itself
@@ -326,8 +316,7 @@ time it deletes one AMI ([topics/instance.md](topics/instance.md#locks)).
 
 ## List tables
 
-`service list`, `instance list`, `ami list`, `keypair list`, `app list`, and `sg list`
-follow docker:
+`service list`, `instance list`, `ami list`, `app list`, and `sg list` follow docker:
 
 - The first line is the column names (the header); from the second line on, one item per
   line.

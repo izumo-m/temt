@@ -62,5 +62,5 @@ dev = [
     "basedpyright>=1.40.1",
     "pytest>=9.1.1",
     "ruff>=0.16.8",
-    "types-boto3[accessanalyzer,ec2,iam,ssm,sts]>=1.43.98",
+    "types-boto3[accessanalyzer,ec2,ec2-instance-connect,iam,ssm,sts]>=1.43.98",
 ]

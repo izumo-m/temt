@@ -40,7 +40,7 @@ WHEN = datetime(2026, 9, 20, tzinfo=UTC)
 # 同じ名前の、もう 1 つの関連付けの ID
 OTHER_ASSOCIATION = "99999999-8888-7777-6666-555555555555"
 
-# temt が管理していることを示すタグ。キーペアを除く 5 つに付ける
+# temt が管理していることを示すタグ。5 つに付ける
 MARK: list[dict[str, str]] = [{"Key": "temt:service", "Value": "dev-main"}]
 # インスタンスとそのボリュームとネットワークインターフェース、セキュリティグループに付けるタグ
 TAGS: list[dict[str, str]] = [{"Key": "Name", "Value": NAME}, *MARK]
@@ -65,9 +65,7 @@ THE_POLICY = {"RoleName": NAME, "PolicyName": JUPYTER}
 # 足した temt のタグの、diff での表示
 MARK_SHOWN = "tags: temt:service=dev-main"
 
-VALUES = Conf(
-    KeyName="temt", launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET)
-)
+VALUES = Conf(launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET))
 
 # 揃っているときに、detect が AWS を読む順。update が揃える順と同じである。インライン
 # ポリシーは無い
@@ -190,7 +188,6 @@ def tags(resource_type: str) -> dict[str, Any]:
 def with_ingress(*ingress: Ingress) -> Conf:
     """受信規則を定めた設定。"""
     return Conf(
-        KeyName="temt",
         launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET),
         security_group=SecurityGroup(ingress=list(ingress)),
     )
@@ -1493,7 +1490,8 @@ def test_every_item_that_temt_decides_is_compared(ec2: EC2Client, service: Servi
     others: list[dict[str, Any]] = [
         echo(ImageId="ami-00000000000000002"),
         echo(InstanceType="t3.small"),
-        echo(KeyName="other"),
+        # temt は KeyName を入れない。前の temt か手で入れたものがあれば外す
+        echo(KeyName="temt"),
         echo(InstanceInitiatedShutdownBehavior="stop"),
         echo(CreditSpecification={"CpuCredits": "standard"}),
         echo(
@@ -1650,9 +1648,7 @@ def test_cpu_credits_go_only_to_the_burstable_types(
     t1 は CPU クレジットを持たない。trn1 のように t で始まっても、続くのが数字でなければ
     T 系ではない。
     """
-    values = Conf(
-        KeyName="temt", launch_template=LaunchTemplate(InstanceType=instance_type, SubnetId=SUBNET)
-    )
+    values = Conf(launch_template=LaunchTemplate(InstanceType=instance_type, SubnetId=SUBNET))
     data = resources.template_data(Service("dev-main"), values, IMAGE, SUBNET, GROUP, ipv6=False)
     expected = None if credits is None else {"CpuCredits": credits}
     assert data.get("CreditSpecification") == expected
@@ -1663,9 +1659,7 @@ def test_cpu_credits_are_dropped_when_the_type_leaves_the_burstable_ones(
     ec2: EC2Client, service: Service
 ) -> None:
     """T 系から外れると CpuCredits の項目が無くなり、それも違いとして見せる。"""
-    values = Conf(
-        KeyName="temt", launch_template=LaunchTemplate(InstanceType="m7i.large", SubnetId=SUBNET)
-    )
+    values = Conf(launch_template=LaunchTemplate(InstanceType="m7i.large", SubnetId=SUBNET))
     with Stubber(ec2) as stub:
         stub.add_response(
             "describe_launch_template_versions",
@@ -1688,7 +1682,6 @@ ROOT_DEVICE = "/dev/sda1"
 def sized(size: int) -> Conf:
     """VolumeSize を書いた設定。"""
     return Conf(
-        KeyName="temt",
         launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET, VolumeSize=size),
     )
 

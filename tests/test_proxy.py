@@ -1,8 +1,10 @@
-"""proxy の本体のテスト。AWS は Stubber で、exec と外部コマンドの確認は偽物に差し替える。
+"""proxy の本体のテスト。AWS は Stubber で、exec と外部コマンドの確認と ssh -G は偽物に
+差し替える。
 
 端から端まで（proxy.run か cli.main）を通し、読む順序と、exec するコマンドラインか中継する
 接続を確かめる。TCP の接続と中継も偽物に差し替え、実際のソケットは開かない。
-instances.connect 自身は test_instances で、relay.run 自身は test_relay で確かめる。
+instances.connect 自身は test_instances で、relay.run 自身は test_relay で、ssh -G の読み方は
+test_keys で確かめる。
 """
 
 import os
@@ -15,6 +17,7 @@ from typing import Any
 
 import pytest
 from conftest import (
+    API_CALL,
     ASSOCIATION,
     OLD_VERSION,
     SSHD,
@@ -26,8 +29,9 @@ from conftest import (
     reservations,
     taken,
 )
+from types_boto3_ec2_instance_connect.client import EC2InstanceConnectClient
 
-from temt import aws, cli, conf, home, instances, msg, proc, proxy, relay, wait
+from temt import aws, cli, conf, home, instances, keys, msg, proc, proxy, relay, wait
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -66,6 +70,14 @@ SSM_ARGV = [
     "--region",
     REGION,
 ]
+
+# ssh -G が出す、ログインするユーザーと鍵。鍵は temt の既定の鍵
+LOGIN_USER = "ubuntu"
+SSH_G = [f"user {LOGIN_USER}", "identityfile ~/.ssh/temt/keys/temt"]
+# 既定の鍵の公開鍵。ファイルにはコメントも書くが、送るのは種類と本体だけである
+PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKfJ0gnyLzVY4oq0bQ1Zzv1g9f8bO4m7mI5x2kYpQXcP"
+# EC2 Instance Connect に送るもの
+SEND = {"InstanceId": INSTANCE, "InstanceOSUser": LOGIN_USER, "SSHPublicKey": PUBLIC_KEY}
 
 # 起動した時刻。LOGIN_DEADLINE の内なら起動して間もないとみなし、つなげるまで待つ。
 # LaunchTime が無いインスタンスは、起動から時間がたったものとして扱われる
@@ -126,18 +138,28 @@ def sshd_applied(stubs: Stubs) -> None:
     sshd_ran(stubs, association_ran("Success"))
 
 
+def key_sent(stubs: Stubs, params: dict[str, Any] = SEND) -> None:
+    """send-ssh-public-key の応答を積む。既定では、ssh -G が出したユーザーと既定の鍵を送る。"""
+    stubs.connect.add_response(
+        "send_ssh_public_key", {"RequestId": "11111111-2222", "Success": True}, params
+    )
+
+
 def ready(stubs: Stubs) -> None:
-    """アドレスの付いた running のインスタンスと、Online のエージェントを積む。
+    """アドレスの付いた running のインスタンスと、Online のエージェントと、鍵を送った応答を
+    積む。
 
     ssm の経路で、待たずにつなげる姿である。
     """
     found(stubs, an_instance(INSTANCE, "running", address=ADDRESS))
     agent(stubs, "Online")
+    key_sent(stubs)
 
 
 def running(stubs: Stubs) -> None:
-    """アドレスの付いた running のインスタンスを積む。direct の経路で使う。"""
+    """アドレスの付いた running のインスタンスと、鍵を送った応答を積む。direct の経路で使う。"""
     found(stubs, an_instance(INSTANCE, "running", address=ADDRESS))
+    key_sent(stubs)
 
 
 # つながらなかったときの理由の例。待つ側から見れば、どれもまだつながらない
@@ -157,19 +179,69 @@ class Opened:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def sent(connect: EC2InstanceConnectClient) -> list[dict[str, Any]]:
+    """EC2 Instance Connect に鍵を送った控え。送るたびに、渡した引数を足す。
+
+    応答は aws_stubs に積んだものが返る。接続、中継、exec の代わりは、それまでに送った数を
+    控える。
+    """
+    calls: list[dict[str, Any]] = []
+    call = getattr(connect, API_CALL)
+
+    def make_api_call(operation_name: str, api_params: dict[str, Any]) -> Any:
+        calls.append(api_params)
+        return call(operation_name, api_params)
+
+    setattr(connect, API_CALL, make_api_call)
+    return calls
+
+
+@dataclass
+class SshConfig:
+    """proc.run の代わり。ssh -G に尋ねたコマンドラインを控え、lines を出す。"""
+
+    lines: list[str]
+    asked: list[list[str]] = field(default_factory=list)
+
+    def __call__(self, argv: list[str], stdin: str | None = None) -> str:
+        assert stdin is None
+        self.asked.append(argv)
+        return "".join(f"{line}\n" for line in self.lines)
+
+
+@pytest.fixture(autouse=True)
+def ssh_config(monkeypatch: pytest.MonkeyPatch, home_dir: Path) -> SshConfig:
+    """ssh -G を差し替え、既定の鍵の公開鍵を置く。
+
+    autouse なので、手元の ssh の設定は読まない。ssh -G は既定の鍵を出す。
+    """
+    _ = home_dir
+    public = keys.public_path(keys.default_path())
+    public.parent.mkdir(parents=True)
+    public.write_text(f"{PUBLIC_KEY} temt\n", encoding="utf-8")
+    fake = SshConfig(list(SSH_G))
+    monkeypatch.setattr(proc, "run", fake)
+    return fake
+
+
 @dataclass
 class Ports:
     """instances.connect の代わり。つながらなかった理由を順に上げ、尽きたらつなぐ。
 
-    None もつながったことを表す。wait_accepting もこれを通る。
+    None もつながったことを表す。wait_accepting もこれを通る。つなごうとするたびに、それまでに
+    送った鍵の数を控える。
     """
 
+    sent: list[dict[str, Any]] = field(default_factory=list)
     answers: list[OSError | None] = field(default_factory=list)
     calls: list[tuple[str, int]] = field(default_factory=list)
     opened: list[Opened] = field(default_factory=list)
+    keys_sent: list[int] = field(default_factory=list)
 
     def __call__(self, address: str, port: int) -> Opened:
         self.calls.append((address, port))
+        self.keys_sent.append(len(self.sent))
         answer = self.answers.pop(0) if self.answers else None
         if answer is not None:
             raise answer
@@ -179,9 +251,9 @@ class Ports:
 
 
 @pytest.fixture(autouse=True)
-def ports(monkeypatch: pytest.MonkeyPatch) -> Ports:
+def ports(monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]) -> Ports:
     """TCP の接続を差し替える。autouse なので、実際のソケットは開かない。"""
-    fake = Ports()
+    fake = Ports(sent)
     monkeypatch.setattr(instances, "connect", fake)
     return fake
 
@@ -191,15 +263,18 @@ class Relay:
     """relay.run の代わり。中継した接続を控える。"""
 
     service: Service
+    sent: list[dict[str, Any]]
     calls: list[Opened] = field(default_factory=list)
     # 中継を始めた時点で、ロックが空いていたかどうかと、接続が開いていたかどうかと、
-    # known_hosts が指していたインスタンス
+    # known_hosts が指していたインスタンスと、送った鍵の数
     lock_free: list[bool] = field(default_factory=list)
     alive: list[bool] = field(default_factory=list)
     known_hosts: list[Path | None] = field(default_factory=list)
+    keys_sent: list[int] = field(default_factory=list)
 
     def __call__(self, connection: Opened) -> None:
         self.calls.append(connection)
+        self.keys_sent.append(len(self.sent))
         self.lock_free.append(taken(self.service))
         self.alive.append(not connection.closed)
         current = self.service.known_hosts_current
@@ -207,9 +282,9 @@ class Relay:
 
 
 @pytest.fixture(autouse=True)
-def relays(monkeypatch: pytest.MonkeyPatch, service: Service) -> Relay:
+def relays(monkeypatch: pytest.MonkeyPatch, service: Service, sent: list[dict[str, Any]]) -> Relay:
     """中継を差し替える。autouse なので、標準入出力には触れない。"""
-    fake = Relay(service)
+    fake = Relay(service, sent)
     monkeypatch.setattr(relay, "run", fake)
     return fake
 
@@ -219,19 +294,22 @@ class Exec:
     """exec の代わり。呼ばれたコマンドラインと環境を控え、戻ってくる。"""
 
     service: Service
+    sent: list[dict[str, Any]]
     calls: list[tuple[str, list[str], dict[str, str]]] = field(default_factory=list)
-    # exec の時点でロックが空いていたかどうか
+    # exec の時点でロックが空いていたかどうかと、送った鍵の数
     lock_free: list[bool] = field(default_factory=list)
+    keys_sent: list[int] = field(default_factory=list)
 
     def __call__(self, file: str, argv: list[str], env: dict[str, str]) -> None:
         self.lock_free.append(taken(self.service))
+        self.keys_sent.append(len(self.sent))
         self.calls.append((file, argv, env))
 
 
 @pytest.fixture
-def execs(monkeypatch: pytest.MonkeyPatch, service: Service) -> Exec:
+def execs(monkeypatch: pytest.MonkeyPatch, service: Service, sent: list[dict[str, Any]]) -> Exec:
     """exec を差し替える。"""
-    fake = Exec(service)
+    fake = Exec(service, sent)
     monkeypatch.setattr(proxy, "execvpe", fake)
     return fake
 
@@ -282,6 +360,7 @@ def test_it_connects_through_session_manager(
     configured: Service,
     execs: Exec,
     required: list[str],
+    ssh_config: SshConfig,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -289,8 +368,12 @@ def test_it_connects_through_session_manager(
     ready(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
-    # ssm の経路は aws-cli と session-manager-plugin を使う
-    assert required == ["aws", "session-manager-plugin"]
+    # ssm の経路は aws-cli と session-manager-plugin を使う。どちらの経路も、送る鍵を ssh -G で
+    # 調べる
+    assert required == ["ssh", "aws", "session-manager-plugin"]
+    assert ssh_config.asked == [["ssh", "-G", NAME]]
+    # 鍵は exec の前に 1 度だけ送る
+    assert execs.keys_sent == [1]
     # プロファイルもリージョンも設定ファイルから渡される。AwsProfile が無ければ渡さない
     assert aws_stubs.passed[0].AwsProfile is None
     assert aws_stubs.passed[0].AwsRegion == REGION
@@ -359,6 +442,7 @@ def test_it_connects_directly(
     configured: Service,
     execs: Exec,
     required: list[str],
+    ssh_config: SshConfig,
     ports: Ports,
     relays: Relay,
     monkeypatch: pytest.MonkeyPatch,
@@ -368,9 +452,13 @@ def test_it_connects_directly(
     running(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
-    # direct の経路は外部コマンドを使わない
-    assert required == []
+    # direct の経路は、送る鍵を調べる ssh だけを使う
+    assert required == ["ssh"]
+    assert ssh_config.asked == [["ssh", "-G", NAME]]
     assert not execs.calls
+    # 鍵は、TCP でつないだ後、中継の前に 1 度だけ送る
+    assert ports.keys_sent == [0]
+    assert relays.keys_sent == [1]
     # SSM エージェントは見ず、そのポートに 1 回だけつなぎ、その接続をそのまま中継する
     assert ports.calls == [(ADDRESS, 22)]
     [connection] = ports.opened
@@ -389,6 +477,7 @@ def test_it_connects_directly(
 def test_it_closes_the_connection_when_the_known_hosts_fail(
     aws_stubs: Stubs,
     configured: Service,
+    required: list[str],
     ports: Ports,
     relays: Relay,
     monkeypatch: pytest.MonkeyPatch,
@@ -397,7 +486,9 @@ def test_it_closes_the_connection_when_the_known_hosts_fail(
     """known_hosts を用意できなければ、中継せずに接続を閉じる。
 
     起動して間もなければ待って得た接続を、時間がたっていれば 1 回でつないだ接続を閉じる。
+    鍵は known_hosts の前に送っている。
     """
+    _ = required
     login(monkeypatch, "direct")
 
     def broken(service: Service, instance_id: str) -> Path:
@@ -406,6 +497,7 @@ def test_it_closes_the_connection_when_the_known_hosts_fail(
 
     monkeypatch.setattr(home, "use_known_hosts", broken)
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), ago))
+    key_sent(aws_stubs)
     with pytest.raises(PermissionError):
         proxy.run(configured, 22)
     assert not relays.calls
@@ -426,8 +518,13 @@ def test_it_passes_the_port_to_session_manager(
 
 
 def test_it_connects_directly_to_the_port(
-    aws_stubs: Stubs, configured: Service, ports: Ports, monkeypatch: pytest.MonkeyPatch
+    aws_stubs: Stubs,
+    configured: Service,
+    required: list[str],
+    ports: Ports,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _ = required
     login(monkeypatch, "direct")
     running(aws_stubs)
     proxy.run(configured, 2222)
@@ -597,6 +694,7 @@ def test_it_connects_to_the_one_that_is_not_shutting_down(
         an_instance(INSTANCE, "running", address=ADDRESS),
     )
     agent(aws_stubs, "Online")
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     [(file, argv, _env)] = execs.calls
@@ -665,6 +763,7 @@ def test_it_waits_for_a_pending_instance(
     if value == "ssm":
         agent(aws_stubs, "Online")
         sshd_applied(aws_stubs)
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
@@ -702,6 +801,7 @@ def test_main_writes_the_notices_only_to_stderr(
     )
     agent(aws_stubs, "Online")
     sshd_applied(aws_stubs)
+    key_sent(aws_stubs)
     assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
     assert execs.calls[0][1] == SSM_ARGV
     captured = capsys.readouterr()
@@ -710,6 +810,30 @@ def test_main_writes_the_notices_only_to_stderr(
         f"{INSTANCE} is pending; waiting for it",
         f"{INSTANCE} is running",
     ]
+
+
+def test_main_passes_the_user_from_ssh(
+    aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str]
+) -> None:
+    """ProxyCommand の --user '%r' は、cli から proxy まで届き、そのユーザーに鍵を送る。"""
+    _ = (configured, required)
+    found(aws_stubs, an_instance(INSTANCE, "running", address=ADDRESS))
+    agent(aws_stubs, "Online")
+    key_sent(aws_stubs, {**SEND, "InstanceOSUser": "admin"})
+    assert cli.main(["temt", "proxy", "--svc", "dev-main", "--user", "admin", "22"]) == 0
+    assert execs.keys_sent == [1]
+
+
+def test_main_refuses_a_user_that_breaks_the_rule(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ユーザー名の規則に合わないユーザーは、AWS を呼ばずに引数の誤りにする。"""
+    _ = configured
+    assert cli.main(["temt", "proxy", "--svc", "dev-main", "--user", "Admin"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "proxy: the user must start with a lowercase letter" in captured.err
+    assert aws_stubs.passed == []
 
 
 def test_it_waits_for_the_agent_to_come_online(
@@ -730,6 +854,7 @@ def test_it_waits_for_the_agent_to_come_online(
     agent(aws_stubs, "ConnectionLost")
     agent(aws_stubs, "Online")
     sshd_applied(aws_stubs)
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5, 5]
@@ -752,6 +877,7 @@ def test_it_does_not_count_a_ping_from_before_the_launch(
     agent(aws_stubs, "Online", datetime.now(UTC) - timedelta(minutes=1))
     agent(aws_stubs, "Online")
     sshd_applied(aws_stubs)
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
@@ -781,6 +907,7 @@ def test_it_waits_for_the_sshd_ports_after_the_agent(
     sshd_ran(aws_stubs, association_ran("InProgress"))
     sshd_ran(aws_stubs, association_ran("Pending"))
     sshd_ran(aws_stubs, association_ran("Success"))
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5] * 5
@@ -805,6 +932,7 @@ def test_a_failed_run_of_the_previous_version_is_not_the_end(
     listed_associations(aws_stubs.ssm, ASSOCIATION)
     sshd_ran(aws_stubs, association_ran("Failed", OLD_VERSION))
     sshd_ran(aws_stubs, association_ran("Success"))
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
@@ -830,6 +958,7 @@ def test_it_does_not_count_the_runs_of_another_association(
     )
     sshd_ran(aws_stubs, association_ran("Failed", association_id=OTHER_ASSOCIATION))
     sshd_ran(aws_stubs, association_ran("Success"))
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5, 5]
@@ -855,6 +984,7 @@ def test_it_connects_with_a_warning_when_the_sshd_ports_did_not_succeed(
     agent(aws_stubs, "Online")
     listed_associations(aws_stubs.ssm, ASSOCIATION)
     sshd_ran(aws_stubs, association_ran(state))
+    key_sent(aws_stubs)
     proxy.run(configured, 2222)
     aws_stubs.done()
     assert clock.slept == []
@@ -881,6 +1011,7 @@ def test_it_connects_with_a_warning_when_there_is_no_association(
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
     agent(aws_stubs, "Online")
     listed_associations(aws_stubs.ssm)
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == []
@@ -926,6 +1057,7 @@ def test_it_does_not_look_at_the_sshd_ports_of_an_old_instance(
     _ = required
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), LONG_AGO))
     agent(aws_stubs, "Online")
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert execs.calls[0][1] == SSM_ARGV
@@ -982,6 +1114,7 @@ def test_it_waits_for_a_public_address(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running", address=ADDRESS)), BY_ID
     )
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
@@ -1017,6 +1150,7 @@ def test_it_waits_for_an_address_after_a_pending_instance_is_running(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running", address=ADDRESS)), BY_ID
     )
+    key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
@@ -1045,10 +1179,14 @@ def test_it_waits_until_the_port_accepts_connections(
     login(monkeypatch, "direct")
     ports.answers = [REFUSED, REFUSED, REFUSED, None]
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
+    key_sent(aws_stubs)
     proxy.run(configured, 2222)
     aws_stubs.done()
     assert clock.slept == [5, 5, 5]
     assert ports.calls == [(ADDRESS, 2222)] * 4
+    # 鍵は 60 秒しか認められないので、つながってから送る
+    assert ports.keys_sent == [0] * 4
+    assert relays.keys_sent == [1]
     # つながった接続をそのまま中継する
     assert relays.calls == ports.opened
     captured = capsys.readouterr()
@@ -1207,33 +1345,70 @@ def test_it_suspects_the_security_group_on_an_old_instance(
 
 
 def test_it_asks_for_apply_when_there_is_no_config_file(
-    aws_stubs: Stubs, service: Service, execs: Exec, required: list[str]
+    aws_stubs: Stubs, service: Service, execs: Exec, required: list[str], ssh_config: SshConfig
 ) -> None:
     with pytest.raises(TemtError, match="run 'temt apply --svc dev-main' first"):
         proxy.run(service, 22)
-    # 設定ファイルが無ければ、経路も決まらず、AWS にも触れない
+    # 設定ファイルが無ければ、経路も決まらず、ssh にも AWS にも触れない
     assert required == []
+    assert ssh_config.asked == []
     assert aws_stubs.passed == []
     assert not execs.calls
 
 
-@pytest.mark.parametrize("missing", ["aws", "session-manager-plugin"])
+@pytest.mark.parametrize(
+    ("route", "missing"),
+    [
+        ("ssm", "ssh"),
+        ("ssm", "aws"),
+        ("ssm", "session-manager-plugin"),
+        ("direct", "ssh"),
+    ],
+)
 def test_it_checks_the_commands_before_touching_aws(
     aws_stubs: Stubs,
     configured: Service,
     execs: Exec,
+    relays: Relay,
+    ssh_config: SshConfig,
     monkeypatch: pytest.MonkeyPatch,
+    route: str,
     missing: str,
 ) -> None:
+    """使う外部コマンドの有無は、ssh -G に尋ねる前に、経路ごとに確かめる。"""
 
     def which(command: str) -> str | None:
         return None if command == missing else f"/usr/bin/{command}"
 
+    login(monkeypatch, route)
     monkeypatch.setattr(proc.shutil, "which", which)
     with pytest.raises(TemtError, match=f"command not found: {missing}"):
         proxy.run(configured, 22)
+    assert ssh_config.asked == []
     assert aws_stubs.passed == []
     assert not execs.calls
+    assert not relays.calls
+
+
+@pytest.mark.parametrize("missing", ["aws", "session-manager-plugin"])
+def test_the_direct_route_needs_only_ssh(
+    aws_stubs: Stubs,
+    configured: Service,
+    relays: Relay,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    """direct は aws-cli も session-manager-plugin も使わないので、無くてもつなぐ。"""
+
+    def which(command: str) -> str | None:
+        return None if command == missing else f"/usr/bin/{command}"
+
+    login(monkeypatch, "direct")
+    monkeypatch.setattr(proc.shutil, "which", which)
+    running(aws_stubs)
+    proxy.run(configured, 22)
+    aws_stubs.done()
+    assert len(relays.calls) == 1
 
 
 def test_it_connects_with_stderr_closed(
@@ -1275,3 +1450,138 @@ def test_main_reports_a_failed_exec(
     assert out == ""
     assert err.startswith("temt: ")
     assert "No such file or directory" in err
+
+
+# --- EC2 Instance Connect で送る鍵 ---
+
+
+def connected(stubs: Stubs, route: str) -> None:
+    """鍵を送る応答のほかに、その経路で待たずにつなげる応答を積む。"""
+    found(stubs, an_instance(INSTANCE, "running", address=ADDRESS))
+    if route == "ssm":
+        agent(stubs, "Online")
+
+
+@pytest.mark.parametrize("route", ["ssm", "direct"])
+def test_it_sends_the_key_that_ssh_offers(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    relays: Relay,
+    required: list[str],
+    ssh_config: SshConfig,
+    home_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """ssh -G が出すユーザーで、.pub のある最初の鍵を、コメントを除いて送る。
+
+    既定の鍵でなくても、利用者が Host ブロックに書いた鍵を送る。
+    """
+    _ = required
+    login(monkeypatch, route)
+    public = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7" + "x" * 80
+    (home_dir / "mine.pub").write_text(f"{public} me@laptop\n", encoding="utf-8")
+    ssh_config.lines = ["user admin", "identityfile ~/missing", "identityfile ~/mine"]
+    connected(aws_stubs, route)
+    key_sent(aws_stubs, {"InstanceId": INSTANCE, "InstanceOSUser": "admin", "SSHPublicKey": public})
+    proxy.run(configured, 22)
+    aws_stubs.done()
+    assert (execs.keys_sent, relays.keys_sent) == (([1], []) if route == "ssm" else ([], [1]))
+
+
+def test_it_sends_the_key_for_the_user_ssh_logs_in_as(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    ssh_config: SshConfig,
+) -> None:
+    """ssh other@<名前> のユーザーは ProxyCommand の %r で届き、ssh -G のものより優先する。"""
+    _ = (required, ssh_config)
+    found(aws_stubs, an_instance(INSTANCE, "running", address=ADDRESS))
+    agent(aws_stubs, "Online")
+    key_sent(aws_stubs, {**SEND, "InstanceOSUser": "admin"})
+    proxy.run(configured, 22, "admin")
+    aws_stubs.done()
+    assert execs.keys_sent == [1]
+
+
+@pytest.mark.parametrize("route", ["ssm", "direct"])
+def test_it_stops_before_aws_without_a_public_key(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    relays: Relay,
+    ports: Ports,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """送る鍵が無ければ、AWS を呼ぶ前に、既定の鍵を作る apply を促して止まる。"""
+    _ = required
+    login(monkeypatch, route)
+    keys.public_path(keys.default_path()).unlink()
+    with pytest.raises(TemtError) as caught:
+        proxy.run(configured, 22)
+    assert str(caught.value) == (
+        f"no public key for 'ssh {NAME}': no .pub next to its IdentityFile "
+        "(~/.ssh/temt/keys/temt); "
+        f"put the .pub next to the key, or delete IdentityFile from the Host {NAME} block "
+        "and run 'temt apply' to use the default key"
+    )
+    assert aws_stubs.passed == []
+    assert (execs.calls, relays.calls, ports.calls) == ([], [], [])
+    assert not configured.known_hosts_dir.exists()
+
+
+def test_it_stops_before_aws_when_the_public_key_is_broken(
+    aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str]
+) -> None:
+    _ = required
+    keys.public_path(keys.default_path()).write_text("not-a-key\n", encoding="utf-8")
+    with pytest.raises(TemtError) as caught:
+        proxy.run(configured, 22)
+    assert str(caught.value) == "not a public key: ~/.ssh/temt/keys/temt.pub"
+    assert aws_stubs.passed == []
+    assert not execs.calls
+
+
+@pytest.mark.parametrize("route", ["ssm", "direct"])
+def test_main_reports_an_error_from_sending_the_key(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    relays: Relay,
+    ports: Ports,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    route: str,
+) -> None:
+    """鍵を送れなければ、AWS の誤りをほかの誤りと同じく知らせ、つながずに終わる。
+
+    known_hosts は送った後に用意するので、触れない。direct なら、つないだ接続を閉じる。
+    """
+    _ = required
+    login(monkeypatch, route)
+    connected(aws_stubs, route)
+    aws_stubs.connect.add_client_error(
+        "send_ssh_public_key",
+        service_error_code="AuthException",
+        service_message="not authorized to perform ec2-instance-connect:SendSSHPublicKey",
+        http_status_code=403,
+        expected_params=SEND,
+    )
+    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 1
+    aws_stubs.done()
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == (
+        "temt: An error occurred (AuthException) when calling the SendSSHPublicKey operation: "
+        "not authorized to perform ec2-instance-connect:SendSSHPublicKey\n"
+    )
+    assert (execs.calls, relays.calls) == ([], [])
+    assert all(connection.closed for connection in ports.opened)
+    assert len(ports.opened) == (1 if route == "direct" else 0)
+    assert not configured.known_hosts_dir.exists()

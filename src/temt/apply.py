@@ -1,7 +1,7 @@
-"""apply と diff の本体。設計の手順 1〜7 を順に呼ぶ。
+"""apply と diff の本体。設計の手順 1〜6 を順に呼ぶ。
 
 手順 1 のうち、名前の検査は cli が Service を作るときに済んでいる。ここで行う設定ファイルの
-場所の確認は、何も揃えず、先へ進んでよいかだけを決める。手順 2〜7 は、設定ファイルを正と
+場所の確認は、何も揃えず、先へ進んでよいかだけを決める。手順 2〜6 は、設定ファイルを正と
 して対象の 1 つを揃える独立した処理で、対象ごとに、差分を検出する処理と、検出した
 差分で更新する処理に分かれている。この module はその順序だけを持つ。
 
@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from temt import aws, change, conf, home, keypair, keys, msg, policy, proc, resources
+from temt import aws, change, conf, home, keys, msg, policy, resources
 from temt.aws import field
 from temt.change import ADD, ARROW, UPDATE, Change
 from temt.conf import Conf
@@ -83,7 +83,6 @@ def _conf_items(
     if conf.OPTION_PROFILE:
         yield "AwsProfile", conf.OPTION_PROFILE
     yield "AwsRegion", values.AwsRegion
-    yield "KeyName", values.KeyName
     template = values.launch_template
     image = template.ImageId
     if image is conf.UNSET:
@@ -254,8 +253,8 @@ class Plan:
     new: bool
     dirs: tuple[home.Dir, ...]
     command: bool
-    key: keypair.KeyDiff
     found: resources.Found
+    key: keys.KeyDiff | None
     host: home.Edit
     include: home.Edit
 
@@ -267,7 +266,7 @@ def _detect(
     clients: Clients,
     shown: list[Change],
 ) -> Plan:
-    """手順 2〜7 の差分を、手順の順に検出する。何も書き込まない。
+    """手順 2〜6 の差分を、手順の順に検出する。何も書き込まない。
 
     手順 2 で書く値は、values に書いたものとして後の手順で使う。見せる変更は、検出する
     たびに shown に足していく。手順の中で止まるときも、それまでに検出した変更は shown に
@@ -287,8 +286,6 @@ def _detect(
     shown += home.command_changes(service, command)
     resolved = _resolve(ec2, service, values)
     policies = _role_policies(session, service, values)
-    key = keypair.detect(ec2, service, values)
-    shown += key.changes()
     found = resources.detect(
         ec2,
         iam,
@@ -304,10 +301,15 @@ def _detect(
     )
     shown += found.changes()
     host = home.detect_host_block(service, values)
+    # Host ブロックが既定の鍵を使うなら、無ければ作る。利用者が替えた鍵には触らない
+    path = home.default_key(host, service)
+    key = None if path is None else keys.detect(path)
+    if key is not None:
+        shown += key.changes()
     shown += home.host_block_changes(service, host)
     include = home.detect_include()
     shown += home.include_changes(include, host)
-    return Plan(configured, new, dirs, command, key, found, host, include)
+    return Plan(configured, new, dirs, command, found, key, host, include)
 
 
 def _write(service: Service, values: Conf, key: str, value: str) -> None:
@@ -342,10 +344,9 @@ def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> Non
         home.write_command(service)
         msg.info(f"wrote {printable(tilde(service.command_path))}")
     # 手順 5
-    keypair.ensure(ec2, service, values, plan.key)
-    # 手順 6
     resources.update(ec2, iam, ssm, service, values, plan.found)
-    # 手順 7
+    # 手順 6。鍵を先に作り、ssh の設定が無い鍵を指す時間を作らない
+    keys.ensure(plan.key)
     if home.write_edit(plan.host):
         msg.info(f"wrote the Host {service.name} block in {printable(tilde(ssh_dir() / 'config'))}")
     if home.write_include(plan.include, plan.host):
@@ -356,12 +357,11 @@ def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> Non
 
 
 def run(service: Service, *, yes: bool) -> None:
-    """サービスの設定ファイル、キーペア、AWS リソース、ssh の設定を揃える。
+    """サービスの設定ファイル、AWS リソース、ssh の設定と鍵を揃える。
 
     すべての差分を先に検出し、違いが無ければそう知らせて終わる。違いがあれば diff と同じ
     形で表示し、確認を求めてから更新する。確認の前には何も書かない。
     """
-    proc.require(keys.KEYGEN)
     # 手順 1。同じサービスを別の場所から apply していれば、何かを書く前に止める。
     # AWS のリソースも同じ名前なので、別の定義で上書きしてしまう
     home.check_owner(service)
@@ -394,7 +394,6 @@ def diff(service: Service) -> None:
 
 def _diff(service: Service) -> None:
     """diff の本体。"""
-    proc.require(keys.KEYGEN)
     shown: list[Change] = []
     try:
         home.check_owner(service)

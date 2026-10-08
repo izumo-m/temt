@@ -47,9 +47,7 @@ SERVICE_IMAGES = {
     ],
 }
 
-VALUES = Conf(
-    KeyName="temt", launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET)
-)
+VALUES = Conf(launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET))
 
 
 def data(**changes: Any) -> dict[str, Any]:
@@ -144,7 +142,6 @@ def test_it_shows_the_default_version(
         "  version:                3 (created 2026-09-20 18:00:00)\n"
         f"  ImageId:                {IMAGE}\n"
         "  InstanceType:           t3.micro\n"
-        "  KeyName:                temt\n"
         "  VolumeSize:             (not set)\n"
         f"  SubnetId:               {SUBNET} ({VPC})\n"
         f"  security groups:        {GROUP}\n"
@@ -221,7 +218,7 @@ def test_it_shows_an_image_that_is_gone(
     show.template(configured)
     aws_stubs.done()
     lines = capsys.readouterr().out.splitlines()
-    assert lines[18:21] == [
+    assert lines[17:20] == [
         f"image {IMAGE}:",
         "  state:  (not found; it may have been deregistered)",
         f"  latest: {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) created {LATER_SHOWN}",
@@ -239,7 +236,7 @@ def test_it_marks_a_newer_image(
     show.template(configured)
     aws_stubs.done()
     lines = capsys.readouterr().out.splitlines()
-    assert lines[23] == (
+    assert lines[22] == (
         f"  latest:      {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) "
         f"created {LATER_SHOWN}, newer"
     )
@@ -254,7 +251,7 @@ def test_it_shows_no_ami_of_the_service(
     service_images(aws_stubs)
     show.template(configured)
     aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[23] == "  latest:      none (temt:service=dev-main)"
+    assert capsys.readouterr().out.splitlines()[22] == "  latest:      none (temt:service=dev-main)"
 
 
 def test_it_lists_every_version(
@@ -272,7 +269,7 @@ def test_it_lists_every_version(
     show.template(configured)
     aws_stubs.done()
     lines = capsys.readouterr().out.splitlines()
-    assert lines[24:] == [
+    assert lines[23:] == [
         "versions (* is the default):",
         f"  1   2026-09-20 18:00:00 {NEWEST} t3.small {SUBNET}",
         f"  2 * 2026-09-20 18:00:00 {IMAGE} t3.micro {SUBNET}",
@@ -290,7 +287,7 @@ def test_it_shows_a_subnet_that_is_gone(
     show.template(configured)
     aws_stubs.done()
     assert (
-        capsys.readouterr().out.splitlines()[6]
+        capsys.readouterr().out.splitlines()[5]
         == f"  SubnetId:               {SUBNET} (no such subnet)"
     )
 

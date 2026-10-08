@@ -1,8 +1,9 @@
 """proxy の本体。ssh の ProxyCommand として動く。
 
 環境変数 TEMT_LOGIN で経路を選び、describe-instances でインスタンスを探し、
-起動して間もなければつなげるようになるまで待ち、known_hosts を用意してから、ssm
-なら aws-cli を exec し、direct なら確かめでつないだ接続と標準入出力を中継する。
+起動して間もなければつなげるようになるまで待ち、ssh が使う鍵の公開鍵を EC2 Instance
+Connect でインスタンスに送り、known_hosts を用意してから、ssm なら aws-cli を exec
+し、direct なら確かめでつないだ接続と標準入出力を中継する。
 ssh は ProxyCommand に自分の環境変数を渡すので、TEMT_LOGIN=direct ssh <名前> で
 その接続だけ経路を変えられる。ロックは取らない。標準出力は ssh の通信路なので、
 何も書かない。待つあいだの知らせは標準エラー出力に書き、ssh がそのまま画面に出す。
@@ -16,12 +17,13 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from temt import aws, conf, home, instances, msg, proc, relay, sshd, table
+from temt import aws, conf, home, instances, keys, msg, proc, relay, sshd, table
 from temt.msg import TemtError
 
 if TYPE_CHECKING:
     import socket
 
+    import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ssm.client import SSMClient
 
@@ -33,10 +35,11 @@ if TYPE_CHECKING:
 LOGIN_ENV = "TEMT_LOGIN"
 SSM = "ssm"
 DIRECT = "direct"
-# 経路ごとに使う外部コマンド。実行前に有無を確かめる。direct は使わない
+# 経路ごとに使う外部コマンド。実行前に有無を確かめる。どちらの経路も、送る鍵を
+# ssh -G で調べる
 AWS_CLI = "aws"
 PLUGIN = "session-manager-plugin"
-COMMANDS = {SSM: (AWS_CLI, PLUGIN), DIRECT: ()}
+COMMANDS = {SSM: (keys.SSH, AWS_CLI, PLUGIN), DIRECT: (keys.SSH,)}
 # Session Manager で ssh の通信路を通す文書
 SSH_DOCUMENT = "AWS-StartSSHSession"
 # direct でつながらないときに添える手がかり。拒まれたならパケットは届いていて、
@@ -178,6 +181,16 @@ def _sshd_ready(ssm: SSMClient, service: Service, instance_id: str) -> None:
         )
 
 
+def _send_key(session: boto3.Session, one: Instance, user: str, public_key: str) -> None:
+    """ssh が使う鍵の公開鍵を、EC2 Instance Connect でインスタンスに送る。
+
+    EC2 にキーペアは登録しないので、AMI の authorized_keys に無い鍵では、送らなければ
+    入れない。送った鍵が認められるのは 60 秒だけなので、つなぐ直前に、つなぐたびに送る。
+    """
+    connect = session.client("ec2-instance-connect")
+    _ = connect.send_ssh_public_key(InstanceId=one.id, InstanceOSUser=user, SSHPublicKey=public_key)
+
+
 def _hint(reason: OSError | None) -> str:
     """direct でつながらなかった理由に合う手がかり。"""
     return SSHD_HINT if isinstance(reason, ConnectionRefusedError) else RULES_HINT
@@ -208,7 +221,7 @@ def _direct_ready(ec2: EC2Client, one: Instance, port: int, *, fresh: bool) -> s
         raise TemtError(f"cannot connect to {address} port {port}: {e}; {RULES_HINT}") from None
 
 
-def run(service: Service, port: int) -> None:
+def run(service: Service, port: int, user: str | None = None) -> None:
     """インスタンスへの通信路を開く。
 
     ssm なら戻らず、aws-cli に置き換わる。direct なら、接続が閉じられるまで中継して
@@ -218,21 +231,29 @@ def run(service: Service, port: int) -> None:
     なら SSM エージェントが Online になり、sshd の待ち受けポートを揃える関連付けが
     実行し終わるまで、direct ならパブリック IPv4 アドレスが付き、そのポートに TCP で
     つながるまでである。起動から時間がたっていれば待たず、
-    つなげなければ手がかりを添えて終了する。
+    つなげなければ手がかりを添えて終了する。送る鍵は、AWS を呼ぶ前に決める。
+
+    user は ssh がログインするユーザー（ProxyCommand の %r）。ssh -G には ssh の
+    コマンドラインで変えたユーザーが見えないので、ProxyCommand から受け取る。省けば
+    ssh -G のユーザーを使う。
     """
     route = _login()
     values = conf.load(service)
     for command in COMMANDS[route]:
         proc.require(command)
+    user, path = keys.offered(service.name, user)
+    public_key = keys.read_public(path)
     session = aws.session(values)
     ec2 = session.client("ec2")
     one, fresh = _running(ec2, service)
     if route == DIRECT:
         with _direct_ready(ec2, one, port, fresh=fresh) as connection:
+            _send_key(session, one, user, public_key)
             home.use_known_hosts(service, one.id)
             relay.run(connection)
         return
     _ssm_ready(session.client("ssm"), service, one, fresh=fresh)
+    _send_key(session, one, user, public_key)
     argv = _ssm_argv(values, one.id, port)
     env = dict(os.environ)
     # aws-cli の出力をページャに渡さない

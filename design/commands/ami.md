@@ -20,13 +20,12 @@ are in [Creating](../topics/ami.md#creating).
    - Two or more: list them and exit, as `start` does.
    - `pending`, `stopping`: tell the user to wait for it to finish and retry, and exit.
    - `running`, `stopped`: go to 3.
-3. Compare the default version of the launch template with the config file on the five
+3. Compare the default version of the launch template with the config file on the four
    keys that come from the config file. `ImageId` is compared after looking up the ID
    of the AMI it refers to; if there is no usable AMI, it counts as differing.
    `VolumeSize` is compared as: if not written, the template has no
    `BlockDeviceMappings`; if written, the size is equal. If any key differs, or `ImageId` or
-   `SubnetId` is not written (an unwritten `InstanceType` or `KeyName` is compared by its
-   default), tell the user to run `apply` first and exit.
+   `SubnetId` is not written (an unwritten `InstanceType` is compared by its default), tell the user to run `apply` first and exit.
    Then, if `VolumeSize` is written, compare it with the size of the instance's root
    volume (the `VolumeId`, looked up with `describe-volumes`, of the
    `BlockDeviceMappings` entry whose `DeviceName` is `RootDeviceName`). If the instance's

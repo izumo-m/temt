@@ -1,15 +1,14 @@
 # AWS resources
 
-`apply` creates six resources per service when they are absent: the key pair, the IAM
-role, the instance profile, the security group, the launch template, and the
-association. The five other than the key pair get their tags
-([naming.md](naming.md#tags)) when created; when one already exists, `apply` adds a
+`apply` creates five resources per service when they are absent: the IAM role, the
+instance profile, the security group, the launch template, and the association. They
+get their tags ([naming.md](naming.md#tags)) when created; when one already exists, `apply` adds a
 missing tag and fixes a tag whose value differs. How each existing resource is
 otherwise treated is in its section below.
 
-`destroy` deletes the five other than the key pair, and the SSM parameters under the
-`/<name>` hierarchy. The key pair may be shared by several services, so the `keypair`
-commands handle it separately.
+`destroy` deletes the five, and the SSM parameters under the `/<name>` hierarchy.
+temt registers no EC2 key pair; how ssh logs in is in
+[topics/login-key.md](topics/login-key.md).
 
 `proxy` and `status` look up the instance ID and public IPv4 address with
 `describe-instances` each time.
@@ -17,14 +16,6 @@ commands handle it separately.
 The existence of the launch template is the mark that the service has been applied and
 not destroyed. `destroy` deletes the launch template first, so a service whose
 `destroy` failed midway also counts as not applied.
-
-## Key pair
-
-Key pair `<KeyName>`. The only key that can log in to the instance is this key pair's
-key. If the key pair is absent, `apply` registers it and tags it `temt:keypair`; if it
-exists, `apply` leaves it unchanged and adds no tags. How it is matched with the local
-key (`IdentityFile` in the config file), and what happens when they do not match, are
-in [topics/keypair.md](topics/keypair.md).
 
 ## IAM role
 

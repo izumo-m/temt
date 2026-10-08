@@ -73,8 +73,9 @@ avoid the ones marked "not".
 | security group | セキュリティグループ | Never shortened to グループ |
 | ingress rule | 受信規則 | |
 | association (State Manager) | 関連付け | |
-| key pair, `<key pair name>` | キーペア、`<キーペア名>` | EC2 key pair |
-| local key | 手元の鍵 | |
+| key pair | キーペア | EC2 key pair. temt registers none |
+| login key | ログインの鍵 | The key ssh uses for the instance; `proxy` sends its public key with EC2 Instance Connect |
+| EC2 Instance Connect | EC2 Instance Connect | |
 | bake | 焼く、AMI にする | |
 | tag | タグ | AWS resource tag only |
 | git tag | git のタグ | Never just タグ |

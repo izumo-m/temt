@@ -1,6 +1,6 @@
 # Security group
 
-Step 6 of [`apply`](../commands/service.md#apply) reconciles it; step 4 of
+Step 5 of [`apply`](../commands/service.md#apply) reconciles it; step 4 of
 [`destroy`](../commands/service.md#destroy) deletes it. Its name is `<name>`. The `sg`
 commands ([commands/sg.md](../commands/sg.md)) show and edit the ingress rule definition
 in the config file; they never write to AWS.

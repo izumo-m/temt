@@ -3,7 +3,6 @@
 import fcntl
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -24,7 +23,8 @@ INCLUDE = "Include ~/.ssh/temt/config"
 # 既定の場所で apply したときの ProxyCommand の値。場所は既定でも env で渡す。
 # ホームの下の場所は ~ で始まる形で書くので、値はホームのパスに依らない
 PROXY = (
-    f"env {CONF_DIR_ENV}='~/.config/temt' {SSH_DIR_ENV}='~/.ssh/temt' temt proxy --svc dev-main %p"
+    f"env {CONF_DIR_ENV}='~/.config/temt' {SSH_DIR_ENV}='~/.ssh/temt' "
+    "temt proxy --svc dev-main --user '%r' %p"
 )
 
 
@@ -258,9 +258,9 @@ def test_write_host_block_leaves_the_rest_alone(prepared: Path) -> None:
 
 
 def test_write_host_block_keeps_the_first_of_duplicates(prepared: Path) -> None:
-    write("Host temt-dev-main\n    IdentityFile ~/a\n    IdentityFile ~/b\n")
+    write("Host temt-dev-main\n    User root\n    User me\n")
     write_block(prepared)
-    assert read().count("IdentityFile") == 1
+    assert read().count("    User ") == 1
 
 
 def test_write_host_block_takes_a_host_line_with_other_names(
@@ -633,7 +633,7 @@ def test_write_host_block_carries_the_directories_in_the_proxy_command(
         "    UserKnownHostsFile ~/elsewhere/ssh/known_hosts.d/temt-dev-main/current\n"
         f"    ProxyCommand       env {CONF_DIR_ENV}='~/elsewhere/conf' "
         f"{SSH_DIR_ENV}='~/elsewhere/ssh' "
-        "temt proxy --svc dev-main %p\n"
+        "temt proxy --svc dev-main --user '%r' %p\n"
     )
 
 
@@ -693,80 +693,133 @@ def test_the_proxy_command_hands_the_directories_to_the_shell(
     assert shown.stdout == f"{home_dir}/elsewhere/conf\n{home_dir}/elsewhere/ssh\n"
 
 
-def test_write_host_block_changes_the_identity_file_of_an_existing_block(prepared: Path) -> None:
-    write_block(prepared)
-    assert write_block(prepared, Conf(KeyName="work")) is True
-    assert "    IdentityFile       ~/.ssh/temt/keys/work\n" in read()
-    assert read().count("IdentityFile") == 1
-
-
-def identity_line() -> str:
-    """書いた Host ブロックの IdentityFile の行。"""
-    return next(one for one in read().splitlines() if "IdentityFile" in one)
-
-
-def test_write_host_block_quotes_an_identity_file_with_a_space(prepared: Path) -> None:
-    """ssh は語を空白で分けるので、空白を含む値は二重引用符で囲む。"""
-    assert write_block(prepared, Conf(IdentityFile="~/my keys/temt")) is True
-    assert identity_line() == '    IdentityFile       "~/my keys/temt"'
-
-
-def test_write_host_block_doubles_a_percent_sign(prepared: Path) -> None:
-    """ssh は % をトークンとして展開するので、文字としての % は %% と書く。"""
-    assert write_block(prepared, Conf(IdentityFile="~/keys/50%off")) is True
-    assert identity_line() == "    IdentityFile       ~/keys/50%%off"
-
-
-@pytest.mark.parametrize("value", ["~/my keys/50%off", "~/keys/50%off", "~/my keys/temt"])
-def test_write_host_block_changes_nothing_the_second_time_for_a_guarded_path(
-    prepared: Path, value: str
-) -> None:
-    """引用符と %% で書いた行も、次の apply では同じ行になり、書き換えない。"""
-    write_block(prepared, Conf(IdentityFile=value))
-    written = read()
-    assert write_block(prepared, Conf(IdentityFile=value)) is False
-    assert read() == written
-
-
-def test_write_host_block_rewrites_a_hand_quoted_identity_file(prepared: Path) -> None:
-    """手で引用符を付けた行は、ssh には同じ値でも、temt が書く形に戻す。"""
-    write(BLOCK.replace("~/.ssh/temt/keys/temt", '"~/.ssh/temt/keys/temt"'))
+def test_write_host_block_adds_the_default_key_to_a_block_without_one(prepared: Path) -> None:
+    """IdentityFile の無いブロックには、既定の鍵の行を、管理する項目の並びの位置に足す。"""
+    write("Host temt-dev-main\n    User root\n")
     assert write_block(prepared) is True
-    assert read() == BLOCK
-
-
-@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs ssh")
-def test_ssh_reads_the_identity_file_as_it_is_in_the_config_file(
-    prepared: Path, tmp_path: Path
-) -> None:
-    """ssh は、引用符を外し、%% を % に戻して、設定ファイルに書いたパスの鍵を探す。
-
-    ProxyCommand を false に差し替えるので、ssh はどこにもつながらない。鍵を探すのは
-    ProxyCommand を起こした後、鍵の交換の前である。
-    """
-    key = tmp_path / "my keys" / "50%off"
-    write_block(prepared, Conf(IdentityFile=str(key)))
-    done = subprocess.run(
-        [
-            "ssh",
-            "-v",
-            "-F",
-            str(config()),
-            "-o",
-            "ProxyCommand=false",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "temt-dev-main",
-        ],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+    assert read() == (
+        "Host temt-dev-main\n"
+        "    Port               22\n"
+        "    IdentityFile       ~/.ssh/temt/keys/temt\n"
+        "    IdentitiesOnly     yes\n"
+        "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
+        f"    ProxyCommand       {PROXY}\n"
+        "    User               ubuntu\n"
     )
-    assert f"debug1: identity file {key} type -1" in done.stderr.splitlines()
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param(["    IdentityFile ~/.ssh/id_ed25519"], id="another key"),
+        pytest.param(['    IdentityFile       "~/my keys/temt"'], id="quoted"),
+        pytest.param(["    IdentityFile       %d/keys/50%%off"], id="tokens"),
+        pytest.param(
+            ["    IdentityFile ~/.ssh/id_ed25519", "    identityfile=/srv/keys/work"],
+            id="two lines",
+        ),
+        pytest.param(
+            ["    IdentityFile       ~/.ssh/temt/keys/temt", "    IdentityFile ~/.ssh/id_rsa"],
+            id="the default and another",
+        ),
+    ],
+)
+def test_write_host_block_keeps_the_identity_files_as_written(
+    prepared: Path, lines: list[str]
+) -> None:
+    """IdentityFile は利用者が鍵を替えられるよう、書かれていれば何行でも書かれたまま残す。
+
+    ほかの管理する項目が揃っていれば、ファイルは書き換えない。
+    """
+    text = BLOCK.replace(
+        "    IdentityFile       ~/.ssh/temt/keys/temt\n", "".join(f"{line}\n" for line in lines)
+    )
+    write(text)
+    assert write_block(prepared) is False
+    assert read() == text
+
+
+def test_write_host_block_rewrites_the_rest_around_the_identity_files(prepared: Path) -> None:
+    """ほかの管理する項目は書き直すが、IdentityFile の行は元の位置にそのまま残す。"""
+    write("Host temt-dev-main\n    IdentityFile ~/a\n    User root\n    IdentityFile ~/b\n")
+    assert write_block(prepared) is True
+    assert read() == (
+        "Host temt-dev-main\n"
+        "    Port               22\n"
+        "    IdentitiesOnly     yes\n"
+        "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
+        f"    ProxyCommand       {PROXY}\n"
+        "    IdentityFile ~/a\n"
+        "    User               ubuntu\n"
+        "    IdentityFile ~/b\n"
+    )
+
+
+def test_default_key_of_a_new_block(prepared: Path) -> None:
+    """temt が書いた IdentityFile のままなら、既定の鍵を使う。"""
+    assert home.default_key(detect_block(prepared), Service("dev-main")) == keys_dir() / "temt"
+
+
+def test_default_key_follows_the_ssh_dir(home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ssh ディレクトリがホームの外なら、IdentityFile は絶対パスで書かれ、それを既定とみなす。"""
+    _ = home_dir
+    monkeypatch.setenv(SSH_DIR_ENV, "/srv/temt/ssh")
+    edit = detect_block(home_dir)
+    assert "    IdentityFile       /srv/temt/ssh/keys/temt\n" in edit.after
+    assert home.default_key(edit, Service("dev-main")) == Path("/srv/temt/ssh/keys/temt")
+
+
+def test_default_key_of_a_block_in_place(prepared: Path) -> None:
+    """書き換えないブロックでも、既定の鍵を使っていれば、その場所を返す。"""
+    write(BLOCK)
+    edit = detect_block(prepared)
+    assert not edit.changed
+    assert home.default_key(edit, Service("dev-main")) == keys_dir() / "temt"
+
+
+def test_default_key_takes_only_the_first_identity_file(prepared: Path) -> None:
+    """ssh は並んだ順に試す。最初の行が既定の鍵なら、後に別の鍵があっても既定の鍵を使う。"""
+    write(
+        BLOCK.replace(
+            "    IdentityFile       ~/.ssh/temt/keys/temt\n",
+            "    IdentityFile       ~/.ssh/temt/keys/temt\n    IdentityFile ~/.ssh/id_rsa\n",
+        )
+    )
+    assert home.default_key(detect_block(prepared), Service("dev-main")) == keys_dir() / "temt"
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param("    IdentityFile ~/.ssh/id_ed25519\n", id="another key"),
+        pytest.param("    identityfile=~/.ssh/other\n", id="equals"),
+        pytest.param(
+            "    IdentityFile ~/.ssh/id_ed25519\n    IdentityFile ~/.ssh/temt/keys/temt\n",
+            id="the default second",
+        ),
+        pytest.param("    IdentityFile ~/.ssh/temt/keys/work\n", id="another name in keys"),
+    ],
+)
+def test_default_key_is_none_for_a_key_the_user_chose(prepared: Path, lines: str) -> None:
+    """利用者が別の鍵に替えていれば、apply はその鍵を作らない。"""
+    write(BLOCK.replace("    IdentityFile       ~/.ssh/temt/keys/temt\n", lines))
+    assert home.default_key(detect_block(prepared), Service("dev-main")) is None
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        pytest.param("Host temt-dev-main\n    User ubuntu\n", id="no identity file"),
+        pytest.param("Host other\n    IdentityFile ~/.ssh/temt/keys/temt\n", id="no block"),
+    ],
+)
+def test_default_key_is_none_without_an_identity_file_in_the_block(
+    prepared: Path, after: str
+) -> None:
+    """ブロックが無いか、ブロックに IdentityFile が無ければ、既定の鍵は使わない。"""
+    _ = prepared
+    edit = home.Edit(config(), "", after)
+    assert home.default_key(edit, Service("dev-main")) is None
 
 
 def test_write_host_block_writes_the_first_sshd_port(prepared: Path) -> None:
@@ -794,16 +847,17 @@ def test_write_host_block_stops_at_a_match_block(prepared: Path) -> None:
 
 
 def test_write_host_block_reads_equals_and_case(prepared: Path) -> None:
-    write("HOST=temt-dev-main\n    identityfile=~/.ssh/other\n")
+    """= で書いた行も、大文字小文字の違う行も、その項目として読む。IdentityFile は残す。"""
+    write("HOST=temt-dev-main\n    identityfile=~/.ssh/other\n    PORT=2200\n")
     assert write_block(prepared) is True
     assert read() == (
         "HOST=temt-dev-main\n"
         "    User               ubuntu\n"
-        "    Port               22\n"
         "    IdentitiesOnly     yes\n"
         "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
         f"    ProxyCommand       {PROXY}\n"
-        "    IdentityFile       ~/.ssh/temt/keys/temt\n"
+        "    identityfile=~/.ssh/other\n"
+        "    Port               22\n"
     )
 
 
@@ -1086,7 +1140,7 @@ def conf_file(directory: Path) -> Path:
     """その場所に dev-main の設定ファイルを置く。"""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "dev-main.toml"
-    path.write_text('KeyName = "temt"\n', encoding="utf-8")
+    path.write_text('AwsRegion = "ap-northeast-1"\n', encoding="utf-8")
     return path
 
 

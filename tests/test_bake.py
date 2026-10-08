@@ -62,9 +62,7 @@ CREATE = {
 THE_IMAGE = {"ImageIds": [NEW]}
 PROMPT = f"bake {INSTANCE} (running)? [y/N] "
 
-VALUES = Conf(
-    KeyName="temt", launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET)
-)
+VALUES = Conf(launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET))
 
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
@@ -493,7 +491,6 @@ def sized_conf(service: Service, size: int) -> None:
 def sized_version(size: int) -> dict[str, Any]:
     """VolumeSize を入れて apply したテンプレートの既定バージョン。"""
     values = Conf(
-        KeyName="temt",
         launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET, VolumeSize=size),
     )
     return {

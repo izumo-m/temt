@@ -209,7 +209,7 @@ dev = [
     { name = "basedpyright" },
     { name = "pytest" },
     { name = "ruff" },
-    { name = "types-boto3", extra = ["accessanalyzer", "ec2", "iam", "ssm", "sts"] },
+    { name = "types-boto3", extra = ["accessanalyzer", "ec2", "ec2-instance-connect", "iam", "ssm", "sts"] },
 ]
 
 [package.metadata]
@@ -223,7 +223,7 @@ dev = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.8" },
-    { name = "types-boto3", extras = ["accessanalyzer", "ec2", "iam", "ssm", "sts"], specifier = ">=1.43.98" },
+    { name = "types-boto3", extras = ["accessanalyzer", "ec2", "ec2-instance-connect", "iam", "ssm", "sts"], specifier = ">=1.43.98" },
 ]
 
 [[package]]
@@ -255,6 +255,9 @@ accessanalyzer = [
 ec2 = [
     { name = "types-boto3-ec2" },
 ]
+ec2-instance-connect = [
+    { name = "types-boto3-ec2-instance-connect" },
+]
 iam = [
     { name = "types-boto3-iam" },
 ]
@@ -281,6 +284,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ce/c5/e797cfdcbe98c3abb68418006628c6358d0ab6c49a03fcef80b4be11bc70/types_boto3_ec2-1.43.107.tar.gz", hash = "sha256:e8791cf06c555b69c73f4384990db0a86a72e30cd9a17eb945484476ffbf7533", size = 468976, upload-time = "2026-10-01T20:22:24.17Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/96/bf7f5ab32e7f511923cea844fe3b7139d376a1d4fa31a4548cae5acdcd94/types_boto3_ec2-1.43.107-py3-none-any.whl", hash = "sha256:a5f25346d9086fd8aba0b27c298461be92af669412ca837ae944a042eb2612d2", size = 457187, upload-time = "2026-10-01T20:22:20.827Z" },
+]
+
+[[package]]
+name = "types-boto3-ec2-instance-connect"
+version = "1.43.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/b8/b2308ed80c8b61160b2f762206da2dfeb6ba340095ed07680cbbf3bb0c17/types_boto3_ec2_instance_connect-1.43.0.tar.gz", hash = "sha256:495d522e5e3cddc2d7c57e2661ce8679bf648e8f719d0ba13ca921a44f7a37d2", size = 15171, upload-time = "2026-04-29T23:01:34.374Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/15/c08a9b6a7a37b9a9b207c893247abb72529b024281c7cc20457da8b2f876/types_boto3_ec2_instance_connect-1.43.0-py3-none-any.whl", hash = "sha256:5f52c71cb2327f57624c1da354e81a8ea85c78d4bb5763679f4fef57d369081c", size = 18261, upload-time = "2026-04-29T23:01:32.648Z" },
 ]
 
 [[package]]

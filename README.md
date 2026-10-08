@@ -16,8 +16,8 @@ Ubuntu 作業環境、使っている間だけ動かして状態は S3 や Dynam
 - Linux（Ubuntu 24.04 / 26.04 で動きを確かめている）
 - mise か uv
 - aws-cli v2 と session-manager-plugin
-- ssh-keygen（openssh-client）
-- EC2、IAM、SSM を操作できる AWS の資格情報
+- ssh と ssh-keygen（openssh-client）
+- EC2、IAM、SSM と EC2 Instance Connect を操作できる AWS の資格情報
 
 詳しくは [usage.md](docs/usage.md#用意するもの) にある。
 
@@ -56,7 +56,7 @@ uv で入れるときは、次を実行する。
 - 整えたインスタンスを AMI に焼き、次の起動から使う。使わなくなった AMI も片づける
 - アプリをインスタンスに入れ、アプリが使う値を手元から読み書きする。誰も使わない
   時間が続けばインスタンスを終了するアプリ `idle-shutdown` を一緒に配る
-- サービス、インスタンス、AMI、キーペアを表で一覧する
+- サービス、インスタンス、AMI を表で一覧する
 
 ## 費用について
 

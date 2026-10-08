@@ -29,13 +29,12 @@ AWS とのやり取りを本物で通しで確かめるときは、自分の `~/
 触れないよう、仮のホームで試験用のサービスを 1 つ立てる。AWS の料金がかかる。
 
 リポジトリのディレクトリで、仮のホームを作り、それを `HOME` にしたシェルを開く。
-`KeyName` は、自分のキーペア `temt` とぶつけないよう別の名前にする。
+ログインの鍵は、仮のホームの中に作られる。
 
     home=$(mktemp -d)
     ln -s ~/.aws "$home/.aws"
     mkdir -p "$home/.config/temt" "$home/bin"
-    printf 'AwsRegion = "ap-northeast-1"\nKeyName = "temt-verify"\n' \
-        > "$home/.config/temt/verify.toml"
+    printf 'AwsRegion = "ap-northeast-1"\n' > "$home/.config/temt/verify.toml"
     cat > "$home/bin/ssh" <<EOF
     #!/bin/sh
     sed "s|~/|$home/|g" "$home/.ssh/temt/config" > "$home/.ssh/verify-config"
@@ -54,12 +53,10 @@ ssh は、`~/.ssh/config` をログインユーザーのホームから読み、
     temt start --svc verify
     ssh temt-verify
 
-終わったら、作ったものを消す。`bake` したなら、AMI も消す。キーペアはサービスに
-属さないので、リージョンを `--region` で指す。
+終わったら、作ったものを消す。`bake` したなら、AMI も消す。
 
     temt destroy --svc verify --yes
     temt ami delete <AMI の ID> --svc verify --yes
-    temt --region ap-northeast-1 keypair delete temt-verify --yes
     exit
     rm -rf "$home"
 

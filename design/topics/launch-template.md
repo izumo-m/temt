@@ -1,6 +1,6 @@
 # Launch template
 
-Reconciled by step 6 of [`apply`](../commands/service.md#apply), its `ImageId` replaced
+Reconciled by step 5 of [`apply`](../commands/service.md#apply), its `ImageId` replaced
 by step 8 of [`bake`](../commands/ami.md#bake), deleted by step 4 of
 [`destroy`](../commands/service.md#destroy). Name: `<name>-template`. `start` launches
 from its default version.
@@ -10,7 +10,10 @@ from its default version.
 - `ImageId`: the ID of the AMI that the config file's `ImageId` points to. If it is
   written as a name, `apply` resolves the ID ([ami.md](ami.md#referring-by-name)).
 - `InstanceType`: the config file's `InstanceType`.
-- `KeyName`: the config file's `KeyName`.
+- No `KeyName`. temt registers no EC2 key pair; `proxy` sends the login key with EC2
+  Instance Connect on each connection ([login-key.md](login-key.md)). A `KeyName` in
+  the default version (from an earlier temt, or added by hand) counts as a difference,
+  and the new version leaves it out.
 - `BlockDeviceMappings`: only when the config file has `VolumeSize`. Exactly one entry:
   `DeviceName` is the `RootDeviceName` of the `ImageId` AMI, `Ebs.VolumeSize` is
   `VolumeSize`. Nothing else (volume type, snapshot, `DeleteOnTermination`, ...) is set;
@@ -28,8 +31,8 @@ from its default version.
 - `IamInstanceProfile`: `<name>`.
 - Tags for the instance, volumes, and network interface: `Name`, `temt:service`.
 
-Five of these come from the config file (`ImageId`, `InstanceType`, `KeyName`,
-`SubnetId`, `VolumeSize`); temt decides the rest. There is no way to pass keys temt does
+Four of these come from the config file (`ImageId`, `InstanceType`, `SubnetId`,
+`VolumeSize`); temt decides the rest. There is no way to pass keys temt does
 not know into the template.
 
 ## Versions

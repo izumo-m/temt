@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import pytest
 from botocore.exceptions import ClientError
-from botocore.stub import ANY, Stubber
+from botocore.stub import Stubber
 from conftest import (
     ASSOCIATION,
     ASSOCIATION_MARK,
@@ -29,7 +29,7 @@ from conftest import (
 )
 from types_boto3_ec2.client import EC2Client
 
-from temt import apply, aws, conf, home, keypair, keys, policy, resources
+from temt import apply, aws, conf, home, keys, policy, resources
 from temt.conf import Conf, LaunchTemplate, Role
 from temt.msg import TemtError
 from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, keys_dir, ssh_dir
@@ -42,14 +42,14 @@ SUBNET = "subnet-0123456789abcdef0"
 GROUP = "sg-0123456789abcdef0"
 IMAGE = "ami-0123456789abcdef0"
 IMAGE_NAME = "temt-dev-main-2609200900"
-KEY_NAME = "temt"
+# 既定の鍵の、diff での表示
+KEY = "~/.ssh/temt/keys/temt"
 WHEN = datetime(2026, 9, 20, tzinfo=UTC)
 
-# apply が書く 5 項目が書かれている状態。キーは update に渡す位置で、並びは書く順。
+# apply が書く 4 項目が書かれている状態。キーは update に渡す位置で、並びは書く順。
 # AwsProfile は --profile のときだけ書かれる
 WRITTEN = {
     "AwsRegion": REGION,
-    "KeyName": KEY_NAME,
     "launch-template.ImageId": IMAGE_NAME,
     "launch-template.InstanceType": "t3.micro",
     "launch-template.SubnetId": SUBNET,
@@ -73,10 +73,8 @@ SERVICE_IMAGES = {
 THE_IMAGE = {"Owners": ["self"], "Filters": [{"Name": "name", "Values": [IMAGE_NAME]}]}
 # 手順 4 で引いた AMI
 FOUND_IMAGE = {"Images": [{"ImageId": IMAGE, "Name": IMAGE_NAME, "State": "available"}]}
-THE_KEY_PAIR = {"KeyNames": [KEY_NAME], "IncludePublicKey": True}
-KEY_PAIR_TAGS = [{"ResourceType": "key-pair", "Tags": [{"Key": "temt:keypair", "Value": KEY_NAME}]}]
 THE_GROUP = {"Filters": [{"Name": "group-name", "Values": [NAME]}]}
-# temt が管理していることを示すタグ。キーペアを除く 5 つに付ける
+# temt が管理していることを示すタグ
 MARK = [{"Key": "temt:service", "Value": "dev-main"}]
 GROUP_TAGS = [{"Key": "Name", "Value": NAME}, *MARK]
 THE_TEMPLATE = {"LaunchTemplateName": TEMPLATE}
@@ -120,7 +118,7 @@ def to_conf(values: dict[str, str]) -> Conf:
 
 
 def write_conf(service: Service, **changes: str) -> dict[str, str]:
-    """5 項目と [[role.policy.ec2]] の既定が書かれた設定ファイルを置き、項目を返す。
+    """4 項目と [[role.policy.ec2]] の既定が書かれた設定ファイルを置き、項目を返す。
 
     changes は最上位の項目。
     """
@@ -130,10 +128,9 @@ def write_conf(service: Service, **changes: str) -> dict[str, str]:
     return values
 
 
-def make_key(path: Path) -> str:
-    """鍵を 1 つ作り、その公開鍵の 1 行を返す。"""
-    keys.generate(path, KEY_NAME)
-    return keys.public_key(path)
+def make_key() -> None:
+    """既定の鍵を、前の apply が作ったものとして置く。"""
+    keys.generate(keys.default_path(), keys.DEFAULT_NAME)
 
 
 def a_role() -> dict[str, Any]:
@@ -189,7 +186,7 @@ EC2_POLICY = policy.document(conf.ec2_default(), policy.variables(Service("dev-m
 
 
 def inline_policies(stubs: Stubs, *names: str) -> None:
-    """手順 6 のインラインポリシーの一覧。ロールには names が付いている。"""
+    """手順 5 のインラインポリシーの一覧。ロールには names が付いている。"""
     stubs.iam.add_response("list_role_policies", {"PolicyNames": list(names)}, {"RoleName": NAME})
 
 
@@ -203,7 +200,7 @@ def validated(stubs: Stubs, content: dict[str, Any], *findings: dict[str, Any]) 
 
 
 def ec2_policy(stubs: Stubs, *, new: bool = False) -> None:
-    """手順 6 のインラインポリシー temt-ec2 の読み取り。new なら無く、でなければ揃っている。
+    """手順 5 のインラインポリシー temt-ec2 の読み取り。new なら無く、でなければ揃っている。
 
     無いときに付けるのは、一覧を読んだあとの ec2_policy_put である。
     """
@@ -221,7 +218,7 @@ def ec2_policy(stubs: Stubs, *, new: bool = False) -> None:
 
 
 def ec2_policy_put(stubs: Stubs) -> None:
-    """手順 6 で、インラインポリシー temt-ec2 を付ける。"""
+    """手順 5 で、インラインポリシー temt-ec2 を付ける。"""
     stubs.iam.add_response(
         "put_role_policy",
         {},
@@ -276,17 +273,8 @@ def step4(
     validated(stubs, EC2_POLICY)
 
 
-def step5(stubs: Stubs, public_key: str) -> None:
-    """手順 5 の読み取り。手元の鍵と同じ公開鍵を持つキーペアがある。"""
-    stubs.ec2.add_response(
-        "describe_key_pairs",
-        {"KeyPairs": [{"KeyName": KEY_NAME, "KeyPairId": "key-0", "PublicKey": public_key}]},
-        THE_KEY_PAIR,
-    )
-
-
 def template_tags(stubs: Stubs) -> None:
-    """手順 6 の、起動テンプレート自身のタグ。temt のタグが付いている。"""
+    """手順 5 の、起動テンプレート自身のタグ。temt のタグが付いている。"""
     stubs.ec2.add_response(
         "describe_launch_templates",
         {
@@ -302,7 +290,7 @@ def template_tags(stubs: Stubs) -> None:
     )
 
 
-def step6(
+def step5(
     stubs: Stubs,
     values: dict[str, str],
     role_policy: dict[str, Any] | None = None,
@@ -310,15 +298,17 @@ def step6(
     sshd_ports: list[int] | None = None,
     new_ec2: bool = False,
     associated: bool = True,
+    data: dict[str, Any] | None = None,
 ) -> None:
-    """手順 6。5 つとも、あって設定ファイルに合っているときに読むものを積む。
+    """手順 5。5 つとも、あって設定ファイルに合っているときに読むものを積む。
 
     temt-ec2 は付いていて既定と同じ。new_ec2 なら、まだ付いていないので付ける。
     role_policy は [[role.policy.jupyter]] から作った temt-jupyter の中身。ロールには
     まだ付いていないので、あれば付ける。付けるのは、IAM のものをすべて読んだあとで
     ある。sshd_ports を渡せば、関連付けはそのポートの中身で読むところまでを積み、揃える
     のは呼ぶ側に任せる。associated でなければ、関連付けは名前で探しても無い。作るのは
-    呼ぶ側に任せる（association_created）。
+    呼ぶ側に任せる（association_created）。data を渡せば、起動テンプレートの既定
+    バージョンはその中身で、揃えるのは呼ぶ側に任せる。
     """
     stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
     ec2_policy(stubs, new=new_ec2)
@@ -366,7 +356,7 @@ def step6(
                     "LaunchTemplateName": TEMPLATE,
                     "VersionNumber": 3,
                     "DefaultVersion": True,
-                    "LaunchTemplateData": template_data(values),
+                    "LaunchTemplateData": template_data(values) if data is None else data,
                 }
             ]
         },
@@ -394,7 +384,6 @@ def association_created(stubs: Stubs, ports: list[int] | None = None) -> None:
 
 def nothing_to_do(
     stubs: Stubs,
-    public_key: str,
     values: dict[str, str],
     *,
     new_ec2: bool = False,
@@ -406,8 +395,7 @@ def nothing_to_do(
     associated でなければ、関連付けが無いので、この apply が作る。
     """
     step4(stubs)
-    step5(stubs, public_key)
-    step6(stubs, values, new_ec2=new_ec2, associated=associated)
+    step5(stubs, values, new_ec2=new_ec2, associated=associated)
     if not associated:
         association_created(stubs)
 
@@ -432,9 +420,7 @@ def test_everything_is_made_when_nothing_exists(
     )
     # 手順 4。公開 AMI は ID のまま書かれている
     step4(aws_stubs, image=IMAGE)
-    # 手順 5。EC2 にキーペアが無い
-    missing(aws_stubs.ec2, "describe_key_pairs", keypair.NOT_FOUND, **THE_KEY_PAIR)
-    # 手順 6。5 つとも無い
+    # 手順 5。5 つとも無い
     missing(aws_stubs.iam, "get_role", resources.NO_SUCH_ENTITY, RoleName=NAME)
     ec2_policy(aws_stubs, new=True)
     inline_policies(aws_stubs)
@@ -449,12 +435,7 @@ def test_everything_is_made_when_nothing_exists(
         **THE_TEMPLATE,
     )
     listed_associations(aws_stubs.ssm)
-    # 更新。手順 5 で鍵を作って登録し、手順 6 で 5 つを順に作る
-    aws_stubs.ec2.add_response(
-        "import_key_pair",
-        {"KeyName": KEY_NAME, "KeyPairId": "key-0", "KeyFingerprint": "x"},
-        {"KeyName": KEY_NAME, "PublicKeyMaterial": ANY, "TagSpecifications": KEY_PAIR_TAGS},
-    )
+    # 更新。手順 5 で 5 つを順に作る。EC2 にキーペアは登録しない
     aws_stubs.iam.add_response(
         "create_role",
         a_role(),
@@ -497,8 +478,7 @@ def test_everything_is_made_when_nothing_exists(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    # 手順 2。解決した 4 項目が、表の順で、見出しの付いた新しいファイルに書かれる。
-    # IdentityFile は書かず、KeyName から導く
+    # 手順 2。解決した 4 項目が、表の順で、見出しの付いた新しいファイルに書かれる
     assert (
         service.conf_path.read_text(encoding="utf-8")
         == conf.HEADER + conf_text(written) + conf.EC2_DEFAULT + conf.EXAMPLE
@@ -507,18 +487,17 @@ def test_everything_is_made_when_nothing_exists(
     assert service.command_path.read_text(encoding="utf-8").endswith(
         'exec temt --svc dev-main "$@"\n'
     )
-    # 手順 5。鍵ができている
-    assert (keys_dir() / KEY_NAME).exists()
-    assert (keys_dir() / f"{KEY_NAME}.pub").exists()
-    # 手順 7。ssh の設定にブロックと Include の行ができている
+    # 手順 6。既定の鍵ができていて、Host ブロックがそれを指す
+    assert keys.default_path().exists()
+    assert keys.public_path(keys.default_path()).exists()
     block = (ssh_dir() / "config").read_text(encoding="utf-8")
     assert f"Host {NAME}\n" in block
     assert "User               ubuntu\n" in block
-    assert f"IdentityFile       ~/.ssh/temt/keys/{KEY_NAME}\n" in block
-    assert f"ProxyCommand       {PLACES} temt proxy --svc dev-main %p\n" in block
+    assert f"IdentityFile       {KEY}\n" in block
+    assert f"ProxyCommand       {PLACES} temt proxy --svc dev-main --user '%r' %p\n" in block
     user_config = (Path.home() / ".ssh" / "config").read_text(encoding="utf-8")
     assert user_config.startswith(f"{home.MARK}\nInclude ~/.ssh/temt/config\n")
-    # 手順 6 の報告
+    # 手順 5 と 6 の報告
     out = capsys.readouterr().out
     for made in (
         *(f'wrote {key} = "{value}" in {service.conf_path}' for key, value in written.items()),
@@ -531,13 +510,18 @@ def test_everything_is_made_when_nothing_exists(
         f"security group {NAME}: created ({GROUP})",
         f"launch template {TEMPLATE}: created (version 1)",
         f"association {SSHD}: created",
+        f"created the key {KEY}",
+        f"wrote the Host {NAME} block in ~/.ssh/temt/config",
     ):
         assert made in out
     # 既定の 22 で作ったときは、ポートは変わらないので、焼くよう添えない
     assert "take effect" not in out
     # 関連付けは起動テンプレートの後に揃える
     assert out.index(f"launch template {TEMPLATE}: created") < out.index(f"association {SSHD}:")
-    # 手順 7。Port は既定の 22
+    # 鍵は AWS のものを揃えた後、それを指す Host ブロックを書く前に作る
+    assert out.index(f"association {SSHD}:") < out.index(f"created the key {KEY}")
+    assert out.index(f"created the key {KEY}") < out.index(f"wrote the Host {NAME} block")
+    # 手順 6。Port は既定の 22
     assert "Port               22\n" in block
 
 
@@ -562,9 +546,7 @@ def test_a_file_written_ahead_with_only_the_table_is_completed(
         PUBLIC_SUBNETS,
     )
     values = {**WRITTEN, f"{conf.LAUNCH_TEMPLATE}.InstanceType": "t3.small"}
-    nothing_to_do(
-        aws_stubs, make_key(keys_dir() / KEY_NAME), values, new_ec2=True, associated=False
-    )
+    nothing_to_do(aws_stubs, values, new_ec2=True, associated=False)
 
     apply.run(service, yes=True)
 
@@ -572,7 +554,6 @@ def test_a_file_written_ahead_with_only_the_table_is_completed(
     assert service.conf_path.read_text(encoding="utf-8") == (
         "# mine\n"
         f'AwsRegion = "{REGION}"\n'
-        f'KeyName = "{KEY_NAME}"\n'
         "\n"
         "[launch-template]\n"
         'InstanceType = "t3.small"\n'
@@ -586,9 +567,9 @@ def test_nothing_changes_when_everything_matches(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
+    make_key()
     before = service.conf_path.read_text(encoding="utf-8")
-    nothing_to_do(aws_stubs, public_key, values)
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -617,9 +598,9 @@ def test_new_sshd_ports_update_the_association_and_the_host_block(
     values = write_conf(service)
     text = "SshdPorts = [2222, 443]\n" + service.conf_path.read_text(encoding="utf-8")
     service.conf_path.write_text(text, encoding="utf-8")
+    make_key()
     step4(aws_stubs)
-    step5(aws_stubs, make_key(keys_dir() / KEY_NAME))
-    step6(aws_stubs, values, sshd_ports=[22])
+    step5(aws_stubs, values, sshd_ports=[22])
     # 関連付けは 22 のまま。中身を新しいポートで書き直す
     aws_stubs.ssm.add_response(
         "list_tags_for_resource",
@@ -682,11 +663,10 @@ def test_a_role_policy_becomes_an_inline_policy(
     values = write_conf(service)
     with service.conf_path.open("a", encoding="utf-8") as file:
         _ = file.write(STATEMENT)
-    public_key = make_key(keys_dir() / KEY_NAME)
+    make_key()
     step4(aws_stubs)
     aws_stubs.analyzer.add_response("validate_policy", {"findings": []}, VALIDATE)
-    step5(aws_stubs, public_key)
-    step6(aws_stubs, values, ROLE_POLICY)
+    step5(aws_stubs, values, ROLE_POLICY)
 
     apply.run(service, yes=True)
 
@@ -701,7 +681,7 @@ def test_a_warning_on_the_role_statements_goes_on(
     values = write_conf(service)
     with service.conf_path.open("a", encoding="utf-8") as file:
         _ = file.write(STATEMENT)
-    public_key = make_key(keys_dir() / KEY_NAME)
+    make_key()
     step4(aws_stubs)
     aws_stubs.analyzer.add_response(
         "validate_policy",
@@ -718,8 +698,7 @@ def test_a_warning_on_the_role_statements_goes_on(
         },
         VALIDATE,
     )
-    step5(aws_stubs, public_key)
-    step6(aws_stubs, values, ROLE_POLICY)
+    step5(aws_stubs, values, ROLE_POLICY)
 
     apply.run(service, yes=True)
 
@@ -734,7 +713,7 @@ def test_a_warning_on_the_role_statements_goes_on(
 def test_an_error_in_the_role_statements_stops_before_aws_changes(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """検査は手順 4 で行うので、キーペアにもロールにも触れずに止まる。"""
+    """検査は手順 4 で行うので、ロールに触れずに止まる。"""
     _ = write_conf(service)
     with service.conf_path.open("a", encoding="utf-8") as file:
         _ = file.write(STATEMENT)
@@ -766,7 +745,7 @@ def test_an_error_in_the_role_statements_stops_before_aws_changes(
     with pytest.raises(TemtError, match=r"found 1 error\(s\) in the role policy temt-jupyter$"):
         apply.run(service, yes=True)
 
-    # キーペアとロールの応答は積んでいないので、触れていれば Stubber が失敗する
+    # ロールの応答は積んでいないので、触れていれば Stubber が失敗する
     aws_stubs.done()
     assert (
         "temt: role.policy.jupyter[0].Action: ERROR INVALID_ACTION: "
@@ -821,9 +800,9 @@ def test_a_second_run_leaves_the_local_files_alone(
 ) -> None:
     """同じコマンドをもう一度実行しても、手元のファイルは書き換わらない。"""
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    nothing_to_do(aws_stubs, values)
     user_config = Path.home() / ".ssh" / "config"
 
     apply.run(service, yes=True)
@@ -864,6 +843,7 @@ def test_a_new_vpc_gets_a_new_group_and_the_template_follows(
     values[conf.launch_template_key("SubnetId")] = other_subnet
     text = conf_text(values) + conf.EC2_DEFAULT
     service.conf_path.write_text(text, encoding="utf-8")
+    make_key()
     # 手順 4。新しいサブネットは別の VPC にある
     aws_stubs.ec2.add_response(
         "describe_subnets",
@@ -872,14 +852,13 @@ def test_a_new_vpc_gets_a_new_group_and_the_template_follows(
     )
     aws_stubs.ec2.add_response("describe_images", FOUND_IMAGE, THE_IMAGE)
     validated(aws_stubs, EC2_POLICY)
-    step5(aws_stubs, make_key(keys_dir() / KEY_NAME))
     aws_stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
     ec2_policy(aws_stubs)
     inline_policies(aws_stubs, EC2)
     aws_stubs.iam.add_response(
         "get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME}
     )
-    # 手順 6。同じ名前のセキュリティグループは古い VPC にしか無いので、新しい VPC に作る
+    # 手順 5。同じ名前のセキュリティグループは古い VPC にしか無いので、新しい VPC に作る
     aws_stubs.ec2.add_response(
         "describe_security_groups",
         {
@@ -953,10 +932,10 @@ def test_the_template_follows_the_ipv6_of_the_subnet(
 ) -> None:
     """サブネットに IPv6 の CIDR が結び付いていれば、テンプレートに IPv6 アドレスを足す。"""
     values = write_conf(service)
+    make_key()
     step4(aws_stubs, ipv6=True)
-    step5(aws_stubs, make_key(keys_dir() / KEY_NAME))
-    # 手順 6。テンプレートはまだ IPv6 アドレスを付けていないので、新しいバージョンになる
-    step6(aws_stubs, values)
+    # 手順 5。テンプレートはまだ IPv6 アドレスを付けていないので、新しいバージョンになる
+    step5(aws_stubs, values)
     wanted = template_data(values, ipv6=True)
     assert wanted["NetworkInterfaces"][0]["Ipv6AddressCount"] == 1
     aws_stubs.ec2.add_response(
@@ -990,9 +969,9 @@ def test_the_example_is_written_once(aws_stubs: Stubs, service: Service) -> None
         {"Subnets": [{"SubnetId": SUBNET, "AvailabilityZone": f"{REGION}a", "VpcId": VPC}]},
         PUBLIC_SUBNETS,
     )
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, WRITTEN, associated=False)
-    nothing_to_do(aws_stubs, public_key, WRITTEN)
+    make_key()
+    nothing_to_do(aws_stubs, WRITTEN, associated=False)
+    nothing_to_do(aws_stubs, WRITTEN)
 
     apply.run(service, yes=True)
     apply.run(service, yes=True)
@@ -1049,7 +1028,7 @@ def test_it_stops_before_writing_to_aws_when_the_subnet_is_gone(
 
     aws_stubs.done()
     assert not service.command_path.exists()
-    assert not (keys_dir() / KEY_NAME).exists()
+    assert not keys.default_path().exists()
     assert not (ssh_dir() / "config").exists()
 
 
@@ -1069,7 +1048,7 @@ def test_it_stops_before_writing_to_aws_when_the_image_is_gone(
         apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert not (keys_dir() / KEY_NAME).exists()
+    assert not keys.default_path().exists()
 
 
 ROOT_DEVICE = "/dev/sda1"
@@ -1115,7 +1094,7 @@ def test_it_stops_before_writing_to_aws_when_the_volume_size_is_too_small(
         f"launch-template.VolumeSize 6 is smaller than the root volume of {IMAGE} (8 GiB); "
         f"raise it or remove it in {service.conf_path}"
     )
-    assert not (keys_dir() / KEY_NAME).exists()
+    assert not keys.default_path().exists()
 
 
 def test_it_stops_when_the_image_has_no_ebs_root_volume(aws_stubs: Stubs, service: Service) -> None:
@@ -1159,11 +1138,13 @@ def test_it_resolves_the_root_device_for_the_volume_size(
     assert resolved.root_device == device
 
 
-def test_it_stops_when_ssh_keygen_is_missing(
+def test_it_stops_before_writing_when_ssh_keygen_is_missing(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """使う外部コマンドの有無は、何かを始める前に確かめる。"""
-    _ = write_conf(service)
+    """既定の鍵を作るときだけ ssh-keygen が要る。無ければ、確認の前の検出で止まる。"""
+    values = write_conf(service)
+    step4(aws_stubs)
+    step5(aws_stubs, values)
     monkeypatch.setenv("PATH", "")
 
     with pytest.raises(TemtError, match=f"command not found: {keys.KEYGEN}"):
@@ -1171,6 +1152,21 @@ def test_it_stops_when_ssh_keygen_is_missing(
 
     aws_stubs.done()
     assert not service.command_path.exists()
+    assert not ssh_dir().exists()
+
+
+def test_apply_needs_no_ssh_keygen_when_the_key_is_in_place(
+    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = write_conf(service)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    monkeypatch.setenv("PATH", "")
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert f"IdentityFile       {KEY}\n" in (ssh_dir() / "config").read_text(encoding="utf-8")
 
 
 def test_it_stops_when_another_conf_dir_owns_the_service(
@@ -1204,8 +1200,8 @@ def test_a_service_moved_to_another_conf_dir_is_set_up_from_there(
     assert home.write_edit(home.detect_host_block(service, Conf())) is True
     monkeypatch.setenv(CONF_DIR_ENV, str(service.command_path.parent / "elsewhere"))
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1220,14 +1216,14 @@ def test_moving_the_ssh_dir_warns_about_the_hosts_left_behind(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """手順 7 で Include を張り替えると、前の ssh ディレクトリの Host が見えなくなる。"""
+    """手順 6 で Include を張り替えると、前の ssh ディレクトリの Host が見えなくなる。"""
     values = write_conf(service)
     home.prepare_dirs()
     (ssh_dir() / "config").write_text("Host temt-dev-old\n    User ubuntu\n", encoding="utf-8")
     _ = home.write_include(home.detect_include(), home.detect_host_block(service, Conf()))
     monkeypatch.setenv(SSH_DIR_ENV, str(Path.home() / "elsewhere"))
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1247,7 +1243,8 @@ def test_the_option_is_written_as_the_profile(
     """--profile で選んだプロファイルは、次からのコマンドも使うよう設定ファイルに書く。"""
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     values = write_conf(service)
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1261,10 +1258,10 @@ def test_the_option_is_written_as_the_profile(
 def test_a_new_config_file_gets_the_option_as_the_profile(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """設定ファイルが無いときは、AwsProfile を先に書いてから既定の 5 項目を書く。
+    """設定ファイルが無いときは、AwsProfile を先に書いてから既定の 4 項目を書く。
 
-    更新の途中（手順 5 のキーペアの登録）で止まっても、手順 2 は書き終えているので、
-    書いた項目と受信規則の例は残る。
+    更新の途中（手順 5 の関連付けの作成）で止まっても、手順 2 は書き終えているので、
+    書いた項目と受信規則の例は残る。鍵は手順 6 で作るので、まだ作らない。
     """
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     step2_ami(aws_stubs)
@@ -1275,16 +1272,17 @@ def test_a_new_config_file_gets_the_option_as_the_profile(
         PUBLIC_SUBNETS,
     )
     step4(aws_stubs)
-    missing(aws_stubs.ec2, "describe_key_pairs", keypair.NOT_FOUND, **THE_KEY_PAIR)
-    step6(aws_stubs, WRITTEN, associated=False)
-    aws_stubs.ec2.add_client_error(
-        "import_key_pair", service_error_code="AccessDenied", http_status_code=403
+    step5(aws_stubs, WRITTEN, associated=False)
+    aws_stubs.ssm.add_client_error(
+        "create_association", service_error_code="AccessDeniedException", http_status_code=400
     )
 
     with pytest.raises(ClientError):
         apply.run(service, yes=True)
 
     aws_stubs.done()
+    assert not keys.default_path().exists()
+    assert not (ssh_dir() / "config").exists()
     assert (
         service.conf_path.read_text(encoding="utf-8")
         == conf.HEADER
@@ -1300,7 +1298,8 @@ def test_the_option_replaces_the_written_profile(
     """書かれていたプロファイルと違えば、その行を書き換える。"""
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     values = write_conf(service, AwsProfile="other")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1319,7 +1318,8 @@ def test_the_same_profile_is_not_written_again(
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     values = write_conf(service, AwsProfile="work")
     before = service.conf_path.read_text(encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1334,7 +1334,8 @@ def test_the_written_profile_is_left_alone_without_the_option(
     """--profile が無ければ、AwsProfile は書き足しも書き換えもしない。"""
     values = write_conf(service, AwsProfile="work")
     before = service.conf_path.read_text(encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1347,11 +1348,12 @@ def test_the_written_profile_is_left_alone_without_the_option(
 def test_the_ssh_config_is_left_alone_when_a_resource_fails(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """手順 7 は手順 6 の後なので、手順 6 の更新で止まれば ssh の設定は書かれない。"""
+    """手順 6 は手順 5 の後なので、手順 5 の更新で止まれば ssh の設定は書かれない。"""
     values = write_conf(service)
     changed = {**values, conf.launch_template_key("InstanceType"): "t3.small"}
     service.conf_path.write_text(conf_text(changed) + conf.EC2_DEFAULT, encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     aws_stubs.ec2.add_client_error(
         "create_launch_template_version", service_error_code="AccessDenied", http_status_code=403
     )
@@ -1372,11 +1374,10 @@ def tags_listed(stubs: Stubs) -> None:
     )
 
 
-def nothing_to_show(stubs: Stubs, public_key: str, values: dict[str, str]) -> None:
+def nothing_to_show(stubs: Stubs, values: dict[str, str]) -> None:
     """すべて揃っているときに diff が読むものの応答を積む。書き込みは積まない。"""
     step4(stubs)
-    step5(stubs, public_key)
-    step6(stubs, values, sshd_ports=[22])
+    step5(stubs, values, sshd_ports=[22])
     tags_listed(stubs)
 
 
@@ -1390,9 +1391,9 @@ def test_diff_shows_nothing_after_apply(
 ) -> None:
     """apply の直後は、標準出力に何も書かず、違いが無いことを標準エラー出力に知らせる。"""
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
-    nothing_to_show(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    nothing_to_show(aws_stubs, values)
     apply.run(service, yes=True)
     _ = capsys.readouterr()
 
@@ -1415,7 +1416,6 @@ def test_diff_shows_what_apply_makes_and_writes_nothing(
     _ = write_conf(service)
     before = service.conf_path.read_text(encoding="utf-8")
     step4(aws_stubs)
-    missing(aws_stubs.ec2, "describe_key_pairs", keypair.NOT_FOUND, **THE_KEY_PAIR)
     missing(aws_stubs.iam, "get_role", resources.NO_SUCH_ENTITY, RoleName=NAME)
     ec2_policy(aws_stubs, new=True)
     missing(aws_stubs.iam, "list_role_policies", resources.NO_SUCH_ENTITY, RoleName=NAME)
@@ -1440,24 +1440,29 @@ def test_diff_shows_what_apply_makes_and_writes_nothing(
         ["+", "dir", "~/.ssh/temt"],
         ["+", "dir", "~/.ssh/temt/keys"],
         ["+", "command", f"~/.local/bin/{NAME}"],
-        ["+", "key", f"~/.ssh/temt/keys/{KEY_NAME}"],
-        ["+", "keypair", KEY_NAME],
         ["+", "role", NAME],
         ["+", "role-policy", EC2],
         ["+", "instance-profile", NAME],
         ["+", "security-group", NAME],
         ["+", "launch-template", TEMPLATE],
         ["+", "association", SSHD],
+        # 既定の鍵は、それを指す Host ブロックの直前に出す
+        ["+", "key", KEY],
         ["+", "ssh-host", NAME],
         ["+", "ssh-include", "~/.ssh/config"],
     ]
     # 足すポリシーと Host ブロックは、中身を + の行で続けて出す
     assert '    +  "Version": "2012-10-17"' in out
     assert f"    +Host {NAME}" in out
+    assert f"    +    IdentityFile       {KEY}" in out
+    assert [line.split() for line in out.splitlines() if line.startswith("+   key ")] == [
+        ["+", "key", KEY, "ssh-keygen", "-t", "ed25519"]
+    ]
     assert service.conf_path.read_text(encoding="utf-8") == before
     assert not service.command_path.exists()
     assert not ssh_dir().exists()
     assert not (Path.home() / ".ssh" / "config").exists()
+    assert not keys.default_path().exists()
 
 
 def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
@@ -1472,8 +1477,8 @@ def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
     テンプレートのものと同じなので、テンプレートの違いは出ない。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     subnet_key = conf.launch_template_key("SubnetId")
     text = conf.HEADER + conf_text({k: v for k, v in values.items() if k != subnet_key})
@@ -1486,7 +1491,7 @@ def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
         {"Subnets": [{"SubnetId": SUBNET, "AvailabilityZone": f"{REGION}a", "VpcId": VPC}]},
         PUBLIC_SUBNETS,
     )
-    nothing_to_show(aws_stubs, public_key, values)
+    nothing_to_show(aws_stubs, values)
     _ = capsys.readouterr()
 
     apply.diff(service)
@@ -1498,35 +1503,62 @@ def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
     assert service.conf_path.read_text(encoding="utf-8") == before
 
 
-def test_diff_stops_like_apply_when_the_key_does_not_match(
+@pytest.mark.parametrize(
+    ("kept", "message"),
+    [
+        pytest.param(
+            "private",
+            f"{KEY}.pub does not exist; make it with 'ssh-keygen -y -f {KEY} > {KEY}.pub'",
+            id="only the private key",
+        ),
+        pytest.param(
+            "public",
+            f"{KEY}.pub exists without {KEY}; remove it to create a new key",
+            id="only the public key",
+        ),
+    ],
+)
+def test_diff_and_apply_stop_when_only_one_half_of_the_key_exists(
     aws_stubs: Stubs,
     service: Service,
     capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kept: str,
+    message: str,
 ) -> None:
-    """鍵が食い違えば、設定ファイルの誤りとして、apply と同じエラーで止まる。
+    """既定の鍵の片方だけがあれば、作り直すともう片方を失うか食い違うので、確認の前に止まる。
 
-    一致する手元の鍵が無いことも、直し方の手がかりとして知らせる。
+    diff は、それまでに検出した変更を出してから、apply と同じエラーで終わる。apply は
+    何も見せず、確認も求めず、何も書かない。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    other_key = make_key(tmp_path / "other")
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
-    step4(aws_stubs)
-    step5(aws_stubs, other_key)
-    step4(aws_stubs)
-    step5(aws_stubs, other_key)
+    gone = keys.public_path(keys.default_path()) if kept == "private" else keys.default_path()
+    gone.unlink()
+    changed = {**values, conf.launch_template_key("InstanceType"): "t3.small"}
+    service.conf_path.write_text(conf_text(changed) + conf.EC2_DEFAULT, encoding="utf-8")
+    nothing_to_show(aws_stubs, values)
+    nothing_to_show(aws_stubs, values)
+    monkeypatch.setattr(sys, "stdin", Terminal("y\n"))
     _ = capsys.readouterr()
 
-    for run in (apply.diff, lambda service: apply.run(service, yes=True)):
-        with pytest.raises(TemtError, match=f"the key pair {KEY_NAME} does not match; edit"):
-            run(service)
+    with pytest.raises(TemtError) as caught:
+        apply.diff(service)
+    assert str(caught.value) == message
+    assert capsys.readouterr().out == (
+        f"~   launch-template   {TEMPLATE}   InstanceType: t3.micro -> t3.small\n"
+    )
+    with pytest.raises(TemtError) as caught:
+        apply.run(service, yes=False)
+    assert str(caught.value) == message
 
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert f"no key on this machine matches the key pair {KEY_NAME}" in captured.err
+    assert "[y/N]" not in captured.err
+    assert not gone.exists()
 
 
 def test_diff_asks_for_apply_without_the_config_file(aws_stubs: Stubs, service: Service) -> None:
@@ -1549,18 +1581,19 @@ def test_diff_after_moving_the_ssh_dir_lists_what_apply_warns_about(
     このサービスの Host は、apply が新しい ssh ディレクトリへ先に書くので、挙げない。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     with (ssh_dir() / "config").open("a", encoding="utf-8") as file:
         _ = file.write("\nHost temt-dev-old\n    User ubuntu\n")
     old_keys = keys_dir()
     monkeypatch.setenv(SSH_DIR_ENV, str(Path.home() / "elsewhere"))
-    # 既定の IdentityFile は ssh ディレクトリの下なので、同じ鍵を移しておく
+    # 新しい ssh ディレクトリに書く Host ブロックは、その下の既定の鍵を指すので、同じ鍵を
+    # 移しておく
     keys_dir().mkdir(parents=True)
-    for name in (KEY_NAME, f"{KEY_NAME}.pub"):
+    for name in ("temt", "temt.pub"):
         _ = shutil.copy2(old_keys / name, keys_dir() / name)
-    nothing_to_show(aws_stubs, public_key, values)
+    nothing_to_show(aws_stubs, values)
     _ = capsys.readouterr()
 
     apply.diff(service)
@@ -1581,13 +1614,13 @@ def test_diff_and_apply_agree_on_a_new_instance_type(
     新しいバージョンを作って既定にし、古いバージョンを消す。それ以外には書かない。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     changed = {**values, conf.launch_template_key("InstanceType"): "t3.small"}
     service.conf_path.write_text(conf_text(changed) + conf.EC2_DEFAULT, encoding="utf-8")
     # diff。テンプレートは前の InstanceType のまま
-    nothing_to_show(aws_stubs, public_key, values)
+    nothing_to_show(aws_stubs, values)
     _ = capsys.readouterr()
 
     apply.diff(service)
@@ -1596,8 +1629,7 @@ def test_diff_and_apply_agree_on_a_new_instance_type(
     assert out == (f"~   launch-template   {TEMPLATE}   InstanceType: t3.micro -> t3.small\n")
     # apply。同じ応答に、テンプレートの書き込みだけを積む
     step4(aws_stubs)
-    step5(aws_stubs, public_key)
-    step6(aws_stubs, values, sshd_ports=[22])
+    step5(aws_stubs, values, sshd_ports=[22])
     aws_stubs.ec2.add_response(
         "create_launch_template_version",
         {"LaunchTemplateVersion": {"VersionNumber": 4}},
@@ -1630,14 +1662,13 @@ def test_diff_and_apply_agree_on_a_new_volume_size(
     大きさとして起動テンプレートに入れる。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     write_volume_size(service, 30)
     # diff。テンプレートにはまだ大きさが無い
     step4(aws_stubs, found_image=sized_image(8))
-    step5(aws_stubs, public_key)
-    step6(aws_stubs, values, sshd_ports=[22])
+    step5(aws_stubs, values, sshd_ports=[22])
     tags_listed(aws_stubs)
     _ = capsys.readouterr()
 
@@ -1646,8 +1677,7 @@ def test_diff_and_apply_agree_on_a_new_volume_size(
     assert capsys.readouterr().out == f"~   launch-template   {TEMPLATE}   VolumeSize: - -> 30\n"
     # apply。同じ応答に、テンプレートの書き込みだけを積む
     step4(aws_stubs, found_image=sized_image(8))
-    step5(aws_stubs, public_key)
-    step6(aws_stubs, values, sshd_ports=[22])
+    step5(aws_stubs, values, sshd_ports=[22])
     sized = to_conf(values)
     sized.launch_template.VolumeSize = 30
     wanted = resources.template_data(
@@ -1687,11 +1717,11 @@ def test_diff_shows_the_ec2_default_that_apply_writes(
     ロールのポリシーは既定と同じなので、違いとしては出ない。設定ファイルは変えない。
     """
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     service.conf_path.write_text(conf_text(values), encoding="utf-8")
-    nothing_to_show(aws_stubs, public_key, values)
+    nothing_to_show(aws_stubs, values)
     _ = capsys.readouterr()
 
     apply.diff(service)
@@ -1721,19 +1751,18 @@ def test_diff_writes_what_it_found_before_it_stops(
     """apply が止まるところでは、それまでに検出した変更を出してから、同じエラーで終わる。
 
     空の InstanceType は書かれていないものとして読むので、apply は既定を書き直す。
-    手元の鍵が読めなければ、手順 5 で止まる。
+    既定の鍵の秘密鍵しか無ければ、手順 6 で止まる。
     """
-    _ = write_conf(service)
+    values = write_conf(service)
     text = service.conf_path.read_text(encoding="utf-8")
     service.conf_path.write_text(
         text.replace('InstanceType = "t3.micro"', 'InstanceType = ""'), encoding="utf-8"
     )
     keys_dir().mkdir(parents=True)
-    (keys_dir() / KEY_NAME).write_text("not a key\n", encoding="utf-8")
-    step4(aws_stubs)
-    step5(aws_stubs, make_key(Path.home() / "other"))
+    keys.default_path().write_text("a private key\n", encoding="utf-8")
+    nothing_to_show(aws_stubs, values)
 
-    with pytest.raises(TemtError, match=f"edit IdentityFile or KeyName in {service.conf_path}"):
+    with pytest.raises(TemtError, match=f"^{KEY}.pub does not exist; "):
         apply.diff(service)
 
     aws_stubs.done()
@@ -1751,7 +1780,8 @@ def test_a_file_in_place_of_the_command_is_left_alone(
     values = write_conf(service)
     service.command_path.parent.mkdir(parents=True)
     service.command_path.write_text("mine\n", encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
 
     apply.run(service, yes=True)
 
@@ -1777,7 +1807,8 @@ def test_apply_shows_the_changes_and_writes_nothing_when_declined(
     y と答えなければ、設定ファイルにも AWS にも手元にも書かない。"""
     values = write_conf(service)
     before = service.conf_path.read_text(encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
 
     with pytest.raises(TemtError, match="cancelled"):
@@ -1797,7 +1828,8 @@ def test_apply_needs_yes_without_a_terminal(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     values = write_conf(service)
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
 
     before = service.conf_path.read_text(encoding="utf-8")
@@ -1819,9 +1851,9 @@ def test_apply_asks_nothing_without_differences(
 ) -> None:
     """違いが無ければ、確認を求めずに終わる。--yes が無く、端末でなくても止まらない。"""
     values = write_conf(service)
-    public_key = make_key(keys_dir() / KEY_NAME)
-    nothing_to_do(aws_stubs, public_key, values)
-    nothing_to_do(aws_stubs, public_key, values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    nothing_to_do(aws_stubs, values)
     apply.run(service, yes=True)
     _ = capsys.readouterr()
     monkeypatch.setattr(sys, "stdin", io.StringIO())
@@ -1850,8 +1882,7 @@ def test_a_first_apply_that_is_declined_makes_nothing(
         PUBLIC_SUBNETS,
     )
     step4(aws_stubs)
-    missing(aws_stubs.ec2, "describe_key_pairs", keypair.NOT_FOUND, **THE_KEY_PAIR)
-    step6(aws_stubs, WRITTEN, associated=False)
+    step5(aws_stubs, WRITTEN, associated=False)
     monkeypatch.setattr(sys, "stdin", Terminal("\n"))
 
     with pytest.raises(TemtError, match="cancelled"):
@@ -1860,7 +1891,7 @@ def test_a_first_apply_that_is_declined_makes_nothing(
     aws_stubs.done()
     out = capsys.readouterr().out
     assert "+   conf " in out
-    assert "+   key " in out
+    assert ["+", "key", KEY] in heads(out)
     assert not service.conf_path.exists()
     assert not keys_dir().exists()
     assert not ssh_dir().exists()
@@ -1876,7 +1907,8 @@ def test_apply_goes_on_when_the_answer_is_yes(
 ) -> None:
     """端末で y と答えれば、検出した差分で更新する。"""
     values = write_conf(service)
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     monkeypatch.setattr(sys, "stdin", Terminal("y\n"))
 
     apply.run(service, yes=False)
@@ -1886,20 +1918,19 @@ def test_apply_goes_on_when_the_answer_is_yes(
     assert f"wrote ~/.local/bin/{NAME}" in capsys.readouterr().out
 
 
-def test_a_key_mismatch_stops_apply_before_showing_anything(
-    aws_stubs: Stubs,
-    service: Service,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
+def test_half_a_key_stops_apply_before_showing_anything(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """鍵の不一致は検出で止まるので、ほかに違いがあっても表示も確認もせず、何も書かない。"""
-    _ = write_conf(service)
+    """鍵の片方だけがあれば検出で止まるので、ほかに違いがあっても表示も確認もせず、
+    何も書かない。"""
+    values = write_conf(service)
     before = service.conf_path.read_text(encoding="utf-8")
-    _ = make_key(keys_dir() / KEY_NAME)
-    step4(aws_stubs)
-    step5(aws_stubs, make_key(tmp_path / "other"))
+    public = keys.public_path(keys.default_path())
+    public.parent.mkdir(parents=True)
+    public.write_text("ssh-ed25519 AAAA temt\n", encoding="utf-8")
+    nothing_to_show(aws_stubs, values)
 
-    with pytest.raises(TemtError, match=f"the key pair {KEY_NAME} does not match; edit"):
+    with pytest.raises(TemtError, match=f"^{KEY}.pub exists without {KEY}; remove it"):
         apply.run(service, yes=False)
 
     aws_stubs.done()
@@ -1907,7 +1938,127 @@ def test_a_key_mismatch_stops_apply_before_showing_anything(
     assert "command" not in captured.out
     assert "[y/N]" not in captured.err
     assert not service.command_path.exists()
+    assert not (ssh_dir() / "config").exists()
     assert service.conf_path.read_text(encoding="utf-8") == before
+    assert public.read_text(encoding="utf-8") == "ssh-ed25519 AAAA temt\n"
+
+
+def test_a_removed_default_key_is_made_again(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host ブロックは変わらなくても、それが指す既定の鍵が無ければ、作る。"""
+    values = write_conf(service)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    apply.run(service, yes=True)
+    block = (ssh_dir() / "config").read_text(encoding="utf-8")
+    old = keys.public_path(keys.default_path()).read_text(encoding="utf-8")
+    keys.default_path().unlink()
+    keys.public_path(keys.default_path()).unlink()
+    nothing_to_show(aws_stubs, values)
+    nothing_to_do(aws_stubs, values)
+    _ = capsys.readouterr()
+
+    apply.diff(service)
+
+    assert heads(capsys.readouterr().out) == [["+", "key", KEY]]
+    assert not keys.default_path().exists()
+    monkeypatch.setattr(sys, "stdin", Terminal("y\n"))
+
+    apply.run(service, yes=False)
+
+    aws_stubs.done()
+    out = capsys.readouterr().out
+    assert f"created the key {KEY}" in out
+    assert "wrote the Host" not in out
+    assert keys.public_path(keys.default_path()).read_text(encoding="utf-8") != old
+    assert (ssh_dir() / "config").read_text(encoding="utf-8") == block
+
+
+def test_a_key_the_user_chose_is_neither_made_nor_checked(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host ブロックの IdentityFile を別の鍵に替えれば、apply はその鍵を見ず、既定の鍵も
+    作らない。ssh-keygen も要らない。IdentityFile の行は書かれたまま残す。"""
+    values = write_conf(service)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    apply.run(service, yes=True)
+    config = ssh_dir() / "config"
+    mine = "    IdentityFile ~/.ssh/no-such-key\n"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(f"    IdentityFile       {KEY}\n", mine),
+        encoding="utf-8",
+    )
+    edited = config.read_text(encoding="utf-8")
+    keys.default_path().unlink()
+    keys.public_path(keys.default_path()).unlink()
+    monkeypatch.setenv("PATH", "")
+    nothing_to_show(aws_stubs, values)
+    nothing_to_do(aws_stubs, values)
+    _ = capsys.readouterr()
+
+    apply.diff(service)
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    captured = capsys.readouterr()
+    # diff は違いが無いことを標準エラー出力に、apply は標準出力に知らせる
+    assert captured.err.endswith(f"{NAME}: no differences\n")
+    assert captured.out.endswith(f"{NAME}: no differences\n")
+    assert len(captured.out.splitlines()) == 1
+    assert not keys.default_path().exists()
+    assert not keys.public_path(keys.default_path()).exists()
+    assert config.read_text(encoding="utf-8") == edited
+
+
+def test_a_template_with_a_key_name_gets_a_new_version_without_it(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """前の temt が入れたか手で入れた KeyName は、違いとして出し、新しいバージョンで外す。"""
+    values = write_conf(service)
+    make_key()
+    nothing_to_do(aws_stubs, values)
+    apply.run(service, yes=True)
+    old = {**template_data(values), "KeyName": "temt"}
+    step4(aws_stubs)
+    step5(aws_stubs, values, sshd_ports=[22], data=old)
+    tags_listed(aws_stubs)
+    _ = capsys.readouterr()
+
+    apply.diff(service)
+
+    assert capsys.readouterr().out == f"~   launch-template   {TEMPLATE}   KeyName: temt -> -\n"
+    step4(aws_stubs)
+    step5(aws_stubs, values, data=old)
+    wanted = template_data(values)
+    assert "KeyName" not in wanted
+    aws_stubs.ec2.add_response(
+        "create_launch_template_version",
+        {"LaunchTemplateVersion": {"VersionNumber": 4}},
+        {"LaunchTemplateName": TEMPLATE, "LaunchTemplateData": wanted},
+    )
+    aws_stubs.ec2.add_response(
+        "modify_launch_template",
+        {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
+        {"LaunchTemplateName": TEMPLATE, "DefaultVersion": "4"},
+    )
+    aws_stubs.ec2.add_response(
+        "delete_launch_template_versions",
+        {"SuccessfullyDeletedLaunchTemplateVersions": [{"VersionNumber": 3}]},
+        {"LaunchTemplateName": TEMPLATE, "Versions": ["3"]},
+    )
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert f"launch template {TEMPLATE}: updated (version 4)" in capsys.readouterr().out
 
 
 class Editing(Terminal):
@@ -1922,7 +2073,7 @@ class Editing(Terminal):
 def test_an_ssh_config_edited_while_asking_is_not_overwritten(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """確認を待つ間に ssh の設定が書き換えられれば、手順 7 で書かずに止まる。
+    """確認を待つ間に ssh の設定が書き換えられれば、手順 6 で書かずに止まる。
 
     手で書いたものを、検出したときの中身で上書きしないためである。それより前の手順は
     更新し終えている。
@@ -1932,7 +2083,8 @@ def test_an_ssh_config_edited_while_asking_is_not_overwritten(
     service.conf_path.write_text(conf_text(changed) + conf.EC2_DEFAULT, encoding="utf-8")
     home.prepare_dirs()
     (ssh_dir() / "config").write_text("# mine\n", encoding="utf-8")
-    nothing_to_do(aws_stubs, make_key(keys_dir() / KEY_NAME), values)
+    make_key()
+    nothing_to_do(aws_stubs, values)
     aws_stubs.ec2.add_response(
         "create_launch_template_version",
         {"LaunchTemplateVersion": {"VersionNumber": 4}},

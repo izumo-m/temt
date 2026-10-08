@@ -39,11 +39,6 @@ def test_run_reports_the_exit_code_when_nothing_is_written() -> None:
         proc.run([sys.executable, "-c", "raise SystemExit(3)"])
 
 
-def test_run_writes_the_given_input() -> None:
-    echo = "import sys; print(sys.stdin.read().upper(), end='')"
-    assert proc.run([sys.executable, "-c", echo], stdin="key\n") == "KEY\n"
-
-
 def test_run_puts_a_failure_on_one_line() -> None:
     """ssh-keygen の @ で囲んだ複数行の警告も、1 行にまとめて知らせる。"""
     noisy = (

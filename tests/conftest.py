@@ -18,6 +18,7 @@ from botocore.exceptions import BotoCoreError, ParamValidationError, StubRespons
 from botocore.stub import Stubber
 from types_boto3_accessanalyzer.client import AccessAnalyzerClient
 from types_boto3_ec2.client import EC2Client
+from types_boto3_ec2_instance_connect.client import EC2InstanceConnectClient
 from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 
@@ -214,6 +215,12 @@ def analyzer(stub_failures: list[BotoCoreError]) -> AccessAnalyzerClient:
     return watched(offline().client("accessanalyzer"), stub_failures)
 
 
+@pytest.fixture
+def connect(stub_failures: list[BotoCoreError]) -> EC2InstanceConnectClient:
+    """AWS につながない EC2 Instance Connect のクライアント。"""
+    return watched(offline().client("ec2-instance-connect"), stub_failures)
+
+
 class Clock:
     """待ち合わせの時計と休みの代わり。休んだ分だけ進む。"""
 
@@ -245,13 +252,19 @@ class Session:
     """aws.session の代わり。用意したクライアントを返す。"""
 
     def __init__(
-        self, ec2: EC2Client, ssm: SSMClient, iam: IAMClient, analyzer: AccessAnalyzerClient
+        self,
+        ec2: EC2Client,
+        ssm: SSMClient,
+        iam: IAMClient,
+        analyzer: AccessAnalyzerClient,
+        connect: EC2InstanceConnectClient,
     ) -> None:
         self.clients: dict[str, Any] = {
             "ec2": ec2,
             "ssm": ssm,
             "iam": iam,
             "accessanalyzer": analyzer,
+            "ec2-instance-connect": connect,
         }
 
     def client(self, name: str) -> Any:
@@ -266,12 +279,13 @@ class Stubs:
     ssm: Stubber
     iam: Stubber
     analyzer: Stubber
+    connect: Stubber
     # aws.session に渡された設定。設定ファイルから決まる
     passed: list[Conf]
 
     def done(self) -> None:
         """積んだ応答がすべて使われたことを確かめる。"""
-        for stub in (self.ec2, self.ssm, self.iam, self.analyzer):
+        for stub in (self.ec2, self.ssm, self.iam, self.analyzer, self.connect):
             stub.assert_no_pending_responses()
 
 
@@ -282,6 +296,7 @@ def aws_stubs(
     ssm: SSMClient,
     iam: IAMClient,
     analyzer: AccessAnalyzerClient,
+    connect: EC2InstanceConnectClient,
 ) -> Iterator[Stubs]:
     """コマンドが Session から作るクライアントを、Stubber で包んだものに差し替える。
 
@@ -293,7 +308,7 @@ def aws_stubs(
         # Conf は後の手順が書き換えるので、渡された時点の姿を控える。テーブルも
         # 書き換わるので、深い複製にする
         passed.append(deepcopy(values))
-        return Session(ec2, ssm, iam, analyzer)
+        return Session(ec2, ssm, iam, analyzer, connect)
 
     monkeypatch.setattr(aws, "session", session)
     with (
@@ -301,8 +316,9 @@ def aws_stubs(
         Stubber(ssm) as ssm_stub,
         Stubber(iam) as iam_stub,
         Stubber(analyzer) as analyzer_stub,
+        Stubber(connect) as connect_stub,
     ):
-        stubs = Stubs(ec2_stub, ssm_stub, iam_stub, analyzer_stub, passed)
+        stubs = Stubs(ec2_stub, ssm_stub, iam_stub, analyzer_stub, connect_stub, passed)
         yield stubs
         stubs.done()
 
@@ -313,7 +329,6 @@ def configured(service: Service) -> Service:
     service.conf_path.parent.mkdir(parents=True, exist_ok=True)
     service.conf_path.write_text(
         f'AwsRegion = "{REGION}"\n'
-        'KeyName = "temt"\n'
         "\n"
         "[launch-template]\n"
         'ImageId = "ami-0123456789abcdef0"\n'

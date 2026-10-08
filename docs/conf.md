@@ -3,7 +3,7 @@
 `~/.config/temt/<svc>.toml`。サービスの定義で、`--svc <svc>` を付けたすべての
 コマンドが読む。`--svc` を付けない `service list` は、すべての `<svc>.toml` を
 読んで並べる。`--svc` を付けない `instance list`、`ami list`、`ami prune`、
-`ami delete`、`app list` と、`keypair` のコマンドは読まない。`apply` はこの
+`ami delete`、`app list` は読まない。`apply` はこの
 ファイルを正として、AWS リソースと手元の環境を揃える。複数のマシンから同じサービスを
 使うときは、同じ内容のファイルを各マシンに置く。ssh の経路はマシンごとに違うので、
 このファイルではなく環境変数で与える（[設定ファイルに
@@ -36,8 +36,6 @@ TOML として読めない記述があれば、エラーにして終了する。
 | --- | --- | --- |
 | `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて | 無し。書かなければプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
 | `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて | `ap-northeast-1` |
-| `KeyName` | `apply`、`diff`、`bake`、`--bake` を付けた `deploy` と `app remove`、`destroy` | `temt`。EC2 のキーペアの名前。`IdentityFile` の既定と、起動テンプレートの `KeyName` になる。英数字で始まり、英数字、`.`、`_`、`-` だけが続き、`.pub` で終わらない、251 文字以内の名前 |
-| `IdentityFile` | `apply`、`diff`、`destroy` | `~/.ssh/temt/keys/<KeyName>`（`TEMT_SSH_DIR` を設定していれば、その下の `keys/<KeyName>`）。ssh がインスタンスへの認証に使う秘密鍵。`apply` が ssh の設定に書く。`~/` で始まるか、絶対パスで書き、ファイル名で終える。空白（半角スペース）と `%` は使えるが、`"`、`'`、`\`、`$`、表示できない文字（タブ、改行、全角空白、制御文字など）は使えない |
 | `SshdPorts` | `apply`、`diff` | `[22]`。インスタンスの sshd が待ち受けるポートの配列（`[2222]`、`[2222, 443]`）。1 から 65535 の整数で、重ねて書けない。先頭が ssh の Host ブロックの `Port` になる |
 
 **`AwsProfile`。** 書かなければ、temt はプロファイルを指定しない。資格情報は AWS の
@@ -66,26 +64,8 @@ ProxyCommand に渡すので、ログインにも効く。`--profile` は ssh �
 インスタンスに対応するので、別のリージョンを使うときは `AwsRegion` を書いてから
 最初の `apply` を実行するか、別の `<svc>` として立てる。
 
-**`KeyName` と `IdentityFile`。** インスタンスにログインできる鍵は、EC2 のキーペア
-`KeyName` の鍵だけである。`IdentityFile` はそれと同じ鍵でなければならず、
-パスフレーズ付きの鍵は使えない。`apply` が確かめる手順は
-[usage.md](usage.md#キーペア) にある。`KeyName` は `IdentityFile` の既定の
-ファイル名になるので、`/` などは使えない。
-
-`IdentityFile` は、`~/` で始まるか、絶対パスで書く。相対パスは、temt と ssh で
-起点のディレクトリが違うので使えない。`~user/` の形も、展開しないので使えない。
-末尾の `/` や、`.`、`..` で終わる形も使えない。temt はそれを畳んで鍵のファイルと
-読むが、ssh は書かれたまま開いて読めないからである。空白（半角スペース）と `%` は
-使える。`apply` は ssh の設定に、`%` を `%%` にし、空白を含めば値を二重引用符で
-囲んで書く。ssh は、二重引用符の中でも引用符と `\` を自前で解釈し、`${NAME}` を
-環境変数として展開するので、`"`、`'`、`\`、`$` は使えない。表示できない文字
-（タブ、改行、全角空白、制御文字、表示の向きを変える文字など）も、ssh の設定の
-行を壊すか、端末の表示を乱すので使えない。temt が鍵を探したり作ったりするときは、
-書いたパスをそのまま使う。
-
-`KeyName` と `IdentityFile` が規則に合わなければ、`--svc` を付けたすべてのコマンドが、
-設定ファイルを読むところでエラーにする。前から持っているキーペアの名前が規則に
-合わなければ、`keypair create` で新しいキーペアを作って使う。
+ログインに使う鍵は、このファイルには書かない。マシンごとの ssh の設定の
+`IdentityFile` で決まる（[usage.md](usage.md#ログインの鍵)）。
 
 **`SshdPorts`。** インスタンスの sshd は、ここに書いたポートだけで待ち受ける。
 `apply` が、State Manager の関連付けを通してインスタンスの sshd の設定を揃え、
@@ -363,13 +343,12 @@ Resource = "arn:aws:s3:::my-bucket/*"
 最後の項目の次に足すので、その後ろのコメントは、次の見出しの前に残る。以後はこの
 ファイルの内容を正として進める。
 
-- `AwsRegion`、`KeyName`、`InstanceType` は、既定を使ったときもその値を書く。
+- `AwsRegion`、`InstanceType` は、既定を使ったときもその値を書く。
 - `ImageId` には選んだ AMI の名前を書く。Ubuntu 24.04 の公開 AMI は自分の
   アカウントのものではなく名前では指せないので、ID を書く。
 - `SubnetId` には選んだサブネットの ID を書く。既定のサブネットが見つからなければ
   （既定 VPC が無い、パブリックなサブネットが無い）、`SubnetId` を書いたファイルを
   用意するよう告げて、何も書かずに終了する。
-- `IdentityFile` は、既定なら書かず、`KeyName` から導く。
 - `SshdPorts` と `VolumeSize` は書かない。
 - `AwsProfile` は、`--profile` が指定されたときだけその値を書く。
 - `[[role.policy.ec2]]` は、1 つも無ければ既定を、コメントとともに書く
@@ -393,7 +372,6 @@ Resource = "arn:aws:s3:::my-bucket/*"
 ```toml
 # Written by temt apply. Edit and run apply again to update.
 AwsRegion = "ap-northeast-1"
-KeyName = "temt"
 
 [launch-template]
 ImageId = "ami-0123456789abcdef0"
@@ -459,7 +437,7 @@ Resource = [
 | --- | --- | --- |
 | `TEMT_LOGIN` | `proxy` | ssh でインスタンスへつなぐ経路。`ssm`（Session Manager 経由）か `direct`（パブリック IP へ直接）。無ければ `ssm`。それ以外の値はエラー |
 | `TEMT_CONF_DIR` | `--svc` を付けたすべてと、`service list`、`app list` | 設定ファイルとアプリを置くディレクトリ。無ければ `~/.config/temt` |
-| `TEMT_SSH_DIR` | `--svc` を付けたすべてと、`service list`、`keypair` のコマンド、`ami prune` | ssh の設定・鍵・known_hosts を置くディレクトリ。無ければ `~/.ssh/temt` |
+| `TEMT_SSH_DIR` | `--svc` を付けたもののうち ssh の設定、鍵、ロックを使うもの（`apply`、`proxy` など）と、`ami prune` | ssh の設定・鍵・known_hosts を置くディレクトリ。無ければ `~/.ssh/temt` |
 | `AWS_PROFILE` | AWS を使うすべて（`proxy` を含む） | `--profile` も `AwsProfile` も無いときに使うプロファイル（[最上位](#最上位)） |
 
 `TEMT_LOGIN` は `proxy` が接続のたびに読む。ssh は ProxyCommand に自分の環境変数を
@@ -505,15 +483,15 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 変えない。
 
 どちらの変数も、それを読むコマンドが起動のたびに読む。`apply` は、ssh の設定に
-書く `IdentityFile`、`UserKnownHostsFile`、`Include` と、`ProxyCommand` が
-渡す場所を、その実行のときの値で決める。ssh から呼ばれる `proxy` に場所を
+書く `UserKnownHostsFile`、`Include`、ブロックに無いときに足す `IdentityFile` と、
+`ProxyCommand` が渡す場所を、その実行のときの値で決める。ssh から呼ばれる `proxy` に場所を
 伝えるため、`apply` は 2 つとも、既定のままでも `env` で渡す。ホームの下の
 場所は `~` で始まる形で書き、`proxy` が自分で展開する。ssh は ProxyCommand に
 自分の環境変数を渡すので、書かなければ `proxy` は ssh を打ったシェルの値を
 読んでしまう。書いておけば、シェルに変数が無くても、別の値があっても、ssh の
 接続は `apply` のときと同じ場所を使う。
 
-    ProxyCommand env TEMT_CONF_DIR='/srv/temt/conf' TEMT_SSH_DIR='/srv/temt/ssh' temt proxy --svc dev-main %p
+    ProxyCommand env TEMT_CONF_DIR='/srv/temt/conf' TEMT_SSH_DIR='/srv/temt/ssh' temt proxy --svc dev-main --user '%r' %p
 
 `TEMT_CONF_DIR` は、行き来してよい。ssh ディレクトリは 1 つなので、どの場所で
 `apply` したサービスにも ssh でつながる。ただし、同じサービスの設定ファイルを
@@ -522,9 +500,10 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 を実行する。設定ファイルには鍵が入らないので、他のマシンと同期するディレクトリや、
 バージョン管理下のディレクトリにも置ける。`apps/` に置いたアプリも同じである。
 
-`TEMT_SSH_DIR` を変えるときは、先に前の場所の `keys/` を新しい場所へ移してから
-`apply` をやり直す（`IdentityFile` を書いていなければ、移さないと鍵が無いと告げて止まる）。`~/.ssh/config` の `Include` が新しい
-場所を指すように書き換わり、前の場所にある Host には ssh でつながらなくなる。
+`TEMT_SSH_DIR` を変えたら、`apply` をやり直す。新しい場所に鍵が無ければ `apply` が
+作る。前の場所の `config` を手で移したときは、Host ブロックの `IdentityFile` が前の
+場所を指したまま残るので、その行を消してから `apply` する。`~/.ssh/config` の
+`Include` が新しい場所を指すように書き換わり、前の場所にある Host には ssh でつながらなくなる。
 `apply` は、そのうち新しい場所に無い Host を挙げて警告する。前の場所にある鍵や
 known_hosts を temt が動かすことはなく、`destroy` もそのとき変数が指す場所だけを
 片づけるので、要るものは手で移す。鍵を置く場所なので、他のマシンと同期するディレクトリ

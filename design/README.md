@@ -25,7 +25,7 @@ baked, an unused instance terminates itself
 | --- | --- |
 | [principles.md](principles.md) | Assumptions and what to prefer when options diverge |
 | [glossary.md](glossary.md) | English and Japanese terms |
-| [naming.md](naming.md) | Service names, resource names, key pair names, tags, `--svc` |
+| [naming.md](naming.md) | Service names, resource names, tags, `--svc` |
 | [local-files.md](local-files.md) | Repository layout, files in the user's home, location environment variables |
 | [config.md](config.md) | The config file, profile, region, account |
 | [resources.md](resources.md) | The AWS resources of a service and how `apply` and `destroy` treat them |
@@ -36,11 +36,10 @@ baked, an unused instance terminates itself
 | [commands/ami.md](commands/ami.md) | `bake`, `ami list`, `ami prune`, `ami delete` |
 | [commands/sg.md](commands/sg.md) | `sg list`, `sg add`, `sg remove`, `sg diff`, `sg show` |
 | [commands/app.md](commands/app.md) | The deploy record, `app` commands, `deploy`, app options, `app remove`, bundled apps |
-| [commands/keypair.md](commands/keypair.md) | `keypair list`, `keypair show`, `keypair create`, `keypair delete` |
 | [commands/ssh.md](commands/ssh.md) | `proxy` and the login routes (`TEMT_LOGIN`) |
 | [topics/ami.md](topics/ami.md) | Creating, selecting, and naming AMIs |
 | [topics/instance.md](topics/instance.md) | Finding instances, intermediate states, terminating, waiting, locks |
-| [topics/keypair.md](topics/keypair.md) | Matching the key pair with the local key |
+| [topics/login-key.md](topics/login-key.md) | The login key that `proxy` sends with EC2 Instance Connect |
 | [topics/launch-template.md](topics/launch-template.md) | Launch template contents and versions |
 | [topics/security-group.md](topics/security-group.md) | Security group, ingress rules, global IP address |
 | [topics/ssh.md](topics/ssh.md) | known_hosts, the ssh config, the `Include` in `~/.ssh/config` |

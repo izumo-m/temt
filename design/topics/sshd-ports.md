@@ -4,7 +4,7 @@ The config file's `SshdPorts` is applied to both the listening ports of the inst
 sshd and the `Port` of the ssh Host block. The instance side is reconciled by the Systems
 Manager State Manager association `<name>-sshd`. An association is a registration with
 AWS saying "on the instances selected by tag, run this SSM document with these
-parameters"; the SSM agent on the instance picks it up and runs it. Step 6 of
+parameters"; the SSM agent on the instance picks it up and runs it. Step 5 of
 [`apply`](../commands/service.md#apply) reconciles it; step 4 of
 [`destroy`](../commands/service.md#destroy) deletes it. It does not go through ssh, so
 it arrives even when sshd listens on a port that cannot be reached.

@@ -1,7 +1,7 @@
 """destroy の本体。設計の手順 1〜6 を順に行う。
 
 インスタンスを終了し、apply が作った AWS リソースとサービスのコマンドを消す。
-設定ファイル、鍵、ssh の Host ブロック、キーペア、AMI は残し、次の apply がそのまま
+設定ファイル、ログインの鍵、ssh の Host ブロック、AMI は残し、次の apply がそのまま
 使う。--async は無く、つねに完了を待つ。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
@@ -10,7 +10,6 @@ boto3 を使うので、この module は cli.run が呼ばれたときに読み
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
@@ -88,11 +87,9 @@ def _ami(ec2: EC2Client, svc: str) -> aws.Ami | None:
     return found
 
 
-def _left(ec2: EC2Client, service: Service, values: Conf) -> None:
+def _left(ec2: EC2Client, service: Service) -> None:
     """手順 6。次の apply がそのまま使うものを知らせる。"""
     lines = [
-        f"key pair {values.KeyName}",
-        printable(tilde(Path(values.IdentityFile).expanduser())),
         printable(tilde(service.conf_path)),
         f"the Host {service.name} block in {printable(tilde(ssh_dir() / 'config'))}",
     ]
@@ -127,4 +124,4 @@ def run(service: Service, *, yes: bool) -> None:
         # 手順 5
         _forget(service)
         # 手順 6
-        _left(ec2, service, values)
+        _left(ec2, service)

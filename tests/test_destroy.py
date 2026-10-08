@@ -313,8 +313,6 @@ def staying(*, image: str | None = IMAGE) -> list[str]:
     """手順 6 の報告の行。AMI は、自分のアカウントにあるときだけ並ぶ。"""
     lines = [
         "left for the next apply:",
-        "  key pair temt",
-        "  ~/.ssh/temt/keys/temt",
         "  ~/.config/temt/dev-main.toml",
         f"  the Host {NAME} block in ~/.ssh/temt/config",
     ]
@@ -398,7 +396,7 @@ def test_it_leaves_the_ami_out_when_the_service_has_none(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().out)[-5:] == staying(image=None)
+    assert told(capsys.readouterr().out)[-3:] == staying(image=None)
 
 
 def test_it_finishes_when_the_amis_cannot_be_read(
@@ -422,7 +420,7 @@ def test_it_finishes_when_the_amis_cannot_be_read(
         "temt: warning: cannot tell which AMIs are tagged temt:service=dev-main: "
     )
     assert len(captured.err.splitlines()) == 1
-    assert told(captured.out)[-5:] == staying(image=None)
+    assert told(captured.out)[-3:] == staying(image=None)
 
 
 def test_it_reports_what_was_not_there(

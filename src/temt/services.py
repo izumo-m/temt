@@ -10,7 +10,7 @@ from pathlib import Path
 from temt import conf, msg, table
 from temt.conf import UNSET, Conf
 from temt.msg import TemtError
-from temt.names import Service, conf_dir, exists, keys_dir
+from temt.names import Service, conf_dir, exists
 
 # 設定ファイルの拡張子
 SUFFIX = ".toml"
@@ -19,7 +19,7 @@ HIDDEN = "."
 
 COLUMNS = table.Columns(
     defaults=("SERVICE", "PROFILE", "REGION", "IMAGE", "TYPE"),
-    extras=("KEYNAME", "IDENTITYFILE", "SUBNET", "INGRESS", "SSHDPORTS", "VOLUMESIZE"),
+    extras=("SUBNET", "INGRESS", "SSHDPORTS", "VOLUMESIZE"),
 )
 
 
@@ -37,8 +37,6 @@ def _row(service: Service, values: Conf) -> dict[str, str]:
         "REGION": values.AwsRegion,
         "IMAGE": _value(template.ImageId),
         "TYPE": _value(template.InstanceType),
-        "KEYNAME": values.KeyName,
-        "IDENTITYFILE": values.IdentityFile,
         "SUBNET": _value(template.SubnetId),
         "INGRESS": str(len(values.security_group.ingress)),
         "SSHDPORTS": ",".join(str(port) for port in values.SshdPorts),
@@ -72,9 +70,6 @@ def list_services(service: Service | None, spec: str | None) -> None:
     並べてから誤りとして終える。
     """
     chosen = COLUMNS.choose(spec)
-    # IdentityFile の既定は ssh ディレクトリから導く。場所を変える環境変数の誤りは、
-    # ファイルごとに飛ばさず、ここで一度だけ知らせて止まる
-    _ = keys_dir()
     if service is not None:
         # 無いか読めなければ、他の --svc のコマンドと同じく、apply を促すか理由を告げて止まる
         table.write(chosen, [_row(service, conf.load(service))])

@@ -1,9 +1,9 @@
-"""サービスの AWS リソースを揃える・消す。apply の手順 6 と destroy の手順 4。
+"""サービスの AWS リソースを揃える・消す。apply の手順 5 と destroy の手順 4。
 
 起動テンプレートについては、bake が AMI だけを替えるための point_image、show と
 bake が既定バージョンを読むための関数と、bake がそれを設定ファイルと比べるための
-関数も持つ。all_versions は、ami と keypair のコマンドが、テンプレートが指す AMI と
-キーペアを集めるのに使う。
+関数も持つ。all_versions は、ami のコマンドが、テンプレートが指す AMI を集めるのに
+使う。
 
 detect は、IAM ロール、そのインラインポリシー temt-<ポリシー名>、インスタンス
 プロファイル、セキュリティグループ、起動テンプレート、関連付け <名前>-sshd の差分を、
@@ -768,7 +768,6 @@ def template_data(
         "ImageId": image_id,
         # 設定ファイルには任意の文字列を書けるので、値が正しいかは AWS が判断する
         "InstanceType": cast("InstanceTypeType", instance_type),
-        "KeyName": values.KeyName,
         "InstanceInitiatedShutdownBehavior": SHUTDOWN_BEHAVIOR,
         "NetworkInterfaces": [interface],
         "MetadataOptions": {"HttpTokens": HTTP_TOKENS, "InstanceMetadataTags": METADATA_TAGS},
@@ -838,6 +837,7 @@ def projection(data: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "ImageId": data.get("ImageId"),
         "InstanceType": data.get("InstanceType"),
+        # temt は入れない。手で入れたものや、前の temt が入れたものがあれば、外す
         "KeyName": data.get("KeyName"),
         # デバイス名と大きさの組。temt が入れるのはルートボリュームの 1 つだけである
         "BlockDeviceMappings": sorted(
@@ -954,7 +954,7 @@ def versions(ec2: EC2Client, service: Service) -> list[Mapping[str, Any]]:
 
 @dataclass(frozen=True)
 class TemplateVersion:
-    """起動テンプレートの 1 つのバージョン。AMI やキーペアを使っているものとして挙げる。"""
+    """起動テンプレートの 1 つのバージョン。AMI を使っているものとして挙げる。"""
 
     template: str
     number: Any
@@ -1055,11 +1055,11 @@ def volume_size(data: Mapping[str, Any]) -> Any:
 def config_pairs(
     values: Conf, data: Mapping[str, Any], image_id: str | None
 ) -> list[tuple[str, Any, Any]]:
-    """設定ファイルから来る 5 つの項目の、設定ファイルの値とテンプレートの値の組。
+    """設定ファイルから来る 4 つの項目の、設定ファイルの値とテンプレートの値の組。
 
     data は projection で取り出した既定バージョンの内容。ImageId と SubnetId は、
-    設定ファイルに書かれていなければ UNSET になる。InstanceType と KeyName は、
-    書かれていなければ既定の値になる。VolumeSize は、書かれていなければ None で、
+    設定ファイルに書かれていなければ UNSET になる。InstanceType は、書かれていなければ
+    既定の値になる。VolumeSize は、書かれていなければ None で、
     テンプレートにも入っていないことと比べる。image_id は configured_image の値。ImageId の
     組には、テンプレートと比べられるよう、名前ではなくこの ID を入れる。書かれて
     いるのに使える AMI が見つからなければ、どの値とも一致しない NO_USABLE_IMAGE を
@@ -1074,7 +1074,6 @@ def config_pairs(
     return [
         ("ImageId", wanted_image, data["ImageId"]),
         ("InstanceType", template.InstanceType, data["InstanceType"]),
-        ("KeyName", values.KeyName, data["KeyName"]),
         ("SubnetId", template.SubnetId, interface.get("SubnetId")),
         ("VolumeSize", template.VolumeSize, volume_size(data)),
     ]
@@ -1473,7 +1472,7 @@ def association(
 
 @dataclass(frozen=True)
 class Found:
-    """手順 6 の 5 つのリソースとインラインポリシー temt-<ポリシー名> の差分。"""
+    """手順 5 の 5 つのリソースとインラインポリシー temt-<ポリシー名> の差分。"""
 
     role: RoleDiff
     policies: tuple[PolicyDiff, ...]

@@ -9,14 +9,15 @@ temt のコマンドの使い方を、扱う対象ごとに説明する。はじ
 - mise か uv。temt を入れる（[入れ方](#入れ方)）
 - aws-cli v2。Session Manager 経由の ssh に使う
 - session-manager-plugin。ssh は既定で Session Manager 経由でつなぐ
-- ssh-keygen（openssh-client）
+- ssh と ssh-keygen（openssh-client）
 
-ssh の設定に書かれる ProxyCommand は `temt` を、`temt` は `aws` と
+ssh の設定に書かれる ProxyCommand は `temt` を、`temt` は `ssh`、`aws`、
 `session-manager-plugin` を、PATH から探す。ssh を打つシェルにも、ssh を呼ぶ
 エディター（VS Code の Remote-SSH など）にも、これらが PATH にあるようにしておく。
 
 AWS の資格情報は、EC2、IAM、SSM を操作できる権限と、ロールに付ける権限を確かめる
-IAM Access Analyzer の `access-analyzer:ValidatePolicy` を持つプロファイルとして
+IAM Access Analyzer の `access-analyzer:ValidatePolicy`、ログインの鍵をインスタンスに
+送る EC2 Instance Connect の `ec2-instance-connect:SendSSHPublicKey` を持つプロファイルとして
 `~/.aws/` に設定しておく。サービスのリージョンは環境変数では与えられない。設定
 ファイルで指定する（[conf.md](conf.md)）。
 
@@ -50,8 +51,8 @@ GitHub のリポジトリの `main` ブランチを入れる。
 
 temt を消すと、temt のサービスに ssh でつながらなくなる。AWS リソースとサービスの
 コマンドを残さないなら、消す前にサービスごとに `destroy` する
-（[片づける](#片づける)）。AMI とキーペアは `destroy` でも残るので、要らなければ
-これらも消す前に `ami prune` か `ami delete`、`keypair delete` で消す。
+（[片づける](#片づける)）。AMI は `destroy` でも残るので、要らなければ
+これも消す前に `ami prune` か `ami delete` で消す。
 
 設定ファイルの場所 `~/.config/temt/`、ssh の設定と鍵の場所 `~/.ssh/temt/`、
 `~/.ssh/config` の先頭に足された目印のコメントと `Include` の 2 行は残る。要らなければ
@@ -101,7 +102,6 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 下の表で `--svc <svc>` と書いたコマンドは `--svc` が要り、
 `[--svc <svc>]` と書いたコマンドは省ける。省けば、すべてのサービスのものを扱う。
 ただし `app list` は、省けばアプリ ID で指せるアプリだけを表示する。
-`keypair` のコマンドは `--svc` を取らない。
 
 | コマンド | 短縮形 | すること |
 | --- | --- | --- |
@@ -125,10 +125,6 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 | `temt sg remove --svc <svc> <ポート> [<CIDR>]` | | 設定ファイルから受信規則を消す |
 | `temt sg diff --svc <svc>` | | 次の `apply` が受信規則をどう変えるかを見る |
 | `temt sg show --svc <svc>` | | セキュリティグループを見る |
-| `temt keypair list [--format <列>]` | | temt が作ったキーペアの一覧を見る |
-| `temt keypair show <キーペア名またはファイル>` | | キーペアか手元の鍵を見る |
-| `temt keypair create <キーペア名>` | | 鍵を作り、キーペアとして登録する |
-| `temt keypair delete <キーペア名> [--yes]` | | キーペアと手元の鍵を消す |
 | `temt app list [--svc <svc>] [--format <列>]` | | 入っているアプリと、入れられるアプリの一覧を見る。`--svc` を省けば、入れられるアプリだけ |
 | `temt app show --svc <svc> <アプリID>` | | アプリの記録、オプション、キーの一覧を見る |
 | `temt app get --svc <svc> <アプリID> <キー>` | | アプリの値を 1 つ読む |
@@ -136,7 +132,7 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 | `temt app unset --svc <svc> <アプリID> <キー>` | | アプリの値を 1 つ消す |
 | `temt app deploy --svc <svc> <アプリIDまたはパス> [<名前>=<値>...] [--reset] [--user <ユーザー>] [--bake] [--yes]` | `deploy` | アプリを入れる |
 | `temt app remove --svc <svc> <アプリID> [--user <ユーザー>] [--bake] [--yes]` | | アプリを外す |
-| `temt ssh proxy --svc <svc> [ポート]` | `proxy` | ssh の ProxyCommand として動く。手では打たない |
+| `temt ssh proxy --svc <svc> [ポート] [--user <ユーザー>]` | `proxy` | ssh の ProxyCommand として動く。手では打たない |
 
 警告、エラー、確認の問いかけと、それらに添える行は標準エラー出力に、それ以外は標準
 出力に出る。ただし、表や `diff` の変更だけを標準出力に残すよう、`--svc` を付けない
@@ -150,8 +146,7 @@ temt を消すと、temt のサービスに ssh でつながらなくなる。AW
 と同じ）。サービス名をシェルの補完で打てる。`~/.local/bin` は PATH に入れておく。
 
 `--svc` を省けるコマンドも、このコマンドから打てば、そのサービスのものだけを扱う。
-`--svc` を取らない `keypair` のコマンドは、このコマンドからは打てない。どのコマンドも、
-`--svc` を重ねると引数の誤りになる。
+どのコマンドも、`--svc` を重ねると引数の誤りになる。
 
 `apply` は、`~/.local/bin/temt-<svc>` が無いときだけ書く。何かあれば、中身に
 かかわらず触れない。`destroy` は、中身にかかわらず消す。
@@ -232,8 +227,6 @@ AWS の一覧（`describe-instances`）は、要求から数秒遅れて変わ�
 `--yes` も無ければ、何もせずに止まる。違いが無ければ、確認を求めずに終わる。
 
 - 設定ファイル `~/.config/temt/<svc>.toml`。無ければ既定値で書かれる
-- キーペア `temt`。無ければ `~/.ssh/temt/keys/temt` に作られ、公開鍵が EC2 に
-  登録される
 - AWS リソース。IAM ロールとインスタンスプロファイル、セキュリティグループ、起動
   テンプレート、sshd の待ち受けポートを揃える State Manager の関連付け。ロールには、
   設定ファイルの `[[role.policy.<ポリシー名>]]` ごとにインラインポリシー
@@ -242,6 +235,7 @@ AWS の一覧（`describe-instances`）は、要求から数秒遅れて変わ�
 - ssh の設定。`~/.ssh/temt/config` に `Host temt-<svc>` のブロックが
   足され、`~/.ssh/config` の先頭に、目印のコメントと
   `Include ~/.ssh/temt/config` の 2 行が足される
+- ログインの鍵 `~/.ssh/temt/keys/temt`。無ければ作られる（[ログインの鍵](#ログインの鍵)）
 - サービスのコマンド `temt-<svc>`。`~/.local/bin` に無ければ書かれる
   （[サービスのコマンド](#サービスのコマンド)）
 
@@ -295,11 +289,11 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
     web        work      us-east-1        temt-web-2609201200     t3.small
 
 `-` は、その項目に値が無いことを表す。`apply` する前の `ImageId` などである。
-既定のある項目は、書いていなくても既定を表示する。`--format` で `KEYNAME`、
-`IDENTITYFILE`、`SUBNET`、`INGRESS`（受信規則の数）、`SSHDPORTS`、`VOLUMESIZE` も
-表示できる（[一覧の表](#一覧の表)）。
+既定のある項目は、書いていなくても既定を表示する。`--format` で `SUBNET`、
+`INGRESS`（受信規則の数）、`SSHDPORTS`、`VOLUMESIZE` も表示できる
+（[一覧の表](#一覧の表)）。
 
-    temt service list --format service,keyname,identityfile
+    temt service list --format service,subnet,sshdports
 
 読めない設定ファイルと、名前がサービス名の規則に合わないファイル
 （`Web.toml` など）は、警告して飛ばし、残りを表示してから終了コード 1 で終わる。
@@ -332,7 +326,7 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 残るものは次のとおり。もう一度 `apply` を実行すれば、同じ設定で作り直せる。
 
 - 設定ファイル `~/.config/temt/<svc>.toml`
-- 手元の鍵 `~/.ssh/temt/keys/<KeyName>` と、EC2 のキーペア `<KeyName>`
+- ログインの鍵 `~/.ssh/temt/keys/temt`（どのサービスにも共通）
 - `~/.ssh/temt/config` の `Host temt-<svc>` ブロック
 - そのサービスの AMI
 
@@ -565,7 +559,7 @@ temt と一緒に配るアプリ `idle-shutdown` を入れて焼いておけば�
 
 作った AWS リソース（IAM ロール、インスタンスプロファイル、セキュリティグループ、
 起動テンプレート、関連付け）はそのまま残る。これらには費用はかからない。
-消すには `destroy` を使う（[片づける](#片づける)）。キーペアは `destroy` でも残る。
+消すには `destroy` を使う（[片づける](#片づける)）。
 
 ### インスタンスが 2 台になったとき
 
@@ -759,7 +753,6 @@ AWS がパラメータから引いた AMI を指すものとして扱う。パ�
       version:                3 (created 2026-09-20 18:00:00)
       ImageId:                ami-0123456789abcdef0
       InstanceType:           t3.micro
-      KeyName:                temt
       VolumeSize:             (not set)
       SubnetId:               subnet-0123456789abcdef0 (vpc-0123456789abcdef0)
       security groups:        sg-0123456789abcdef0
@@ -872,100 +865,32 @@ CIDR を確かめて、IPv6 のものも含めてすべて消し、新しいア�
 Session Manager 経由に戻すには、`TEMT_LOGIN` を消すか `ssm` にする。受信規則は
 残るので、消したければ `sg remove` で設定ファイルから外して `apply` を実行する。
 
-## キーペア
+## ログインの鍵
 
-`apply` は、EC2 にキーペア `KeyName` があることと、手元の秘密鍵（設定ファイルの
-`IdentityFile`。既定は `~/.ssh/temt/keys/<KeyName>`）がそれと一致することを
-確かめる。EC2 に無ければ手元の鍵の公開鍵を登録して `temt:keypair` タグを付け、
-手元にも無ければ鍵を作ってから登録する。初回は `~/.ssh/temt/keys/temt` と
-`temt.pub` ができる。
+temt は EC2 にキーペアを登録しない。ssh がつなぐたびに、`proxy` が ssh の使う鍵の公開鍵を
+EC2 Instance Connect でインスタンスに送る。送った鍵が認められるのは 60 秒だけで、
+ssh はその間にログインする。AWS に鍵を残さないので、マシンごとに別の鍵でよい。
 
-手元の鍵と EC2 のキーペアが一致しないとき（手元に無いときも含む）、`apply` は何も
-変えずに止まる。両方のフィンガープリントを示し、`~/.ssh/temt/keys/` と
-`~/.ssh/id_*` から EC2 のキーペアに一致する鍵を探して、手がかりとして表示する。
-設定ファイルの `IdentityFile` をそのどれかに直すか、`KeyName` を新しい名前にして
-`apply` をやり直す。`IdentityFile` に別の鍵を書けるのは、それが EC2 のキーペア
-`KeyName` と同じ鍵のときだけである。`KeyName` を新しい名前にすると、`IdentityFile` の
-鍵がその名前で登録され（鍵が無ければ作られる）、`terminate` して次に `start` したときから
-使われる。`IdentityFile` を書いていなければ、鍵の場所も `~/.ssh/temt/keys/<新しい名前>` に
-変わるので、ふつうは新しい鍵が作られる。`apply` が EC2 のキーペア
-そのものや `IdentityFile` を書き換えることはない。初回の `apply` なら、設定ファイルは
-まだ作られていないので、`IdentityFile` か `KeyName` を書いたファイルを用意してから
-やり直す（[conf.md](conf.md)）。
+初めてつなぐインスタンスでは、ssh がホスト鍵の確認を求める。答えるまでに 60 秒を
+超えると、送った鍵が切れていて `Permission denied (publickey)` で止まる。もう一度
+つなげば入れる。
 
-使えるのはパスフレーズの無い鍵だけである。パスフレーズ付きの鍵は秘密鍵から公開鍵を
-取り出せないので、一致していても手がかりに表示されず（外した理由は表示される）、
-`IdentityFile` に書くとエラーになる。
+使う鍵は、`~/.ssh/temt/config` の `Host temt-<svc>` ブロックの `IdentityFile` で
+決まる。`apply` は、ブロックに `IdentityFile` が無いときだけ、既定の鍵
+`~/.ssh/temt/keys/temt` を書く。この鍵はどのサービスにも共通で、無ければ `apply` が
+作る。自分の鍵を使うには、`IdentityFile` を書き換える。`apply` はそれを書き換えない。
 
-2 台のマシンから同じサービスを使うには、秘密鍵と設定ファイルを両方に置く必要が
-ある。
+`proxy` が送るのは、鍵の隣にある `.pub` である。`.pub` があれば、パスフレーズ付きの
+鍵も使える。秘密鍵を ssh-agent に置き、`IdentityFile` に `.pub` を書いたときは、
+その `.pub` を送る。鍵を替えても、インスタンスを作り直す必要はない。次につないだときから
+新しい鍵が送られる。
 
-### キーペアを見る、作る、消す
+インスタンスの AMI には `ec2-instance-connect` が入っている必要がある。既定の
+Ubuntu の AMI には入っている。入っていない AMI では、ssh が
+`Permission denied (publickey)` で止まる。
 
-    temt keypair list
-    temt keypair show <キーペア名>
-    temt keypair show ~/.ssh/id_ed25519
-    temt keypair create <キーペア名>
-    temt keypair delete <キーペア名>
-
-キーペアはどのサービスにも属さないので、どれも `--svc` を取らず、`--svc` を付けない
-`ami prune` と同じく `--profile` と `--region` で環境を選ぶ（[共通のコマンドラインオプション](#共通のコマンドラインオプション)）。
-サービスのコマンド `temt-<svc>` からは打てない。フィンガープリントは
-`ssh-keygen -l` と同じ `SHA256:` の形で出るので、手元で `ssh-keygen -l -f <鍵>` の
-結果と見比べられる。
-
-`keypair list` は、temt が作ったキーペア（`temt:keypair` タグの付いたもの）の一覧を
-表示する。
-
-    account 123456789012, region ap-northeast-1, profile (none)
-    NAME   FINGERPRINT                                          CREATED               LOCAL     USED
-    temt   SHA256:6WY4Q/IMpvszygUuoDFWa5HtIuuWpuHXV7YT0kJaNlQ   2026-09-20 12:00:00   matches   temt-<svc>-template:3
-
-`LOCAL` は、手元の `~/.ssh/temt/keys/<キーペア名>` と一致するか（`matches`、
-`differs`、読めなければ `unreadable`、EC2 から公開鍵が得られなければ `unknown`、
-手元に無ければ `-`）で、`USED` はそのキー
-ペアを使っている起動テンプレートのバージョン（無ければ `-`）である。`--format` で、
-キーペアの ID（`ID`）と鍵の種類（`TYPE`）も表示できる。
-
-`keypair show` は、キーペア名を渡せば、temt が作ったかどうかを問わず、そのキー
-ペアの詳細と、一致する手元の鍵（`~/.ssh/temt/keys/` と `~/.ssh/id_*` から探す）を
-表示する。EC2 のコンソールに出るフィンガープリントも `KeyFingerprint` として
-並べるが、RSA の鍵や取り込んだ鍵では、計算のしかたが違うので `fingerprint` とは
-一致しない。`/` を含む引数は手元の鍵のファイルとみなし、その鍵の種類や
-フィンガープリントと、一致する EC2 のキーペアを表示する。今のディレクトリの鍵は
-`./<ファイル>` と打つ。秘密鍵でも公開鍵でもよい。
-
-`keypair create` は、`~/.ssh/temt/keys/<キーペア名>` の鍵を EC2 に登録する。
-手元の鍵も EC2 のキーペアも、あればそのまま使い、無ければ作る。途中で失敗しても、
-もう一度実行すれば続きから進む。EC2 にあるのに手元に秘密鍵が無いとき、両方あるのに
-一致しないときは、何も変えずに止まる。作ったキーペアを使うには、設定ファイルの
-`KeyName` をその名前にして `apply` する。
-キーペア名には、英数字で始まり、英数字、`.`、`_`、`-` だけが続き、`.pub` で
-終わらない名前を使う。
-
-`keypair delete` は、EC2 のキーペアと、手元の `~/.ssh/temt/keys/<キーペア名>`、
-`<キーペア名>.pub` のうち、あるものを消す。鍵を作り直すときに使う。消す前に
-`[y/N]` で確認を求め、`--yes` を付けると確認しない。消せるのは temt が作ったキーペア
-（`temt:keypair` タグの付いたもの）だけで、タグの無いキーペアは消せない。
-起動テンプレートや、終了していないインスタンスがそのキーペアを使っていれば
-警告するが、止めはしない。そのキーペアで起動したインスタンスには、消した後は
-ログインできなくなる。サービスの `KeyName` がそのキーペアを指していて
-`IdentityFile` が既定のままなら、次の `apply` が新しい鍵を作って同じ名前で登録し
-直し、次に `start` したインスタンスから使われる。
-
-手元の鍵は、どのリージョンとアカウントにも共通の 1 つである。`apply` は既定の
-`KeyName` のまま、サービスのリージョンごとに同じ鍵を登録する。手元の鍵が消えると、
-どのリージョンのインスタンスにもログインできなくなる。temt は他のリージョンを
-調べないので、同じ鍵を登録したリージョンとアカウント（`--profile`）ごとに
-`keypair delete` する。しなかったところでは、`apply` が鍵の不一致で止まる。
-
-鍵を作り直す手順は次のとおり（既定の `KeyName` と `IdentityFile` のまま使って
-いるとき）。`apply` から先は、その鍵を使うサービスごとに行う。
-
-    temt --region <リージョン> keypair delete temt   # 鍵を登録したリージョンとアカウントごとに
-    temt-<svc> apply                                # 新しい鍵を作って登録する
-    temt-<svc> terminate
-    temt-<svc> start                                # 新しい鍵で起動する
+インスタンスの `~/.ssh/authorized_keys` にある鍵でも、そのまま入れる。
+送る鍵は、`authorized_keys` には書かれない。
 
 ## アプリ
 
@@ -1232,18 +1157,16 @@ Ubuntu なら 22）、そうでなければ直前の `SshdPorts` の値である
 
 ```
 config                    ssh の設定。apply がサービスの Host ブロックを足し、更新する
-keys/                     鍵。apply が作った temt と temt.pub
-                          （KeyName を変えたときはその名前）と、
-                          keypair create が作った鍵
+keys/                     ログインの鍵。apply が作った temt と temt.pub
 known_hosts.d/<名前>/     インスタンスごとの known_hosts
 ```
 
 サービスに ssh の設定を足したいとき（`LocalForward` など）は、`config` の
 `Host temt-<svc>` ブロックに書き足す。`apply` は、そのサービスのブロックの
-中の temt が管理する項目（`User`、`Port`、`IdentityFile`、`IdentitiesOnly`、
-`UserKnownHostsFile`、`ProxyCommand`）だけを書き換える。他の項目、他のブロック、
-コメントには触れない。管理する項目を手で変えても、次の `apply` で temt が決めた
-値に戻る。`Host temt-<svc> <別名>` のように Host 行に別名を並べてもよく、`apply` は
+中の temt が管理する項目（`User`、`Port`、`IdentitiesOnly`、`UserKnownHostsFile`、
+`ProxyCommand`）だけを書き換える。`IdentityFile` は、無いときだけ書く。他の項目、
+他のブロック、コメントには触れない。管理する項目を手で変えても、次の `apply` で
+temt が決めた値に戻る。`Host temt-<svc> <別名>` のように Host 行に別名を並べてもよく、`apply` は
 そのブロックをサービスのブロックとして扱う。
 
 ## ファイルの場所を変える
@@ -1262,10 +1185,12 @@ known_hosts.d/<名前>/     インスタンスごとの known_hosts
 止まる。場所を分けても、サービス名は全体で重ならないように付ける。設定ファイル
 には鍵が入らないので、他のマシンと同期するディレクトリにも置ける。
 
-`TEMT_SSH_DIR` を変えるときは、先に前の場所の `keys/` を新しい場所へ移してから
-`apply` をやり直す。移さないと、`IdentityFile` を書いていなければ鍵が新しい場所に
-無いので、`apply` は鍵が無いと告げて止まる。`apply` で、ssh の設定に書かれるパスが
-新しい場所に変わり、`~/.ssh/config` の `Include` も書き換わる。前の場所にある Host には
+`TEMT_SSH_DIR` を変えたら、`apply` をやり直す。新しい場所に鍵が無ければ `apply` が
+作り、そのまま使える。`apply` で、ssh の設定に書かれるパスが新しい場所に変わり、
+`~/.ssh/config` の `Include` も書き換わる。ただし、前の場所の `config` を手で移した
+ときは、Host ブロックの `IdentityFile` が前の場所を指したまま残る（`apply` は
+`IdentityFile` を書き換えない）。その行を消してから `apply` すれば、新しい場所の鍵に
+なる。前の場所にある Host には
 ssh でつながらなくなるので、`apply` はそれらを表示して警告する。temt が鍵や
 known_hosts を動かすことはないので、要るものは手で移す。鍵を置く場所なので、
 他のマシンと同期するディレクトリや、バージョン管理下のディレクトリは指さない。

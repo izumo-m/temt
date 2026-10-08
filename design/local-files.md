@@ -34,9 +34,8 @@ reuse a cached build, which it did not), so CONTRIBUTING.md just says to run it 
     config                      ssh config; apply adds and updates Host blocks;
                                 included from ~/.ssh/config
     keys/                       keys; mode 700
-    keys/<key pair name>        private key made by apply or keypair create; mode 600;
-                                keypair delete removes it
-    keys/<key pair name>.pub    its public key
+    keys/temt                   default login key made by apply; mode 600
+    keys/temt.pub               its public key, which proxy sends
     known_hosts.d/<name>/       per-instance known_hosts, current, .lock
     .config.lock                lock held while the ssh config is rewritten
 ```
@@ -72,10 +71,10 @@ The conf directory and the ssh directory can each be moved by an environment var
 
 Who reads them:
 
-- Every command with `--svc`, and `service list`: both. `TEMT_SSH_DIR` is read where
-  the ssh directory is used (the default `IdentityFile`, locks, the ssh config), so a
+- Every command with `--svc`: both. `TEMT_SSH_DIR` is read where
+  the ssh directory is used (the default login key, locks, the ssh config), so a
   command that uses none of them does not notice a wrong value.
-- The `keypair` commands: only `TEMT_SSH_DIR`, which locates the keys.
+- `service list`: only `TEMT_CONF_DIR`, which locates the config files.
 - `ami prune` without `--svc`: only `TEMT_SSH_DIR`, which locates the locks. A wrong
   value is an error before the confirmation.
 - `app list` without `--svc`: only `TEMT_CONF_DIR`, which locates the apps.
@@ -94,8 +93,11 @@ exchange, the same `<svc>` cannot have config files in two locations (`apply` st
 [topics/ssh.md](topics/ssh.md#services-across-conf-directories)).
 
 `TEMT_SSH_DIR` moves the ssh config, keys, and known_hosts. It cannot point at
-`~/.ssh` itself. `IdentityFile`, `UserKnownHostsFile`, and `Include` that `apply`
-writes into the ssh config follow the value at the time of that `apply`. The `Include`
+`~/.ssh` itself. `UserKnownHostsFile`, `Include`, and an `IdentityFile` that `apply`
+adds to a block without one follow the value at the time of that `apply`. An
+`IdentityFile` already in a block is never rewritten, so after moving the ssh config
+by hand, its line still names the previous location until the user deletes it (the
+next `apply` then writes the default key of the new location). The `Include`
 in `~/.ssh/config` is a single line, so after changing the variable and running
 `apply`, ssh no longer reaches the Hosts in the previous ssh directory; `apply` warns
 and lists them. temt does not move what remains in the previous location, and

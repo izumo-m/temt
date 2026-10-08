@@ -14,8 +14,9 @@ Step 6 of [`bake`](../commands/ami.md#bake): `create-image` from the stopped ins
   its snapshots.
 
 `bake` bakes the instance as it is, without touching its contents or cleaning anything
-up first. For example, lines added to `~/.ssh/authorized_keys` by a previous key pair
-remain in instances launched from the baked AMI. This is the intended behavior and is
+up first. For example, lines in `~/.ssh/authorized_keys` (a key pair the source AMI
+was launched with, or keys the user added) remain in instances launched from the baked
+AMI, and those keys can log in alongside the one `proxy` sends. This is the intended behavior and is
 not to be changed.
 
 AMI names must be unique within the account and region. Baking the same service twice

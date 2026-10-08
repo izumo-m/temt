@@ -26,29 +26,27 @@ def require(command: str) -> str:
 def _one_line(text: str) -> str:
     """外部コマンドの出力を 1 行にする。
 
-    ssh-keygen は、鍵のファイルの権限が広いと @ で囲んだ複数行の警告を出す。そのまま
-    では警告の行や表示の列が崩れるので、囲みの @ を除き、行を空白でつなぐ。
+    ssh や ssh-keygen は、ファイルの権限が広いときなどに @ で囲んだ複数行の警告を出す。
+    そのままでは警告の行や表示の列が崩れるので、囲みの @ を除き、行を空白でつなぐ。
     """
     lines = (line.strip().strip("@").strip() for line in text.splitlines())
     return " ".join(line for line in lines if line)
 
 
-def run(argv: list[str], stdin: str | None = None) -> str:
+def run(argv: list[str]) -> str:
     """コマンドを実行し、標準出力を返す。失敗すれば標準エラーを添えて終了する。
 
     標準出力を受け取るのは、ProxyCommand として動くときに外部コマンドの出力が
-    ssh の通信路へ流れ出ないようにするためでもある。stdin を渡せば標準入力に書き、
-    渡さなければ標準入力を閉じる。閉じるのは、問いかけを待って止まらないように
-    するためである。入出力は、Python がファイル名を扱うときと同じく os.fsdecode と
-    os.fsencode で変換する。ssh-keygen の誤りの文は鍵のパスを、公開鍵の行は鍵の
-    コメントを含み、どちらにもロケールの文字コードで読めないバイトが入りうるから
-    である。読めないバイトは対にならないサロゲートになり、os.fsencode で元のバイトに
-    戻せる。表示するときは printable が置き換える。
+    ssh の通信路へ流れ出ないようにするためでもある。標準入力は閉じる。問いかけを待って
+    止まらないようにするためである。出力は、Python がファイル名を扱うときと同じく
+    os.fsdecode で読む。ssh-keygen の誤りの文は鍵のパスを、ssh -G の出力は
+    IdentityFile のパスを含み、どちらにもロケールの文字コードで読めないバイトが
+    入りうるからである。読めないバイトは対にならないサロゲートになり、表示するときは
+    printable が置き換える。
     """
     done = subprocess.run(
         argv,
-        input=None if stdin is None else os.fsencode(stdin),
-        stdin=subprocess.DEVNULL if stdin is None else None,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
     )

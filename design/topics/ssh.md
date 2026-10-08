@@ -1,6 +1,6 @@
 # known_hosts and ssh config
 
-Step 7 of [`apply`](../commands/service.md#apply) writes the ssh config;
+Step 6 of [`apply`](../commands/service.md#apply) writes the ssh config;
 [`proxy`](../commands/ssh.md) prepares known_hosts on every connection.
 
 ## known_hosts
@@ -40,7 +40,8 @@ confirm the host key again.
 
 ## The ssh directory's config
 
-In its own service's `Host <name>` block, `apply` rewrites only the 6 keys temt manages.
+In its own service's `Host <name>` block, `apply` rewrites only the 5 keys temt manages,
+and writes `IdentityFile` only when the block has none.
 If the block is missing it is appended (after a blank line if the file is not empty); if
 the file is missing it is created with mode 600. Unmanaged keys, other blocks, and
 comments are left untouched.
@@ -56,22 +57,27 @@ Host temt-dev-main
     IdentityFile       ~/.ssh/temt/keys/temt
     IdentitiesOnly     yes
     UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current
-    ProxyCommand       env TEMT_CONF_DIR='~/.config/temt' TEMT_SSH_DIR='~/.ssh/temt' temt proxy --svc dev-main %p
+    ProxyCommand       env TEMT_CONF_DIR='~/.config/temt' TEMT_SSH_DIR='~/.ssh/temt' temt proxy --svc dev-main --user '%r' %p
 ```
 
 - `User` is fixed to `ubuntu`.
 - `Port` is the first port of the config file's `SshdPorts` (default 22) and becomes the
   `%p` of `ProxyCommand` ([topics/sshd-ports.md](sshd-ports.md)).
-- `IdentityFile` is the config file's `IdentityFile` (by default derived from
-  `KeyName`). ssh expands `%` as a token, so `%` is written as `%%`. ssh splits words on
-  whitespace, so a value containing a space is enclosed in double quotes; a value without
-  one is not quoted. Characters ssh interprets even inside double quotes are rejected
-  when the config file is read ([conf.md](../../docs/conf.md#最上位)).
-  `IdentitiesOnly yes` makes ssh use only this key and not try the other keys in
+- `IdentityFile` is written only when the block has none, with the default login key
+  `~/.ssh/temt/keys/temt` (under `TEMT_SSH_DIR`; its rules keep out the characters ssh
+  would split or expand). After that, the lines in the block are kept as written, so
+  the user can point it at another key, or list several. `proxy` sends the key that
+  ssh will use ([login-key.md](login-key.md)).
+  `IdentitiesOnly yes` makes ssh use only these keys and not try the other keys in
   ssh-agent.
 - `UserKnownHostsFile` points to the fixed name `current`, because ssh_config has no
   token that expands to the instance ID.
-- `ProxyCommand` calls `temt` by name, not by path, and passes `proxy --svc <svc> %p`.
+- `ProxyCommand` calls `temt` by name, not by path, and passes
+  `proxy --svc <svc> --user '%r' %p`. `%r` is the user ssh logs in as, so that `proxy`
+  sends the login key for that user even when it is given on ssh's command line. ssh
+  puts `%r` in as it is, so it is in single quotes: the shell does not expand it, and
+  an OpenSSH old enough to let shell characters into a user name cannot be made to run
+  a command through it.
   `env` looks up `temt` in the PATH inherited from ssh, so changing how or which version
   of `temt` is installed needs no rewrite. The aws-cli that `proxy` calls is looked up in
   the same PATH. `%p` is the `Port` value, or the `ssh -p` value when given.
@@ -88,7 +94,8 @@ Host temt-dev-main
   it is off by default.
 
 The user may add their own settings for the service (`LocalForward` etc.) to this block.
-If the 6 managed keys are edited by hand, the next `apply` puts temt's values back.
+If the 5 managed keys are edited by hand, the next `apply` puts temt's values back;
+`IdentityFile` is left as the user wrote it.
 
 - `apply` regenerates the managed lines in one fixed form without reading the written
   values, and writes only when the file content would change. A line ssh reads as the
@@ -96,8 +103,7 @@ If the 6 managed keys are edited by hand, the next `apply` puts temt's values ba
 - A managed line already in the block is rewritten in place. Missing managed keys are
   inserted right after the `Host` line, in the order above.
 - If a managed key appears more than once in the block, only the first line is kept.
-  ssh uses every `IdentityFile` line, so dropping the later ones keeps ssh on temt's
-  key only.
+  Every `IdentityFile` line is kept: ssh tries them in order.
 
 ### Services across conf directories
 

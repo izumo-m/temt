@@ -4,15 +4,15 @@
 
 `service apply --svc <svc> [--yes]` (short form `apply`)
 
-Creates the service's config file, key pair, AWS resources, and ssh settings if they
-are missing. Existing ones are brought in line with the config file, except the key
-pair, which is never changed. Running it again gives the same result. Each step is an
+Creates the service's config file, AWS resources, ssh settings, and the default login
+key if they are missing. Existing ones are brought in line with the config file. Running
+it again gives the same result. Each step is an
 independent process that takes the config file as the source of truth and reconciles
 one target.
 
 `apply` runs in four phases: detect, show, confirm, update.
 
-- Detect: walk steps 1-7 below and detect the difference for each target. Detection is
+- Detect: walk steps 1-6 below and detect the difference for each target. Detection is
   the same code as `diff`. Nothing is written to the config file, AWS, or local files
   in this phase. If a step stops, temt exits having written nothing.
 - Show: with no differences, report so (`<name>: no differences`) and finish.
@@ -63,9 +63,7 @@ If it stops during the update phase, whatever was already written stays.
      variables to build the content of `temt-<policy name>`, and pass it to IAM Access
      Analyzer `validate-policy`. If there are `ERROR` findings, list all of them
      ([docs/conf.md](../../docs/conf.md#role)).
-5. Compare the key pair with the local key as in [topics/keypair.md](../topics/keypair.md).
-   If the keys do not match, exit, treating it as an error in the config file.
-6. Detect the differences of the IAM role, its inline policies `temt-<policy name>`,
+5. Detect the differences of the IAM role, its inline policies `temt-<policy name>`,
    the instance profile, the security group, the launch template, and the association,
    in this order; the update reconciles them in the same order.
    - Inline policies deleted are those starting with `temt-` that are not in the
@@ -80,8 +78,10 @@ If it stops during the update phase, whatever was already written stays.
      boto3 waiter `instance-profile-exists` (a mechanism that polls until the state
      changes). Even so, EC2 may not see it yet right after; `start` then says to wait
      a minute ([instance.md](instance.md#right-after-apply)).
-7. Detect adding or updating the `Host <name>` block in the ssh directory's `config`
-   to match the config file. Detect making the line after the marker in
+6. Detect adding or updating the `Host <name>` block in the ssh directory's `config`
+   to match the config file. If the block, after this, uses the default login key and
+   the key does not exist, detect creating it; it is created before the block is
+   written ([topics/login-key.md](../topics/login-key.md#the-default-key)). Detect making the line after the marker in
    `~/.ssh/config` an `Include` that points to that `config`. When replacing the
    `Include`, warn on update about the Hosts in the file the previous `Include` pointed
    to that ssh can no longer see ([topics/ssh.md](../topics/ssh.md)).
@@ -115,17 +115,16 @@ with the same error. It prints:
 | 2 | `conf` | `role.policy.ec2` | Writing the default |
 | 3 | `dir` | The ssh directory, `keys/`, and their missing parents | Creating; setting the mode to 700 |
 | 3 | `command` | The service command | Writing |
-| 5 | `key` | `IdentityFile` | Creating the key (also creates missing parent directories) |
-| 5 | `keypair` | `<KeyName>` | Registering |
-| 6 | `role` | `<name>` | Creating; tags to add |
-| 6 | `role-policy` | `temt-<policy name>` | Adding, rewriting, deleting; the content difference |
-| 6 | `instance-profile` | `<name>` | Creating; tags to add; the role to put in (swapping out another role if one is there) |
-| 6 | `security-group` | `<name>` | Creating; tags to add |
-| 6 | `ingress` | `PORT` | Rules to add, rules whose description is fixed, rules to delete |
-| 6 | `launch-template` | `<name>-template` | Creating; per-item differences; tags to add; non-default versions to delete |
-| 6 | `association` | `<name>-sshd` | Creating; differences in document, targets, `SshdPorts`, script; tags to add |
-| 7 | `ssh-host` | `<name>` | Adding or rewriting the Host block; the content difference |
-| 7 | `ssh-include` | `~/.ssh/config` | Adding or replacing the `Include` line (creating `~/.ssh` if missing) |
+| 5 | `role` | `<name>` | Creating; tags to add |
+| 5 | `role-policy` | `temt-<policy name>` | Adding, rewriting, deleting; the content difference |
+| 5 | `instance-profile` | `<name>` | Creating; tags to add; the role to put in (swapping out another role if one is there) |
+| 5 | `security-group` | `<name>` | Creating; tags to add |
+| 5 | `ingress` | `PORT` | Rules to add, rules whose description is fixed, rules to delete |
+| 5 | `launch-template` | `<name>-template` | Creating; per-item differences; tags to add; non-default versions to delete |
+| 5 | `association` | `<name>-sshd` | Creating; differences in document, targets, `SshdPorts`, script; tags to add |
+| 6 | `key` | The default login key | Creating it (`ssh-keygen -t ed25519`) |
+| 6 | `ssh-host` | `<name>` | Adding or rewriting the Host block; the content difference |
+| 6 | `ssh-include` | `~/.ssh/config` | Adding or replacing the `Include` line (creating `~/.ssh` if missing) |
 
 Line format:
 
@@ -181,8 +180,8 @@ association is not printed, since it is not a change to the definition. Example:
 `service destroy --svc <svc> [--yes]` (short form `destroy`)
 
 Terminates the instance and deletes the AWS resources `apply` created and the service
-command. The config file, the key, the Host block in `~/.ssh/temt/config`, the key
-pair, and AMIs are kept, and the next `apply` uses them as they are. There is no
+command. The config file, the login key, the Host block in `~/.ssh/temt/config`, and
+AMIs are kept, and the next `apply` uses them as they are. There is no
 `--async`; it always waits for completion.
 
 1. Take the lock and find instances under the same conditions as
@@ -216,8 +215,9 @@ pair, and AMIs are kept, and the next `apply` uses them as they are. There is no
    `~/.local/bin/<name>`. The service command is deleted whatever its content. If the
    known_hosts directory is a symlink, stop without following it
    (`<path> is a symlink; remove it by hand and run destroy again`).
-6. Report what was kept: the key pair `<KeyName>` and the local key, the config file,
-   the Host block, and the latest AMI with `temt:service=<svc>` (if any).
+6. Report what was kept: the config file, the Host block, and the latest AMI with
+   `temt:service=<svc>` (if any). The login key is shared by the services and not
+   listed.
 
 If it fails midway, running the same command again continues from where it stopped.
 
@@ -248,8 +248,6 @@ skipped and exits with code 1.
 | `REGION` | yes | `AwsRegion` |
 | `IMAGE` | yes | `ImageId` |
 | `TYPE` | yes | `InstanceType` |
-| `KEYNAME` | | `KeyName` |
-| `IDENTITYFILE` | | `IdentityFile` |
 | `SUBNET` | | `SubnetId` |
 | `INGRESS` | | Number of `[[security-group.ingress]]` |
 | `SSHDPORTS` | | `SshdPorts` joined with `,` |

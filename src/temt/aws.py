@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 PROFILE_ENV = ("AWS_DEFAULT_PROFILE", "AWS_PROFILE")
 # temt が管理していることを示すタグのキー。値はサービス名で、AMI では焼いたサービス
 TAG_SERVICE = "temt:service"
-# temt が作ったキーペアに付けるタグのキー。値はキーペア名
-TAG_KEYPAIR = "temt:keypair"
 # プロファイルを選んでいないときの、環境を知らせる行の表示
 NO_PROFILE = "(none)"
 # 読めない時刻の表示

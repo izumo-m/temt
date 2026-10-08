@@ -5,8 +5,8 @@
 書く。instance show（短縮形 status）は status の module が持つ。次の apply が
 何を変えるかは diff が出すので、ここでは設定ファイルと比べない。
 
-項目のラベルは、設定ファイルから来る 5 つ（ImageId、InstanceType、KeyName、
-SubnetId、VolumeSize）だけ設定ファイルのキーにし、temt が決める項目は平たい言葉にする。
+項目のラベルは、設定ファイルから来る 4 つ（ImageId、InstanceType、SubnetId、
+VolumeSize）だけ設定ファイルのキーにし、temt が決める項目は平たい言葉にする。
 どの項目が設定ファイルから来るかが、名前で分かるようにするためである。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
@@ -82,7 +82,6 @@ def _show_default(
         ("version", f"{number} (created {aws.when(version.get('CreateTime'))})"),
         ("ImageId", _text(data["ImageId"])),
         ("InstanceType", _text(data["InstanceType"])),
-        ("KeyName", _text(data["KeyName"])),
         ("VolumeSize", _text(resources.volume_size(data))),
         ("SubnetId", _subnet(ec2, interface.get("SubnetId"))),
         ("security groups", _text(" ".join(interface.get("Groups") or []))),

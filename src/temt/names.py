@@ -44,19 +44,6 @@ USER_NAME_RULE = (
 # 指定が無いときに install と uninstall を実行するユーザー
 ROOT_USER = "root"
 
-# temt が手元の鍵のファイル名にするキーペア名。英数字で始まり、英数字、.、_、- が
-# 続く。/ などを入れさせず、keys/ の外を指せないようにする。.pub で終わる名前は、
-# 他のキーペアの公開鍵のファイル名とぶつかるので使えない
-KEY_NAME_RE = re.compile(r"(?!.*\.pub$)[A-Za-z0-9][A-Za-z0-9._-]*")
-# 長さの上限。ファイル名の上限 255 バイトから、公開鍵に付く .pub の 4 文字を引く。
-# AWS の上限 255 より小さい
-KEY_NAME_MAX = 251
-# keypair show が、引数をキーペア名でなくファイルとみなす印。キーペア名には使えない
-PATH_MARK = "/"
-KEY_NAME_RULE = (
-    f"must start with a letter or digit, use only letters, digits, '.', '_', and '-', "
-    f"not end with '.pub', and be at most {KEY_NAME_MAX} characters"
-)
 
 # インスタンス ID。i- と、8 桁か 17 桁の小文字の 16 進数
 INSTANCE_ID_RE = re.compile(r"i-(?:[0-9a-f]{8}|[0-9a-f]{17})")
@@ -191,11 +178,6 @@ def bin_dir() -> Path:
 def keys_dir() -> Path:
     """鍵を置くディレクトリ。"""
     return ssh_dir() / "keys"
-
-
-def is_key_name(name: str) -> bool:
-    """temt が手元の鍵のファイル名にしてよいキーペア名か。"""
-    return len(name) <= KEY_NAME_MAX and KEY_NAME_RE.fullmatch(name) is not None
 
 
 def is_label(name: str) -> bool:

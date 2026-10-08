@@ -26,7 +26,6 @@ from temt import (
     home,
     images,
     ingress,
-    keypairs,
     manifest,
     services,
     sg,
@@ -34,16 +33,16 @@ from temt import (
     terminate,
 )
 from temt.msg import UsageError
-from temt.names import INSTANCE_ID_RULE, KEY_NAME_RULE, LABEL_RULE, USER_NAME_RULE, Service
+from temt.names import INSTANCE_ID_RULE, LABEL_RULE, USER_NAME_RULE, Service
 
 SVC = ["--svc", "dev-main"]
 
 
 def positional(command: str) -> list[str]:
-    """動詞の後ろに付ける位置引数。キーペア名、AMI、アプリ ID、キー、値、受信規則の
-    ポートを取るものには、それを付ける。
+    """動詞の後ろに付ける位置引数。AMI、アプリ ID、キー、値、受信規則のポートを取るものには、
+    それを付ける。
     """
-    if command in (*cli.KEY_COMMANDS, *cli.IMAGE_COMMANDS):
+    if command in cli.IMAGE_COMMANDS:
         return ["temt"]
     if command in cli.TARGET_COMMANDS:
         return ["jupyter"]
@@ -56,7 +55,7 @@ def positional(command: str) -> list[str]:
 
 def needs_service(command: str) -> bool:
     """--svc が要るコマンドか。"""
-    return command not in (*cli.NO_SERVICE_COMMANDS, *cli.OPTIONAL_SERVICE_COMMANDS)
+    return command not in cli.OPTIONAL_SERVICE_COMMANDS
 
 
 def service_args(command: str) -> list[str]:
@@ -90,14 +89,9 @@ def test_command_form(args: list[str], command: str) -> None:
 def test_every_command_has_a_form(command: str) -> None:
     """表の漏れを見つける。どのコマンドも <対象> <動詞> で打てる。
 
-    --svc が要るか、省けるか、付けられないかで、打ち方が決まる。
+    --svc が要るか、省けるかで、打ち方が決まる。どのコマンドも --svc を付けられる。
     """
     args = [*command.split(), *positional(command)]
-    if command in cli.NO_SERVICE_COMMANDS:
-        assert cli.parse(args).service is None
-        with pytest.raises(UsageError, match="key pairs belong to no service"):
-            cli.parse([*args, *SVC])
-        return
     if command in cli.OPTIONAL_SERVICE_COMMANDS:
         assert cli.parse(args).service is None
     else:
@@ -106,10 +100,8 @@ def test_every_command_has_a_form(command: str) -> None:
     assert cli.parse([*args, *SVC]).service == Service("dev-main")
 
 
-def test_every_command_takes_the_service_in_one_way() -> None:
-    """--svc を付けられないコマンドと省けるコマンドは重ならない。"""
-    assert not set(cli.NO_SERVICE_COMMANDS) & set(cli.OPTIONAL_SERVICE_COMMANDS)
-    assert set(cli.NO_SERVICE_COMMANDS) | set(cli.OPTIONAL_SERVICE_COMMANDS) <= set(cli.COMMANDS)
+def test_the_commands_that_may_leave_out_the_service_are_commands() -> None:
+    assert set(cli.OPTIONAL_SERVICE_COMMANDS) <= set(cli.COMMANDS)
 
 
 def test_short_forms_and_targets_do_not_overlap() -> None:
@@ -185,6 +177,9 @@ def test_options_go_anywhere(args: list[str]) -> None:
         ),
         # 枠としては決まっているが、まだ実装していない対象
         (["role", "show", *SVC], "unknown command: role"),
+        # keypair という対象は無い
+        (["keypair", "list"], "unknown command: keypair"),
+        (["keypair", "list", *SVC], "unknown command: keypair"),
         # トップレベルの show は無い
         (["show", "template", *SVC], "unknown command: show"),
         (["show", "instance", *SVC], "unknown command: show"),
@@ -381,11 +376,14 @@ def test_the_proxy_command_in_the_ssh_config_is_parsed(home_dir: Path) -> None:
     _ = home_dir
     words = home._proxy_command(Service("dev-main")).split()
     at = words.index("temt")
-    request = cli.parse([word.replace("%p", "2222") for word in words[at + 1 :]])
-    assert (request.command, request.service, request.port) == (
+    # シェルが外す引用符も外して渡す
+    tokens = {"%p": "2222", "'%r'": "ubuntu"}
+    request = cli.parse([tokens.get(word, word) for word in words[at + 1 :]])
+    assert (request.command, request.service, request.port, request.user) == (
         cli.SSH_PROXY,
         Service("dev-main"),
         2222,
+        "ubuntu",
     )
 
 
@@ -488,10 +486,6 @@ def test_the_usage_of_a_target_marks_the_service_option() -> None:
     assert "  instance start --svc <svc> [--async]" in cli.usage("instance")
     assert "  instance list [--svc <svc>] [--format <columns>]" in cli.usage("instance")
     assert "  app list [--svc <svc>] [--format <columns>]" in cli.usage("app")
-    text = cli.usage("keypair")
-    assert "--svc" not in text
-    assert "temt-<svc>" not in text
-    assert "short form:" not in text
 
 
 def test_the_usage_of_a_target_has_only_its_notes() -> None:
@@ -522,7 +516,7 @@ def test_help_after_a_value_option_is_its_value() -> None:
             "instance",
         ),
         (["temt", "deploy", *SVC], "deploy: missing app id or path", "app"),
-        (["temt", "keypair", "--format"], "missing value for --format", "keypair"),
+        (["temt", "instance", "--format"], "missing value for --format", "instance"),
         (
             ["temt", "service", "list", "--format", "NOPE"],
             "unknown column in --format: NOPE; use "
@@ -544,6 +538,7 @@ def test_usage_error_after_a_target_prints_its_usage(
     ("argv", "error"),
     [
         (["temt", "pause", "--svc", "dev-main"], "unknown command: pause"),
+        (["temt", "keypair", "list"], "unknown command: keypair"),
         (["temt", "--svc"], "missing value for --svc"),
         (["temt", "--svc", "app"], "missing command"),
     ],
@@ -758,8 +753,8 @@ def test_a_format_goes_anywhere() -> None:
         (["service", "list", "--format"], "service list: missing value for --format"),
         (["ami", "list", "--format", ""], "ami list: missing value for --format"),
         (
-            ["keypair", "list", "--format", "ID", "--format", "TYPE"],
-            "keypair list: repeated argument: --format",
+            ["ami", "list", "--format", "ID", "--format", "NAME"],
+            "ami list: repeated argument: --format",
         ),
         (["instance", "list", "dev-main"], "instance list: unexpected argument: dev-main"),
         (["status", *SVC, "--format", "ID"], "status: unexpected argument: --format"),
@@ -1093,27 +1088,6 @@ def test_main_says_where_the_profile_can_be_chosen_without_a_service(
     assert capsys.readouterr().err.endswith("; give --profile or set AWS_PROFILE\n")
 
 
-def test_keypair_commands_take_a_name() -> None:
-    request = cli.parse(["--region", "us-east-1", "keypair", "delete", "work.key", "--yes"])
-    assert (request.command, request.service, request.region, request.key, request.yes) == (
-        cli.KEYPAIR_DELETE,
-        None,
-        "us-east-1",
-        "work.key",
-        True,
-    )
-    assert cli.parse(["keypair", "list"]).key is None
-    assert cli.parse(["keypair", "create", "a_1-B"]).key == "a_1-B"
-
-
-def test_keypair_show_takes_a_file() -> None:
-    """show の引数はキーペア名の規則を問わない。/ があればファイルとして扱う。"""
-    assert cli.parse(["keypair", "show", "~/.ssh/id_ed25519"]).key == "~/.ssh/id_ed25519"
-    assert cli.parse(["keypair", "show", "my key"]).key == "my key"
-    # ファイルの名前は、UTF-8 として読めないバイトを含んでもよい
-    assert cli.parse(["keypair", "show", "./a\udcffb"]).key == "./a\udcffb"
-
-
 def test_ami_delete_refuses_what_aws_cannot_take() -> None:
     """UTF-8 として読めないバイトを含む名前は、AWS に送れないので先に断る。"""
     with pytest.raises(UsageError) as caught:
@@ -1146,58 +1120,8 @@ def test_main_with_stderr_closed_still_exits_with_the_code() -> None:
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["keypair", "create"], "keypair create: missing key pair name"),
-        (["keypair", "delete", "--yes"], "keypair delete: missing key pair name"),
-        (["keypair", "show"], "keypair show: missing key pair name or file"),
-        (["keypair", "create", ""], "keypair create: missing key pair name"),
-        (
-            ["keypair", "create", "../x"],
-            f"keypair create: the key pair name {KEY_NAME_RULE}: ../x",
-        ),
-        (
-            ["keypair", "delete", ".hidden"],
-            f"keypair delete: the key pair name {KEY_NAME_RULE}: .hidden",
-        ),
-        (
-            ["keypair", "create", "a" * 252],
-            f"keypair create: the key pair name {KEY_NAME_RULE}: {'a' * 252}",
-        ),
-        (
-            ["keypair", "delete", "work.pub"],
-            f"keypair delete: the key pair name {KEY_NAME_RULE}: work.pub",
-        ),
-        (["keypair", "create", "a", "b"], "keypair create: unexpected argument: b"),
-        (["keypair", "show", "a", "--yes"], "keypair show: unexpected argument: --yes"),
-        (["keypair", "list", "a"], "keypair list: unexpected argument: a"),
-        (
-            ["keypair", "show", "a\udcffb"],
-            "keypair show: the key pair name is not valid UTF-8: a?b",
-        ),
-        (
-            ["keypair", "list", *SVC],
-            "keypair list: --svc is not allowed; key pairs belong to no service",
-        ),
-        (
-            ["keypair", "show", "temt", *SVC],
-            "keypair show: --svc is not allowed; key pairs belong to no service",
-        ),
-    ],
-)
-def test_keypair_arguments_rejected(args: list[str], message: str) -> None:
-    with pytest.raises(UsageError) as caught:
-        cli.parse(args)
-    assert str(caught.value) == message
-
-
-@pytest.mark.parametrize(
-    ("args", "message"),
-    [
         (["\x1b[2J"], "unknown command: ?[2J"),
         (["start", "--\x1b[2J", *SVC], "start: unknown option: --?[2J"),
-        (
-            ["keypair", "create", "\x1b[2J"],
-            f"keypair create: the key pair name {KEY_NAME_RULE}: ?[2J",
-        ),
         (
             ["app", "deploy", "./\x1b[2J", *SVC],
             f"app deploy: the app id {LABEL_RULE}: ?[2J (the last part of ./?[2J)",
@@ -1209,37 +1133,6 @@ def test_arguments_are_shown_safely(args: list[str], message: str) -> None:
     with pytest.raises(UsageError) as caught:
         cli.parse(args)
     assert str(caught.value) == message
-
-
-def test_main_runs_the_keypair_commands(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, str | None, str | None, bool]] = []
-
-    def listed(region: str | None, spec: str | None) -> None:
-        seen.append(("list", spec, region, False))
-
-    def shown(key: str, region: str | None) -> None:
-        seen.append(("show", key, region, False))
-
-    def created(key: str, region: str | None) -> None:
-        seen.append(("create", key, region, False))
-
-    def deleted(key: str, region: str | None, *, yes: bool) -> None:
-        seen.append(("delete", key, region, yes))
-
-    monkeypatch.setattr(keypairs, "list_keypairs", listed)
-    monkeypatch.setattr(keypairs, "show", shown)
-    monkeypatch.setattr(keypairs, "create", created)
-    monkeypatch.setattr(keypairs, "delete", deleted)
-    assert cli.main(["temt", "--region", "us-east-1", "keypair", "list", "--format", "ID"]) == 0
-    assert cli.main(["temt", "keypair", "show", "./key"]) == 0
-    assert cli.main(["temt", "keypair", "create", "work"]) == 0
-    assert cli.main(["temt", "keypair", "delete", "work", "--yes"]) == 0
-    assert seen == [
-        ("list", "ID", "us-east-1", False),
-        ("show", "./key", None, False),
-        ("create", "work", None, False),
-        ("delete", "work", None, True),
-    ]
 
 
 def test_app_commands_take_an_app_id_a_key_and_a_value() -> None:
