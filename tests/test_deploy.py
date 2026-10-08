@@ -737,6 +737,7 @@ def test_deploy_tells_when_ssh_fails_while_checking_the_user(
 
     monkeypatch.setattr(proc, "read", failing)
     ready(aws_stubs)
+    no_record(aws_stubs)
     with pytest.raises(TemtError, match=f"^cannot reach {INSTANCE} with 'ssh {NAME}'; nothing"):
         deploy.run(configured, "jupyter", user="ubuntu", baking=False, yes=False)
     aws_stubs.done()
@@ -747,9 +748,50 @@ def test_deploy_stops_before_sending_when_the_user_is_not_there(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
+    no_record(aws_stubs)
     with pytest.raises(TemtError, match=f"^no user nobody2 on {INSTANCE} \\(exit 1\\); nothing"):
         deploy.run(configured, "jupyter", user="nobody2", baking=False, yes=False)
     aws_stubs.done()
+    assert ssh.calls == []
+
+
+@pytest.mark.parametrize(
+    ("removed", "given"),
+    [(None, "root"), (INSTANCE, "root"), (None, None)],
+    ids=["deployed", "removed but in the ami", "manifest"],
+)
+def test_deploy_refuses_another_user_while_a_record_is_left(
+    aws_stubs: Stubs,
+    configured: Service,
+    jupyter: Path,
+    ssh: Ssh,
+    removed: str | None,
+    given: str | None,
+) -> None:
+    """記録が残っている間は、記録の user と違うユーザーで入れ直さない。
+
+    焼いていない版を失って AMI の版に戻ったとき、app remove が別のユーザーで uninstall を
+    実行しないようにする。manifest.toml の user を変えた版も同じ。
+    """
+    if given is None:
+        (jupyter / "manifest.toml").write_text(MANIFEST + 'user = "nobody"\n', encoding="utf-8")
+    ready(aws_stubs)
+    value = {"name": "Jupyter Lab", "version": "1.2", "user": "ubuntu"}
+    if removed is not None:
+        value["removed"] = removed
+    aws_stubs.ssm.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": RECORD, "Value": json.dumps(value)}},
+        {"Name": RECORD},
+    )
+    shown = given or "nobody"
+    with pytest.raises(TemtError) as caught:
+        deploy.run(configured, "jupyter", user=given, baking=False, yes=False)
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"jupyter was deployed as ubuntu ({RECORD}), not {shown}; deploy it as ubuntu, or "
+        "remove it first to change the user (and bake, if it is in the AMI); nothing was changed"
+    )
     assert ssh.calls == []
 
 

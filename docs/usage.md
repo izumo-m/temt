@@ -1025,7 +1025,8 @@ temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明�
 `install` は、アプリの `manifest.toml` の `user` が指すユーザーで実行され、書いて
 いなければ root で実行される。`--user` を付ければ、`manifest.toml` の `user` より
 優先して、そのユーザーで実行する。ホームに入れるもの（mise など）は、root で入れると
-`/root` の下に入る。
+`/root` の下に入る。入れたあとにユーザーを変えるには、いったん外してから入れ直す
+（AMI に焼いてあれば、外したあと焼く）。
 
     temt-<svc> deploy ./jupyter --user ubuntu
 

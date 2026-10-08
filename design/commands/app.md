@@ -200,7 +200,12 @@ uses, such as S3 buckets, either. An app is one directory:
 
 The instance user that runs `install` is the `--user` value, else `user` in
 `manifest.toml`, else root. `uninstall` runs as the recorded `user` (see
-[`app remove`](#app-remove) step 1). A user name starts with a lowercase letter or `_`,
+[`app remove`](#app-remove) step 1). While a record is left, including one with `removed`,
+`deploy` refuses another user (`<app ID> was deployed as <user> (<record>), not <user>;
+...`). Otherwise, if an unbaked version deployed as another user were lost, the instance
+would come back from the AMI with the baked version, and `app remove` would run its
+`uninstall` as the wrong user. To change the user, remove the app first, and bake if it
+is in the AMI. A user name starts with a lowercase letter or `_`,
 continues with lowercase letters, digits, `_`, and `-`, and has at most 32 characters; a
 name that breaks the rule is a usage error or an error in `manifest.toml`. A non-root user
 runs the script through `sudo -n -H -u <user>`, so `HOME` is that user's home and `PATH`
@@ -252,10 +257,13 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
    and a hint could not tell `AWS_PROFILE` from `AwsProfile` for the user. The
    `ProxyCommand`'s waiting notices and ssh's errors go to stderr as they are.
 
+   Read the previous record. If it has a `user` other than the one that would run
+   `install`, exit without changing anything ([Users](#users)).
+
    If the user that runs `install` is not root, check with `id -u` that the user exists on
    the instance; if not, exit without changing anything.
 
-   Read the previous record, decide the option values to use, and report each on one
+   Decide the option values to use, and report each on one
    line with its source. Check that the record fits in an SSM parameter, and pack the
    directory into a tar.gz. If the record cannot be read from SSM (no permission, etc.),
    exit without changing anything, even with `--reset`.

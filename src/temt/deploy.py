@@ -307,6 +307,23 @@ def _previous(ssm: SSMClient, name: str) -> Record | None:
     return app.parse_record(name, str(found.get("Value") or ""))
 
 
+def _same_user(app_id: str, name: str, before: Record | None, user: str) -> None:
+    """記録の user と違うユーザーで入れ直さない。
+
+    app remove は記録の user で uninstall を実行する。版の間でユーザーを変えると、焼いて
+    いない版を失って AMI の古い版に戻ったとき、記録の user が AMI の版のものでなくなる。
+    記録が残っている間（AMI に焼いてあって外した removed も含む）は、ユーザーを変えさせない。
+    """
+    recorded = before.fields.get("user") if before is not None else None
+    if recorded is None or recorded == user:
+        return
+    raise TemtError(
+        f"{app_id} was deployed as {table.printable(recorded)} ({name}), not {user}; deploy it "
+        f"as {table.printable(recorded)}, or remove it first to change the user (and bake, if "
+        "it is in the AMI); nothing was changed"
+    )
+
+
 def _choose(
     app_id: str,
     manifest: Manifest,
@@ -451,8 +468,9 @@ def run(
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "deploy")
         _reach(service, one)
-        _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user")
         before = _previous(ssm, record_name)
+        _same_user(app_id, record_name, before, user)
+        _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user")
         # このインスタンスから外したアプリは、外す前のオプションを引き継がない。焼いた版は
         # AMI に残っているので、_new_record は引き継ぐ
         removed = before is not None and before.fields.get("removed") == one.id
