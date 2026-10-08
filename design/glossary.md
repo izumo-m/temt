@@ -18,7 +18,6 @@ avoid the ones marked "not".
 | ssh directory | ssh ディレクトリ、`TEMT_SSH_DIR` のディレクトリ | `~/.ssh/temt` by default |
 | service command (`~/.local/bin/<name>`) | サービスのコマンド | |
 | local, on the client | 手元 | The user's side, as opposed to the instance or AWS |
-| machine (countable) | マシン | Not 手元 when counting (複数のマシン) |
 | environment (account and region) | 環境 | |
 | profile | プロファイル | AWS profile |
 | region | リージョン | |

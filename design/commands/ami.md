@@ -80,7 +80,7 @@ AWS's reason is shown. Even when creation fails the instance is left stopped, an
 resumes it without using the template, so the service stays usable.
 
 The trade-off: for a short time between the AMI becoming `available` and the template
-being pointed at it, no template refers to the new AMI. `ami prune` on the same machine
+being pointed at it, no template refers to the new AMI. `ami prune`
 takes the service's lock before deleting, so it does not delete the AMI in that window
 ([`ami prune`](#ami-prune)).
 
@@ -183,10 +183,10 @@ stop after the confirmation.
    the reason and continue with the rest; at the end, list all kept ones and exit with an
    error.
    1. Take the lock of the service named by the AMI's `temt:service`. If another command
-      holds it, it cannot be taken, so keep the AMI. If this machine has no known_hosts
+      holds it, it cannot be taken, so keep the AMI. If there is no known_hosts
       directory for the service (where the lock file lives), no command for that service
-      is running on this machine, so proceed without the lock. Do not create the
-      directory, so as not to add directories for services baked on other machines. If
+      is running, so proceed without the lock. Do not create the directory, so as not to
+      add directories for services that have none (an AMI can outlive its service). If
       the value does not follow the service name rule, temt commands cannot handle that
       service, so also proceed without the lock.
    2. Re-read every version of every template as in step 2. If a version refers to the
@@ -205,8 +205,8 @@ from Ubuntu 24.04.
 
 A concurrent `bake`'s new AMI is `pending` while `bake` waits, so it is not a candidate.
 For the short time between it becoming `available` and `bake` pointing a template at
-it, no template refers to it, but `bake` holds the lock throughout, so `ami prune` run
-from the same machine does not delete it: either the lock cannot be taken and the AMI is
+it, no template refers to it, but `bake` holds the lock throughout, so `ami prune` does not
+delete it: either the lock cannot be taken and the AMI is
 kept, or the lock is taken after `bake` pointed the template and released the lock, and
 the re-read template refers to it, so it is kept (step 4).
 

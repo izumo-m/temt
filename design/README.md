@@ -62,10 +62,5 @@ baked, an unused instance terminates itself
 
 ## Premises
 
-- The config file and the defaults file are the definition of a service shared as IaC:
-  they are kept in sync across the machines that use them, by whatever means the user
-  chooses (git, NFS, ...), which temt does not manage. These files drifting apart
-  between machines is not a design issue and not a review finding.
 - Rare races from concurrent runs or from AWS's eventual consistency are acceptable
-  when `status` shows the result and running the command again converges. Races caused
-  by operating the same service from another PC are out of scope for review.
+  when `status` shows the result and running the command again converges.

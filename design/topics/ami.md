@@ -29,8 +29,8 @@ made (`available` or `failed`) that no version of any launch template points at,
 deletes their snapshots. `ami delete`
 deletes the one AMI given by ID or name.
 
-`bake` points the template at the AMI only after it is `available`; `ami prune` run on
-the same machine does not delete an AMI in that window ([`ami
+`bake` points the template at the AMI only after it is `available`; `ami prune` does not
+delete an AMI in that window ([`ami
 prune`](../commands/ami.md#ami-prune)).
 
 ## Selecting

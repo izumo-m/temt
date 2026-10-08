@@ -5,13 +5,10 @@ command with `--svc` reads it; `service list` without `--svc` reads every
 `<svc>.toml`. The format, keys and defaults, and the rules of what `apply` writes are
 in [docs/conf.md](../docs/conf.md).
 
-The config file is the definition of a service shared by several machines, so it holds
-no per-machine ssh route; the environment variable `TEMT_LOGIN` gives that
-([commands/ssh.md](commands/ssh.md#routes)). The AWS
-profile can be written in `AwsProfile`, but when it differs per machine, leave
-`AwsProfile` unset and set `AWS_PROFILE` on each machine. `--profile` does not fit that
-case: the ssh ProxyCommand never gets it (`proxy` uses `AwsProfile`, else the
-environment, which ssh passes on), and `apply --profile` writes it to `AwsProfile`.
+The config file holds no ssh route, which depends on the client's network; the
+environment variable `TEMT_LOGIN` gives that ([commands/ssh.md](commands/ssh.md#routes)).
+The ssh ProxyCommand never gets `--profile`: `proxy` uses `AwsProfile`, else the
+environment, which ssh passes on.
 
 Commands with `--svc` other than `apply` exit when the file is missing, telling the
 user to run `apply` (`no config file: <path>; run 'temt apply --svc <svc>' first`).

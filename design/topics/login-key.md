@@ -7,7 +7,7 @@ Instance Connect (`send-ssh-public-key`), right before handing the connection to
 60 seconds, and ssh authenticates with it right after.
 
 - Nothing about the key is kept in AWS, so there is nothing to register per region or
-  account, and machines with different keys do not conflict.
+  account.
 - Changing the key needs no new instance: the next connection sends the new one.
 - Instance Connect does not edit `authorized_keys`. Keys already there (for example in
   an AMI baked from an instance launched with a key pair) keep working; an instance

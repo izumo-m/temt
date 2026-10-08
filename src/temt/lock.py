@@ -54,9 +54,9 @@ def hold(service: Service) -> Generator[None]:
 def try_hold(service: Service) -> Generator[bool]:
     """ロックを取れれば取って持ち、続けてよいかを持たせる。他が持っていれば False。
 
-    ami prune が使う。known_hosts のディレクトリが無ければ、このマシンではそのサービスの
-    コマンドが動いていないので、ロックを取らずに True とする。ディレクトリは作らない。
-    ami prune は他のマシンで焼いた AMI も扱うので、知らないサービスのディレクトリを
+    ami prune が使う。known_hosts のディレクトリが無ければ、そのサービスのコマンドは
+    動いていないので、ロックを取らずに True とする。ディレクトリは作らない。ami prune
+    はサービスより長く残った AMI も扱うので、ディレクトリの無いサービスの分を
     増やさないためである。
     """
     directory = service.known_hosts_dir

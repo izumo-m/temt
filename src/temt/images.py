@@ -15,8 +15,8 @@ temt の AMI は、自分のアカウントにあって temt:service タグを�
 ami prune と force なしの ami delete は、bake が待っている pending の AMI を消さない。
 bake は AMI が available になってからテンプレートを向けるので、その短い間の AMI は
 どのテンプレートからも指されない。ami prune は、確認の後、AMI を 1 つ消すたびに
-その AMI のサービスのロックを取り、テンプレートを読み直してから消すので、同じマシンで
-並行する bake の AMI は消さない。取れなければ、その AMI を残して次へ進む。ami delete
+その AMI のサービスのロックを取り、テンプレートを読み直してから消すので、並行する
+bake の AMI は消さない。取れなければ、その AMI を残して次へ進む。ami delete
 はロックを取らない。
 
 ami list の表は table が、ami prune と ami delete の一覧は msg が標準出力に書き、
