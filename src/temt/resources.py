@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from botocore.exceptions import ClientError
 
-from temt import aws, change, conf, msg, policy, sshd, table, wait
+from temt import aws, change, conf, msg, policy, sshd, table
 from temt.aws import error_code, field
 from temt.change import ADD, ARROW, REMOVE, UPDATE, Change
 from temt.msg import TemtError
@@ -69,13 +69,11 @@ NO_SUCH_GROUP = "InvalidGroup.NotFound"
 NO_SUCH_ASSOCIATION = "AssociationDoesNotExist"
 # まだ何かが付いていて消せないときに IAM が返す誤りの名前
 DELETE_CONFLICT = "DeleteConflict"
-# 終了したインスタンスのネットワークインターフェースがまだセキュリティグループに
-# 付いているときに、削除が返す誤りの名前。外れるまで繰り返せば消せる
+# セキュリティグループにまだネットワークインターフェースが付いているか、他から参照されて
+# いるときに、削除が返す誤りの名前
 DEPENDENCY_VIOLATION = "DependencyViolation"
 # delete-launch-template-versions に 1 回で渡せるバージョンの数の上限
 VERSIONS_PER_CALL = 200
-# その待ち合わせの締め切り（秒）。外れるのはふつう数十秒以内なので、余裕を見る
-GROUP_DEADLINE = 120
 # EC2 が、作ったばかりのインスタンスプロファイルをまだ見つけられないときの誤り。
 # update は起動テンプレートより先にインスタンスプロファイルを揃えるので、この誤りは
 # IAM の反映待ちであり、待てば消える
@@ -1620,37 +1618,27 @@ def delete_parameters(ssm: SSMClient, service: Service) -> None:
 def _delete_group(ec2: EC2Client, service: Service, group_id: str) -> None:
     """セキュリティグループを 1 つ消す。
 
-    終了したインスタンスのネットワークインターフェースが外れるまで、削除は
-    DependencyViolation で失敗する。外れるのを締め切りまで待つ。他のセキュリティ
-    グループの規則などが参照していても同じ誤りになり、こちらは待っても消えない。
-    AWS の文では見分けられないので、最初の 1 回にその文をそのまま出し、待っていることを
-    続けて知らせる。待ちきれずに終わっても、原因はその行で分かる。
+    destroy はインスタンスが terminated になるまで待つので、そのネットワーク
+    インターフェースはその時点で外れている（実機で確かめた）。外れていなければ削除は
+    DependencyViolation で断られる。他のセキュリティグループの規則などが参照していても
+    同じ誤りになり、AWS の文では見分けられない。どちらも待たずに、AWS の文に両方の
+    直し方を添えて止める。destroy はやり直すと続きから進む。
     """
-    stage = f"the network interfaces to leave the security group {group_id}"
-    told = False
-
-    def look() -> str | None:
-        nonlocal told
-        try:
-            _ = ec2.delete_security_group(GroupId=group_id)
-        except ClientError as e:
-            code = error_code(e)
-            if code == DEPENDENCY_VIOLATION:
-                if not told:
-                    msg.info(f"delete-security-group {group_id}: {table.aws_error(e)}")
-                    minutes = GROUP_DEADLINE // 60
-                    msg.info(
-                        f"retrying until the network interfaces leave the security group "
-                        f"{group_id} (up to {minutes} minutes)"
-                    )
-                    told = True
-                return None
-            if code != NO_SUCH_GROUP:
-                raise
-            return ABSENT
-        return DELETED
-
-    state = wait.until(GROUP_DEADLINE, stage, look)
+    try:
+        _ = ec2.delete_security_group(GroupId=group_id)
+    except ClientError as e:
+        code = error_code(e)
+        if code == DEPENDENCY_VIOLATION:
+            raise TemtError(
+                f"cannot delete the security group {group_id}: {table.aws_error(e)}; "
+                "if its instances were just terminated, run destroy again; otherwise remove "
+                "what uses it and run destroy again"
+            ) from None
+        if code != NO_SUCH_GROUP:
+            raise
+        state = ABSENT
+    else:
+        state = DELETED
     msg.info(f"security group {service.name} ({group_id}): {state}")
 
 

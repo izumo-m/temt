@@ -81,7 +81,6 @@ waiting for `.config.lock` is not a stage here and has none either; see
 | From requesting resume until `stopping` is no longer seen (`start`) | 10 minutes |
 | From requesting resume until `stopped` is no longer seen (`start`) | 1 minute |
 | Instance is terminated | 10 minutes |
-| A terminated instance's network interface detaches so the security group can be deleted | 2 minutes (usually done within tens of seconds; the rest is margin) |
 
 - A deadline counts from when that stage starts waiting. Past the deadline, temt exits
   saying which stage did not finish.

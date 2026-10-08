@@ -698,86 +698,34 @@ def test_it_needs_yes_when_stdin_is_not_a_terminal(
     aws_stubs.done()
 
 
-def test_it_waits_for_the_network_interfaces_to_detach(
-    aws_stubs: Stubs,
-    configured: Service,
-    clock: Clock,
-    capsys: pytest.CaptureFixture[str],
+def test_it_stops_when_the_security_group_is_still_in_use(
+    aws_stubs: Stubs, configured: Service, clock: Clock
 ) -> None:
-    """ネットワークインターフェースが外れるまで、削除は DependencyViolation で失敗する。"""
+    """待たずに、AWS の文に直し方を添えて止める。IAM には進まない。"""
     no_instance(aws_stubs)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
-    for _ in range(2):
-        aws_stubs.ec2.add_client_error(
-            "delete_security_group",
-            service_error_code=resources.DEPENDENCY_VIOLATION,
-            service_message=f"resource {GROUP} has a dependent object",
-            http_status_code=400,
-            expected_params=THE_GROUP_ID,
-        )
-    group_deleted(aws_stubs)
-    profile_deleted(aws_stubs)
-    role_deleted(aws_stubs)
-    images(aws_stubs)
-
-    destroy.run(configured, yes=True)
-
-    aws_stubs.done()
-    assert clock.slept == [wait.INTERVAL] * 2
-    lines = told(capsys.readouterr().out)
-    # 待っても消えない参照のこともあるので、最初の 1 回だけ AWS の文をそのまま出し、
-    # 続けて待っていることを知らせる
-    start = lines.index(
-        f"delete-security-group {GROUP}: An error occurred (DependencyViolation) when calling "
-        f"the DeleteSecurityGroup operation: resource {GROUP} has a dependent object"
+    aws_stubs.ec2.add_client_error(
+        "delete_security_group",
+        service_error_code=resources.DEPENDENCY_VIOLATION,
+        service_message=f"resource {GROUP} has a dependent object",
+        http_status_code=400,
+        expected_params=THE_GROUP_ID,
     )
-    assert lines[start + 1] == (
-        f"retrying until the network interfaces leave the security group {GROUP} (up to 2 minutes)"
-    )
-    assert sum(line.startswith("delete-security-group ") for line in lines) == 1
-    assert sum(line.startswith("retrying until ") for line in lines) == 1
-    assert f"security group {NAME} ({GROUP}): deleted" in lines
 
-
-def test_it_gives_up_when_the_security_group_keeps_its_interfaces(
-    aws_stubs: Stubs,
-    configured: Service,
-    clock: Clock,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """締め切りを過ぎたら、どの段階が終わらなかったかを述べて終了する。"""
-    monkeypatch.setattr(wait, "INTERVAL", 60)
-    no_instance(aws_stubs)
-    template_deleted(aws_stubs)
-    parameter_deleted(aws_stubs)
-    the_group(aws_stubs, (GROUP, VPC))
-    for _ in range(3):
-        aws_stubs.ec2.add_client_error(
-            "delete_security_group",
-            service_error_code=resources.DEPENDENCY_VIOLATION,
-            http_status_code=400,
-            expected_params=THE_GROUP_ID,
-        )
-
-    with pytest.raises(
-        TemtError,
-        match=(
-            "timed out after 2 minutes waiting for the network interfaces "
-            f"to leave the security group {GROUP}"
-        ),
-    ):
+    with pytest.raises(TemtError) as caught:
         destroy.run(configured, yes=True)
 
     # IAM には 1 つも積んでいないので、先へ進んでいれば Stubber が失敗する
     aws_stubs.done()
-    assert clock.slept == [60, 60]
-
-
-def test_the_deadline_is_the_one_in_the_design() -> None:
-    """セキュリティグループを消せるようになるまで 2 分。"""
-    assert resources.GROUP_DEADLINE == 120
+    assert clock.slept == []
+    assert str(caught.value) == (
+        f"cannot delete the security group {GROUP}: An error occurred (DependencyViolation) "
+        f"when calling the DeleteSecurityGroup operation: resource {GROUP} has a dependent "
+        "object; if its instances were just terminated, run destroy again; otherwise remove "
+        "what uses it and run destroy again"
+    )
 
 
 def test_the_error_codes_are_the_ones_aws_returns() -> None:
@@ -1111,19 +1059,18 @@ def test_it_holds_the_lock_while_it_waits(
         attempts.append(taken(configured))
 
     monkeypatch.setattr(wait, "sleep", probe)
-    no_instance(aws_stubs)
-    template_deleted(aws_stubs)
-    parameter_deleted(aws_stubs)
-    the_group(aws_stubs, (GROUP, VPC))
-    aws_stubs.ec2.add_client_error(
-        "delete_security_group",
-        service_error_code=resources.DEPENDENCY_VIOLATION,
-        http_status_code=400,
-        expected_params=THE_GROUP_ID,
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
-    group_deleted(aws_stubs)
-    profile_deleted(aws_stubs)
-    role_deleted(aws_stubs)
+    inline(aws_stubs)
+    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "shutting-down")), BY_ID
+    )
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
+    )
+    all_deleted(aws_stubs)
     images(aws_stubs)
 
     with deadline(5.0):
