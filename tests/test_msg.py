@@ -102,6 +102,29 @@ def test_confirm_closes_the_line_on_end_of_input(
     assert shown.err == "destroy dev-main? [y/N] \n"
 
 
+class Unreadable(Terminal):
+    """端末の文字コードで読めない答えを返す標準入力のふり。"""
+
+    def readline(self, size: int | None = -1, /) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+def test_confirm_cancels_an_answer_that_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", Unreadable())
+    with pytest.raises(TemtError, match="cancelled"):
+        msg.confirm("destroy dev-main?", yes=False)
+
+
+def test_a_closed_stderr_is_skipped_quietly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """起動したときから標準エラー出力も閉じていれば（>&- 2>&-）、書く先が無いので落ちない。"""
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    msg.info("starting")
+    msg.warn("check this")
+    msg.raw(b"output")
+    msg.flush()
+
+
 class ClosedStdout:
     """読み手が先に閉じた標準出力の代わり。書き出すときに BrokenPipeError を上げる。
 
@@ -148,6 +171,28 @@ def test_a_closed_stdout_is_dropped_quietly(
         os.close(fd)
     assert capsys.readouterr().err == "temt: warning: check this\ntemt: broken\n"
     # 終わるときに Python が書き出し直して誤りを出さないよう、/dev/null に付け替えている
+    assert target.read_bytes() == b""
+
+
+@pytest.mark.parametrize("on_write", [True, False], ids=["write", "flush"])
+def test_a_closed_stderr_is_dropped_quietly(
+    on_write: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2>&1 | head のように標準エラー出力の読み手が先に閉じても、誤りを上げずに進める。"""
+    target = tmp_path / "err"
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT)
+    try:
+        monkeypatch.setattr(sys, "stderr", ClosedStdout(fd, on_write=on_write))
+        msg.warn("check this")
+        msg.info("again")
+        msg.error("broken")
+        _ = os.write(fd, b"after")
+    finally:
+        os.close(fd)
+    assert re.fullmatch(r"\d\d:\d\d:\d\d again\n", capsys.readouterr().out)
     assert target.read_bytes() == b""
 
 

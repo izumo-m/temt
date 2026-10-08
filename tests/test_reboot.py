@@ -49,6 +49,7 @@ SEND = {
 READ_BEFORE = "11111111-0000-4000-8000-000000000000"
 FIRST = "11111111-0000-4000-8000-000000000001"
 SECOND = "11111111-0000-4000-8000-000000000002"
+THIRD = "11111111-0000-4000-8000-000000000003"
 # 再起動を求めた時刻（reboot-instances の応答の時刻）と、その前後の応答の時刻
 REQUESTED = datetime(2026, 9, 28, 2, 0, tzinfo=UTC)
 STALE = REQUESTED - timedelta(minutes=3)
@@ -115,9 +116,9 @@ def sent(stubs: Stubs, command_id: str) -> None:
     stubs.ssm.add_response("send_command", {"Command": {"CommandId": command_id}}, SEND)
 
 
-def invocation(stubs: Stubs, command_id: str, status: str, output: str = "") -> None:
-    """送った Run Command の状態を積む。"""
-    response: dict[str, Any] = {"Status": status}
+def invocation(stubs: Stubs, command_id: str, status: str, output: str = "", **more: str) -> None:
+    """送った Run Command の状態を積む。more は StatusDetails などを足す。"""
+    response: dict[str, Any] = {"Status": status, **more}
     if output:
         response["StandardOutputContent"] = f"{output}\n"
     stubs.ssm.add_response(
@@ -591,6 +592,60 @@ def test_it_sends_another_command_when_one_does_not_read_the_boot_id(
     reboot.run(configured, is_async=False, yes=True)
 
     aws_stubs.done()
+
+
+def test_it_tells_once_how_a_command_failed(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """失敗し続けるときに理由が分かるよう、最初の 1 回だけ AWS の返した様子を出す。"""
+    found(aws_stubs)
+    read_before(aws_stubs)
+    rebooted(aws_stubs)
+    for command_id in (FIRST, SECOND):
+        agent(aws_stubs, "Online")
+        sent(aws_stubs, command_id)
+        invocation(
+            aws_stubs,
+            command_id,
+            "Failed",
+            StatusDetails="Failed",
+            StandardErrorContent="\nNo space left on device\nmore\n",
+        )
+    agent(aws_stubs, "Online")
+    sent(aws_stubs, THIRD)
+    invocation(aws_stubs, THIRD, "Success", AFTER)
+
+    reboot.run(configured, is_async=False, yes=True)
+
+    aws_stubs.done()
+    lines = told(capsys.readouterr().out)
+    failed = [line for line in lines if line.startswith("get-command-invocation ")]
+    assert failed == [
+        f"get-command-invocation {FIRST}: Failed (Failed): No space left on device; "
+        "sending it again"
+    ]
+
+
+def test_it_tells_a_command_that_printed_nothing(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    found(aws_stubs)
+    read_before(aws_stubs)
+    rebooted(aws_stubs)
+    agent(aws_stubs, "Online")
+    sent(aws_stubs, FIRST)
+    invocation(aws_stubs, FIRST, "Success")
+    agent(aws_stubs, "Online")
+    sent(aws_stubs, SECOND)
+    invocation(aws_stubs, SECOND, "Success", AFTER)
+
+    reboot.run(configured, is_async=False, yes=True)
+
+    aws_stubs.done()
+    assert (
+        f"get-command-invocation {FIRST}: Success, but printed nothing; sending it again"
+        in told(capsys.readouterr().out)
+    )
 
 
 def test_another_error_from_send_command_is_not_swallowed(

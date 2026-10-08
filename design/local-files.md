@@ -10,10 +10,17 @@ design/          the design (this directory; English, for Claude)
 docs/            user docs: usage.md, conf.md, apps.md, apps/
 README.md        overview and installation
 CONTRIBUTING.md  rules and steps for developing temt
+SECURITY.md      how to report a vulnerability
+CLAUDE.md        instructions for Claude Code; points to design/ and CONTRIBUTING.md
+LICENSE          MIT license
 pyproject.toml   package and dependency definition; uv reads it
 uv.lock          pinned dependencies of the development environment (uv run)
 mise.toml        versions of python and uv; tasks install, check, check-py314
 ```
+
+`mise run install` runs `uv tool install --python /usr/bin/python3 .`. Running it again
+after editing the sources installs the edited code (verified; a review claimed uv would
+reuse a cached build, which it did not), so CONTRIBUTING.md just says to run it again.
 
 ## Files in the user's home
 

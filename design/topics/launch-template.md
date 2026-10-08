@@ -42,13 +42,21 @@ not know into the template.
 - The template's own tag (`temt:service`) is reconciled separately from versions. If it
   is missing or has a different value, write it, and in that case report the template
   as updated even when the contents are the same.
+- AWS does not fully check the contents when creating a template or version and
+  returns problems as `Warning`. `apply` and `bake` show each as a warning
+  (`launch template <name>: <code>: <message>`). For `InvalidIamInstanceProfile.NotFound`,
+  `apply` adds `(IAM has not propagated it to EC2 yet; the instance profile exists)`: it
+  has just reconciled the profile and EC2 does not see it yet
+  ([commands/instance.md](../commands/instance.md#right-after-apply)). `bake` does not
+  check the profile, which may have been deleted by hand, so it adds nothing.
 - `bake` does not compare: it creates a new version from the default version's contents
   with only `ImageId` replaced, and makes it the default. It calls
   `create-launch-template-version` with the default version as `SourceVersion` and only
   `ImageId` in `LaunchTemplateData`.
 
 After making a new version the default, delete all other versions so the template keeps
-one version. If deletion fails, warn and continue. `bake` does the same. `bake` changes
+one version. AWS takes at most 200 version numbers per call, so they are deleted 200 at a
+time. If deletion fails, warn and continue. `bake` does the same. `bake` changes
 the template only after the new AMI is `available` (steps 7 and 8 of
 [`bake`](../commands/ami.md#bake)).
 

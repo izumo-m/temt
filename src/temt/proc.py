@@ -39,20 +39,24 @@ def run(argv: list[str], stdin: str | None = None) -> str:
     標準出力を受け取るのは、ProxyCommand として動くときに外部コマンドの出力が
     ssh の通信路へ流れ出ないようにするためでもある。stdin を渡せば標準入力に書き、
     渡さなければ標準入力を閉じる。閉じるのは、問いかけを待って止まらないように
-    するためである。
+    するためである。入出力は、Python がファイル名を扱うときと同じく os.fsdecode と
+    os.fsencode で変換する。ssh-keygen の誤りの文は鍵のパスを、公開鍵の行は鍵の
+    コメントを含み、どちらにもロケールの文字コードで読めないバイトが入りうるから
+    である。読めないバイトは対にならないサロゲートになり、os.fsencode で元のバイトに
+    戻せる。表示するときは printable が置き換える。
     """
     done = subprocess.run(
         argv,
-        input=stdin,
+        input=None if stdin is None else os.fsencode(stdin),
         stdin=subprocess.DEVNULL if stdin is None else None,
         capture_output=True,
-        text=True,
         check=False,
     )
+    stdout = os.fsdecode(done.stdout)
     if done.returncode != 0:
-        detail = _one_line(done.stderr) or _one_line(done.stdout) or f"exit {done.returncode}"
-        raise TemtError(f"{argv[0]}: {printable(detail)}")
-    return done.stdout
+        detail = _one_line(os.fsdecode(done.stderr)) or _one_line(stdout)
+        raise TemtError(f"{argv[0]}: {printable(detail or f'exit {done.returncode}')}")
+    return stdout
 
 
 def _feed(pipe: IO[bytes], data: bytes) -> None:

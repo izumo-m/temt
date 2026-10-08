@@ -14,6 +14,7 @@ from temt.names import (
     INSTANCE_ID_RULE,
     KEY_NAME_RULE,
     LABEL_RULE,
+    PATH_MARK,
     PREFIX,
     USER_NAME_RULE,
     Service,
@@ -23,7 +24,7 @@ from temt.names import (
     is_label,
     is_user_name,
 )
-from temt.table import aws_error, printable
+from temt.table import aws_error, os_error, out, printable
 
 # コマンドは <対象> <動詞> の 2 語で表す
 SERVICE_APPLY = "service apply"
@@ -638,6 +639,9 @@ def _key(command: str, typed: str, words: list[str]) -> str:
     key = _one(typed, words, what)
     if command in KEY_NAME_COMMANDS and not is_key_name(key):
         raise UsageError(f"{typed}: the key pair name {KEY_NAME_RULE}: {printable(key)}")
+    if PATH_MARK not in key and not options.is_utf8(key):
+        # AWS に送れない。ファイルなら、Python がファイル名と同じく扱える
+        raise UsageError(f"{typed}: the key pair name is not valid UTF-8: {printable(key)}")
     return key
 
 
@@ -765,7 +769,11 @@ def parse(args: list[str]) -> Request:
     if command in KEY_COMMANDS:
         return replace(request, key=_key(command, typed, words))
     if command in IMAGE_COMMANDS:
-        return replace(request, image=_one(typed, words, "AMI id or name"))
+        image = _one(typed, words, "AMI id or name")
+        if not options.is_utf8(image):
+            # AWS に送れない
+            raise UsageError(f"{typed}: the AMI id or name is not valid UTF-8: {printable(image)}")
+        return replace(request, image=image)
     if command in INSTANCE_ID_COMMANDS:
         return replace(request, instance_ids=_instance_ids(typed, words))
     if command in TARGET_COMMANDS:
@@ -993,7 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
     conf.take_region_env()
     text = _early(argv[1:])
     if text is not None:
-        sys.stdout.write(text)
+        out(text)
         return 0
     try:
         return run(parse(argv[1:]))
@@ -1001,7 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
         msg.error(str(e))
         # --help も --version も無いので、_words の最初の語は、
         # コマンドラインオプションを除いた 1 語めである
-        sys.stderr.write(_usage_for(next(_words(argv[1:]), None)))
+        msg.tell(_usage_for(next(_words(argv[1:]), None)), side=True)
         return e.exit_code
     except TemtError as e:
         msg.error(str(e))
@@ -1011,9 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
         msg.error(f"{e}; reinstall temt")
         return TemtError.exit_code
     except OSError as e:
-        # ファイルやディレクトリの読み書きの失敗。文はパスを含むので、表示できない文字を
-        # 置き換え、プログラム名を付けて知らせる
-        msg.error(printable(str(e)))
+        # ファイルやディレクトリの読み書きの失敗。プログラム名を付けて知らせる
+        msg.error(os_error(e))
         return TemtError.exit_code
     except KeyboardInterrupt:
         # Ctrl-C は端末に ^C だけを出すので、行を閉じてから知らせる

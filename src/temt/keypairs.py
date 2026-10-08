@@ -25,7 +25,7 @@ from botocore.exceptions import ClientError
 from temt import aws, keypair, keys, msg, proc, resources, table
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import exists, is_key_name, keys_dir, tilde
+from temt.names import PATH_MARK, exists, is_key_name, keys_dir, tilde
 from temt.resources import TemplateVersion
 
 if TYPE_CHECKING:
@@ -50,8 +50,6 @@ LIVE_STATES = ["pending", "running", "stopping", "stopped"]
 # 秘密鍵のファイルの、空でない最初の行（-----BEGIN ... PRIVATE KEY-----）の頭と尻
 PRIVATE_BEGIN = "-----BEGIN "
 PRIVATE_END = "PRIVATE KEY-----"
-# keypair show が、引数をキーペア名でなくファイルとみなす印
-PATH_MARK = "/"
 
 COLUMNS = table.Columns(
     defaults=("NAME", "FINGERPRINT", "CREATED", "LOCAL", "USED"),
@@ -219,8 +217,12 @@ def _show_pair(ec2: EC2Client, name: str) -> None:
 
 
 def _first_line(path: Path) -> str:
-    """ファイルの、空でない最初の行。"""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    """ファイルの、空でない最初の行。
+
+    UTF-8 として読めないバイト（鍵のコメントなど）は、ssh-keygen の出力と同じく
+    対にならないサロゲートとして読み、表示するときに printable が置き換える。
+    """
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
@@ -298,48 +300,65 @@ def _show_file(ec2: EC2Client, path: Path) -> None:
 
 
 def create(name: str, region: str | None) -> None:
-    """手元に新しい鍵を作り、キーペアとして登録して temt:keypair を付ける。
+    """手元の keys/<名前> の鍵を、キーペア <名前> として登録し、temt:keypair を付ける。
 
-    手元の keys/<名前> か <名前>.pub が既にあるとき、EC2 に同じ名前のキーペアが既に
-    あるときは、何もせずにエラーにする。AWS が登録を断れば、作った鍵を消して、
-    やり直せるようにする。
+    手元の鍵も EC2 のキーペアも、あればそのまま使い、無ければ作る。途中で止まっても、
+    やり直せば残りを続けられるよう、作った鍵は消さない。EC2 に登録できたか分からない
+    まま止まったとき（botocore が送り直した要求が InvalidKeyPair.Duplicate で返るときも）
+    も、やり直せば一致するキーペアとして終わる。EC2 にあるのに手元に秘密鍵が無いとき、
+    両方あって食い違うときは、何も変えずに止める。
     """
     _ = proc.require(keys.KEYGEN)
     ec2 = aws.environment(region).client("ec2")
     path = _local_key(name)
+    shown = table.printable(tilde(path))
+    pair = _lookup(ec2, name)
     if exists(path):
+        try:
+            public_key = keys.public_key(path)
+        except TemtError as e:
+            raise TemtError(f"cannot read {shown}: {e}") from None
+    elif pair is not None:
         raise TemtError(
-            f"{table.printable(tilde(path))} already exists; choose another name, or set "
-            f"KeyName to {name} and run apply to register the existing key"
+            f"the key pair {name} exists in EC2, but {shown} does not; put its private key "
+            f"there, or run 'temt keypair delete {name}' and create it again"
         )
-    pub = keys.public_path(path)
-    if exists(pub):
-        raise TemtError(f"{table.printable(tilde(pub))} already exists; choose another name")
-    if _lookup(ec2, name) is not None:
-        raise TemtError(f"the key pair {name} already exists in EC2")
-    keys.generate(path, name)
-    msg.info(f"created the key {table.printable(tilde(path))}")
-    public_key = keys.public_key(path)
-    try:
+    else:
+        pub = keys.public_path(path)
+        if exists(pub):
+            raise TemtError(
+                f"{table.printable(tilde(pub))} exists without {shown}; "
+                "remove it to create a new key"
+            )
+        keys.generate(path, name)
+        msg.info(f"created the key {shown}")
+        public_key = keys.public_key(path)
+    mine = keys.fingerprint(public_key)
+    if pair is None:
         result = ec2.import_key_pair(
             KeyName=name,
-            PublicKeyMaterial=public_key.encode(),
+            PublicKeyMaterial=keys.material(public_key),
             TagSpecifications=keypair.tags(name),
         )
-    except ClientError:
-        for one in (path, keys.public_path(path)):
-            one.unlink(missing_ok=True)
-        msg.info(f"removed the key {table.printable(tilde(path))}")
-        raise
-    msg.info(
-        f"imported the key pair {name} ({result.get('KeyPairId')}), {keys.fingerprint(public_key)}"
-    )
+        msg.info(f"imported the key pair {name} ({result.get('KeyPairId')}), {mine}")
+        return
+    want = _fingerprint(pair.get("PublicKey"))
+    if want is None:
+        raise TemtError(f"AWS did not return a readable public key of the key pair {name}")
+    if want != mine:
+        raise TemtError(
+            f"the key pair {name} in EC2 does not match {shown}; "
+            f"'temt keypair show {name}' lists the local keys that match it"
+        )
+    msg.info(f"the key pair {name} ({pair.get('KeyPairId')}) already matches {shown}, {mine}")
 
 
 def delete(name: str, region: str | None, *, yes: bool) -> None:
     """temt:keypair の付いたキーペアと、手元の keys/<名前> と <名前>.pub を消す。
 
-    鍵を作り直しやすくするためのコマンドである。
+    鍵を作り直しやすくするためのコマンドである。どちらも、あれば消し、無ければ
+    飛ばす。どちらも無ければ、そう知らせて終わる。タグの無いキーペアがあれば、手元の
+    鍵も消さずに止める。
 
     使っている起動テンプレートのバージョンと、終了していないインスタンスを警告として
     挙げるが、止めはしない。サービスの KeyName が指していて IdentityFile が既定の
@@ -350,25 +369,27 @@ def delete(name: str, region: str | None, *, yes: bool) -> None:
     """
     ec2 = aws.environment(region).client("ec2")
     pair = _lookup(ec2, name)
-    if pair is None:
-        raise TemtError(f"no key pair named {name}")
-    if not _tagged(pair):
+    if pair is not None and not _tagged(pair):
         raise TemtError(
             f"the key pair {name} has no {aws.TAG_KEYPAIR} tag; "
             "temt deletes only key pairs that it created"
         )
-    pair_id = field(pair, "KeyPairId")
-    users = _users(ec2).get(name)
-    if users:
-        msg.warn(f"the key pair {name} is used by {', '.join(map(str, users))}")
-    live = _instances(ec2, name)
-    if live:
-        msg.warn(
-            f"instances launched with the key pair {name}: {', '.join(live)}; "
-            "you may be unable to log in to them"
-        )
     path = _local_key(name)
     local = [one for one in (path, keys.public_path(path)) if exists(one)]
+    if pair is None and not local:
+        msg.info(f"no key pair {name} in EC2 and no local key; nothing to delete")
+        return
+    pair_id = field(pair, "KeyPairId") if pair is not None else ""
+    if pair is not None:
+        users = _users(ec2).get(name)
+        if users:
+            msg.warn(f"the key pair {name} is used by {', '.join(map(str, users))}")
+        live = _instances(ec2, name)
+        if live:
+            msg.warn(
+                f"instances launched with the key pair {name}: {', '.join(live)}; "
+                "you may be unable to log in to them"
+            )
     if local:
         msg.warn(
             f"{table.printable(tilde(path))} is shared by every region and account; if the key is "
@@ -376,13 +397,19 @@ def delete(name: str, region: str | None, *, yes: bool) -> None:
             "apply there stops with a key mismatch"
         )
     msg.tell("delete:\n")
-    msg.tell(f"  key pair {name} ({pair_id})\n")
+    if pair is not None:
+        msg.tell(f"  key pair {name} ({pair_id})\n")
     for one in local:
         msg.tell(f"  {table.printable(tilde(one))}\n")
-    also = " and its local key" if local else ""
-    msg.confirm(f"delete the key pair {name}{also}?", yes=yes)
-    _ = ec2.delete_key_pair(KeyPairId=pair_id)
-    msg.info(f"deleted the key pair {name} ({pair_id})")
+    if pair is None:
+        question = f"delete the local key of {name}?"
+    else:
+        also = " and its local key" if local else ""
+        question = f"delete the key pair {name}{also}?"
+    msg.confirm(question, yes=yes)
+    if pair is not None:
+        _ = ec2.delete_key_pair(KeyPairId=pair_id)
+        msg.info(f"deleted the key pair {name} ({pair_id})")
     for one in local:
         one.unlink(missing_ok=True)
         msg.info(f"deleted {table.printable(tilde(one))}")

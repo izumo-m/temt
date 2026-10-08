@@ -134,8 +134,9 @@ operations can be typed in this form.
 ### Messages
 
 - Normal output goes to stdout: progress lines, the displays of `status` and the `show`
-  commands, the list of what a command will do before its confirmation, and the output
-  of `install` and `uninstall` during `deploy` and `app remove`.
+  commands, the list of what a command will do before its confirmation, and the stdout
+  of `install` and `uninstall` during `deploy` and `app remove` (their stderr and ssh's
+  go to stderr as they are).
 - Warnings, errors, the usage after a usage error, and the `[y/N]` prompt go to stderr,
   so that they stay on screen when stdout goes to a file or a pipe.
 - Also on stderr, so that stdout holds only the data: the environment line of the
@@ -145,16 +146,21 @@ operations can be typed in this form.
   before a too-many or unknown-ID error, the fingerprints and matching keys after a key
   pair mismatch, the state `bake` leaves before its error, and the newline that closes
   `^C` on an interrupt.
-- If stdout is closed at start (`>&-`), what would go to stdout goes to stderr.
-- `install` and `uninstall` output is read by temt and written to stdout, so that a
-  reader that closes early (`| head`) does not cut them off: the rest is dropped and they
-  run to the end.
+- If stdout is closed at start (`>&-`), messages that would go to stdout go to stderr,
+  and data for other programs (tables, `app get`, diff changes, `--help`, `--version`)
+  is dropped silently, since nobody reads it. If stderr is closed at start (`2>&-`),
+  what would go there is dropped; the exit code is unchanged.
+- The stdout of `install` and `uninstall` is read by temt and written to stdout, so that
+  a reader that closes early (`| head`) does not cut them off: the rest is dropped and
+  they run to the end.
 - Everything `proxy` writes goes to stderr, because as the ProxyCommand its stdout is
   the ssh channel.
 - Before writing to one stream, the other is flushed, so the order holds on a terminal;
   each write is flushed, so progress shows at once through a pipe. Characters the
-  locale cannot encode are written as backslash escapes. If the reader of stdout closes
-  early, the rest is dropped silently.
+  locale cannot encode are written as backslash escapes. If the reader of stdout or
+  stderr closes early (`| head`, `2>&1 | head`), the rest of that stream is dropped
+  silently and the command goes on. The stderr of ssh, and of `install` and `uninstall`
+  through it, is not read by temt, so such a reader may still cut ssh off.
 - Progress lines carry the time; error lines carry the program name.
 - Wording is English, ASCII only.
 - Exception: text that is not temt's own wording is shown as is, Japanese included:
@@ -179,6 +185,31 @@ operations can be typed in this form.
   ([commands/service.md](commands/service.md#diff)) and of `sg diff`
   ([commands/sg.md](commands/sg.md#sg-diff)). So do the usage of `--help` and the
   version of `--version`.
+
+### Bytes that cannot be read
+
+Python reads bytes that its encoding cannot decode (in arguments, environment variables
+and file names) as lone surrogates. temt treats them the same way everywhere:
+
+- Shown (messages, tables, `app get`): replaced by `?`, like other unprintable
+  characters. An `OSError` is shown as its reason and its paths, not as Python's text,
+  which writes paths in `repr` form (`\udcff`).
+- Output of an external command that temt reads (`ssh-keygen`): decoded as file names
+  are, and shown with `?`. The public-key line of `ssh-keygen -y` goes to EC2 as the
+  bytes it printed, since a key comment may hold such bytes; `ssh-keygen -l` is given
+  only the key type and body.
+- Files temt reads (config files, `manifest.toml`, the ssh config): must be UTF-8;
+  otherwise the command stops naming the file. A key file that `keypair show` reads is
+  shown, with `?` for such bytes.
+- Values that would be written to a file or sent to AWS stop the command where they are
+  read, before anything changes: `TEMT_CONF_DIR` and `TEMT_SSH_DIR` (no unprintable
+  characters), the key pair name of `keypair show` and the AMI id or name of
+  `ami delete` (valid UTF-8), and the `app set` value and app options (valid UTF-8).
+  Names checked by a rule (services, apps, key pairs, instance IDs) never hold them.
+  A file path given as an argument may hold them.
+- A `[y/N]` answer that cannot be read is not `y`.
+- temt expects a UTF-8 locale (C included, where Python uses UTF-8). Under a locale with
+  another encoding, it does not crash, but text it writes to files is UTF-8.
 
 ### Exit codes
 
@@ -280,8 +311,9 @@ as absent for most commands. The rules are in
   `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami prune`,
   `ami delete`, `keypair delete`, and `deploy` and `app remove` with `--bake`.
 - `apply` ends without asking if there are no differences.
-- The list of targets goes to stdout and the prompt to stderr; the answer is read from
-  stdin. Any answer other than `y`
+- The list of targets goes to stdout and the prompt to stderr; `stop`, `terminate`, and
+  `reboot` print no separate list and name their targets in the prompt itself
+  (`terminate i-... (running)? [y/N]`). The answer is read from stdin. Any answer other than `y`
   or `Y` ends with exit code 1 without doing anything.
 - `--yes` skips the confirmation. If stdin is not a terminal and `--yes` is not given,
   the command exits saying `--yes` is needed.

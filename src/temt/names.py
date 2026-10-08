@@ -51,6 +51,8 @@ KEY_NAME_RE = re.compile(r"(?!.*\.pub$)[A-Za-z0-9][A-Za-z0-9._-]*")
 # 長さの上限。ファイル名の上限 255 バイトから、公開鍵に付く .pub の 4 文字を引く。
 # AWS の上限 255 より小さい
 KEY_NAME_MAX = 251
+# keypair show が、引数をキーペア名でなくファイルとみなす印。キーペア名には使えない
+PATH_MARK = "/"
 KEY_NAME_RULE = (
     f"must start with a letter or digit, use only letters, digits, '.', '_', and '-', "
     f"not end with '.pub', and be at most {KEY_NAME_MAX} characters"
@@ -90,10 +92,11 @@ def _place(env: str, default: str) -> Path:
     シェルのものと違うからである。
     """
     value = os.environ.get(env) or default
-    if any(char.isspace() or char in FORBIDDEN for char in value):
+    # 表示できない文字には、UTF-8 として読めないバイトも入る。ssh の設定に書けない
+    if any(char.isspace() or char in FORBIDDEN or not char.isprintable() for char in value):
         raise TemtError(
-            f"{env} must not contain whitespace, a quote, a backslash, "
-            f"a percent sign, or a dollar sign: {printable(value)}"
+            f"{env} must not contain whitespace, a quote, a backslash, a percent sign, "
+            f"a dollar sign, or an unprintable character: {printable(value)}"
         )
     path = expand(value)
     if not path.is_absolute():

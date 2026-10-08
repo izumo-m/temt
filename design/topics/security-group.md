@@ -101,8 +101,13 @@ The security group left in the old VPC is deleted by `destroy`.
 `destroy` deletes every security group named `<name>` in the region, regardless of VPC
 (in group ID order). While deletion fails with `DependencyViolation`, it retries until
 the network interfaces of the terminated instances detach, up to the deadline
-([topics/instance.md](instance.md#waiting), 2 minutes). `waiting for the network
-interfaces to leave the security group <group ID>` is reported once, on the first
-failure. Each is reported as `security group <name> (<group ID>): deleted` (or `absent`
+([topics/instance.md](instance.md#waiting), 2 minutes). The same error is returned when
+something else refers to the group (another security group's rule, an interface temt
+did not make), which waiting does not fix, and AWS's text does not tell the two apart.
+So on the first failure, as progress (not a warning, since a normal `destroy` hits it
+too), `delete-security-group <group ID>: <AWS error>` is reported, followed by
+`retrying until the network interfaces leave the security group <group ID> (up to 2
+minutes)`. When the deadline passes, the cause is that line, just above the timeout
+error. Each is reported as `security group <name> (<group ID>): deleted` (or `absent`
 if it vanished, `InvalidGroup.NotFound`); with none found,
 `security group <name>: absent`.

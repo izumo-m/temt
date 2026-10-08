@@ -1,8 +1,8 @@
 """ssh の鍵の、手元側の扱い。ssh-keygen を呼ぶ。"""
 
 import base64
-import binascii
 import hashlib
+import os
 from pathlib import Path
 
 from temt import msg, proc
@@ -37,6 +37,15 @@ def public_key(path: Path) -> str:
     return proc.run([KEYGEN, "-y", "-P", "", "-f", str(path)]).strip()
 
 
+def material(public_key_line: str) -> bytes:
+    """EC2 に登録する、公開鍵の 1 行のバイト列。
+
+    ssh-keygen -y が出したバイト列そのものに戻す。鍵のコメントには UTF-8 として読めない
+    バイトも入りうるので、encode() では書けないことがある（proc.run）。
+    """
+    return os.fsencode(public_key_line)
+
+
 def fingerprint(public_key_line: str) -> str:
     """公開鍵の 1 行から、SHA256 のフィンガープリントを計算する。
 
@@ -50,7 +59,8 @@ def fingerprint(public_key_line: str) -> str:
         raise TemtError(f"not a public key: {printable(public_key_line.strip()[:32])}")
     try:
         blob = base64.b64decode(fields[1], validate=True)
-    except binascii.Error:
+    except ValueError:
+        # binascii.Error のほか、ASCII でない文字（読めないバイトを含む）も ValueError になる
         raise TemtError(f"not a public key: {printable(fields[0])}") from None
     if not blob:
         raise TemtError(f"not a public key: {printable(fields[0])}")
@@ -60,9 +70,12 @@ def fingerprint(public_key_line: str) -> str:
 def describe(public_key_line: str) -> tuple[str, str]:
     """公開鍵の 1 行の、ビット数と種類（ED25519、RSA など）。ssh-keygen -l に尋ねる。
 
-    公開鍵を標準入力で渡すので、隣の .pub に左右されない。
+    公開鍵を標準入力で渡すので、隣の .pub に左右されない。渡すのは種類と本体だけで、
+    コメントは渡さない。ssh-keygen は、ロケールの文字コードで読めないコメントがあると、
+    何も出さずに終わることがあるからである。
     """
-    shown = proc.run([KEYGEN, "-l", "-f", "-"], stdin=f"{public_key_line}\n").split()
+    key = " ".join(public_key_line.split()[:2])
+    shown = proc.run([KEYGEN, "-l", "-f", "-"], stdin=f"{key}\n").split()
     if len(shown) < 3 or not shown[-1].startswith("(") or not shown[-1].endswith(")"):
         raise TemtError(f"{KEYGEN}: unexpected output: {printable(' '.join(shown)[:64])}")
     return shown[0], shown[-1][1:-1]

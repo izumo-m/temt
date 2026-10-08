@@ -33,7 +33,9 @@ Requests that need not be sent are not sent: `running` and `pending` found by `s
 `stopped` and `stopping` found by `stop`. `reboot` without `--async` reaches its request
 only after steps 2 and 4 ([commands/instance.md](../commands/instance.md#reboot)), which
 need the SSM agent, so on an intermediate state it usually stops there suggesting
-`--async`.
+`--async`. `bake` (and `deploy`/`app remove` with `--bake`) stops a `running` instance
+the same way: if its state changed while the confirmation waited, AWS refuses and temt
+adds the same hint, with `bake` as the command to try again.
 
 An instance that is shutting down (`shutting-down`) is treated as nonexistent, like
 `terminated`. Every command counts "two or more" excluding such instances. If only such
@@ -79,7 +81,7 @@ waiting for `.config.lock` is not a stage here and has none either; see
 | From requesting resume until `stopping` is no longer seen (`start`) | 10 minutes |
 | From requesting resume until `stopped` is no longer seen (`start`) | 1 minute |
 | Instance is terminated | 10 minutes |
-| A terminated instance's network interface detaches so the security group can be deleted | 2 minutes |
+| A terminated instance's network interface detaches so the security group can be deleted | 2 minutes (usually done within tens of seconds; the rest is margin) |
 
 - A deadline counts from when that stage starts waiting. Past the deadline, temt exits
   saying which stage did not finish.

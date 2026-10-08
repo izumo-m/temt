@@ -24,6 +24,11 @@ avoid the ones marked "not".
 | location | 場所 | Not 置き場 |
 | global IP address | グローバル IP アドレス | The client's address as seen from the Internet |
 | lock | ロック | Per-service lock file |
+| default | 既定 | |
+| credentials | 資格情報 | |
+| hierarchy (of SSM parameter names) | 階層 | |
+| stdout, stderr | 標準出力、標準エラー出力 | |
+| environment line (account, region, profile) | 環境の行 | Printed on stderr by commands without `--svc` |
 | deadline | 締め切り | Timeout of one waiting stage |
 
 ## Command line
@@ -45,6 +50,18 @@ avoid the ones marked "not".
 | English | Japanese | Notes |
 | --- | --- | --- |
 | instance | インスタンス | |
+| SSM agent | SSM エージェント | |
+| SSM parameter | SSM パラメータ | |
+| inline policy, managed policy | インラインポリシー、管理ポリシー | |
+| listening port (of sshd) | 待ち受けポート | |
+| fingerprint | フィンガープリント | |
+| snapshot | スナップショット | |
+| root volume | ルートボリューム | |
+| deregister (an AMI) | 登録を解除する | Not 登録解除 |
+| Host block (in the ssh config) | Host ブロック | |
+| route (`TEMT_LOGIN`) | 経路 | |
+| IAM role | ロール、IAM のロール | |
+| instance profile | インスタンスプロファイル | Not プロファイル alone, which is the AWS profile |
 | start (launch or resume) | 起動する、再開する | 再開 is starting a stopped instance |
 | stop | 停止する、止める | |
 | terminate | 終了する | |
@@ -74,6 +91,8 @@ avoid the ones marked "not".
 | app | アプリ | A directory with `manifest.toml` and `install` |
 | app ID, `<app ID>` | アプリ ID、`<アプリID>` | No space inside the placeholder |
 | bundled app | temt と一緒に配るアプリ | Under `src/temt/apps/` |
+| deploy, remove (an app) | 入れる、外す | |
+| removed without baking (`removed`) | 焼かずに外した | Still in the AMI until baked |
 | deploy record | 記録、`deploy` の記録 | SSM parameter `/<name>/<app ID>/deploy` |
 | app value | アプリの値 | SSM parameter `/<name>/<app ID>/<key>` |
 | app status | アプリの状態 | SSM parameter `/<name>/<app ID>/status` |

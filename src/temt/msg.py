@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import TextIO
 
 # 真なら、標準出力に書くものも標準エラー出力に書く。proxy が use_stderr で、diff と
@@ -60,25 +60,24 @@ def stderr_only() -> Generator[None]:
         _only_stderr = before
 
 
-def _drop_stdout() -> None:
-    """標準出力の読み手（head など）が先に閉じた。残りを捨てる。
+def _drop(stream: TextIO) -> None:
+    """stream の読み手（head など）が先に閉じた。残りを捨てる。
 
-    終わるときに Python が書き出し直して同じ誤りを出さないよう、標準出力を /dev/null に
-    付け替える。
+    終わるときに Python が書き出し直して同じ誤りを出さないよう、/dev/null に付け替える。
+    標準エラー出力も、2>&1 | head のように標準出力と同じ読み手なら先に閉じうる。その
+    ときも、標準出力と同じく、コマンドは止めずに最後まで進める。
     """
-    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
 
 
 def _flush(stream: TextIO | None) -> None:
-    """stream を書き出す。閉じた標準出力（None）は飛ばし、読み手が閉じていれば捨てる。"""
+    """stream を書き出す。閉じた出力（None）は飛ばし、読み手が閉じていれば捨てる。"""
     if stream is None:
         return
     try:
         stream.flush()
     except BrokenPipeError:
-        if stream is not sys.stdout:
-            raise
-        _drop_stdout()
+        _drop(stream)
 
 
 def flush() -> None:
@@ -87,26 +86,31 @@ def flush() -> None:
     _flush(sys.stderr)
 
 
-def _write(stream: TextIO, text: str) -> None:
+def _write(stream: TextIO | None, text: str) -> None:
     """text を stream に書いて書き出す。先に、もう一方の出力を書き出して順序を保つ。
 
     ロケールの文字コードで書けない文字（ASCII しか書けないロケールの日本語など）は、
     標準エラー出力の既定と同じく、バックスラッシュの形にする。
     """
+    if stream is None:
+        # 起動したときから閉じている（2>&-）。書く先が無い
+        return
     _flush(sys.stderr if stream is sys.stdout else sys.stdout)
     encoding = stream.encoding or "utf-8"
-    try:
-        stream.write(text.encode(encoding, "backslashreplace").decode(encoding))
-    except BrokenPipeError:
-        if stream is not sys.stdout:
-            raise
+    # 読み手が先に閉じていれば、続く書き出しも失敗するので、そこで捨てる
+    with suppress(BrokenPipeError):
+        _ = stream.write(text.encode(encoding, "backslashreplace").decode(encoding))
     _flush(stream)
 
 
-def _out() -> TextIO:
-    """標準出力に書くものの書き先。proxy と diff の中か、標準出力が閉じていれば標準エラー出力。"""
+def _out() -> TextIO | None:
+    """標準出力に書くものの書き先。proxy と diff の中か、標準出力が閉じていれば標準エラー出力。
+
+    標準エラー出力も閉じていれば None。
+    """
     stdout: TextIO | None = sys.stdout
-    return sys.stderr if _only_stderr or stdout is None else stdout
+    stderr: TextIO | None = sys.stderr
+    return stderr if _only_stderr or stdout is None else stdout
 
 
 def _say(text: str, *, side: bool) -> None:
@@ -121,15 +125,15 @@ def raw(data: bytes) -> None:
     残りを捨てるだけで、外部コマンドは止めない。
     """
     stream = _out()
+    if stream is None:
+        return
     _flush(sys.stderr if stream is sys.stdout else sys.stdout)
     _flush(stream)
     try:
         stream.buffer.write(data)
         stream.buffer.flush()
     except BrokenPipeError:
-        if stream is not sys.stdout:
-            raise
-        _drop_stdout()
+        _drop(stream)
 
 
 def info(text: str, *, side: bool = False) -> None:
@@ -168,7 +172,11 @@ def confirm(question: str, *, yes: bool) -> None:
     if sys.stdin is None or not sys.stdin.isatty():
         raise TemtError("cannot ask for confirmation: stdin is not a terminal; pass --yes")
     _write(sys.stderr, f"{question} [y/N] ")
-    answer = sys.stdin.readline()
+    try:
+        answer = sys.stdin.readline()
+    except UnicodeDecodeError:
+        # 端末の文字コードで読めない答えは、y ではない
+        answer = "?\n"
     if not answer:
         # Ctrl-D は端末に何も出さないので、行を閉じる
         _write(sys.stderr, "\n")

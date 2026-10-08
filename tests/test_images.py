@@ -4,6 +4,7 @@
 返すものに差し替える。サービスを与えるときは aws.session を差し替える。
 """
 
+import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -481,6 +482,13 @@ def test_the_environment_shows_a_chosen_profile(
     )
 
 
+# 解決を ParameterNotFound で断られたときの理由。AWS の文をそのまま添える
+NOT_RESOLVED = (
+    "An error occurred (ParameterNotFound) when calling the DescribeLaunchTemplateVersions "
+    "operation: no parameter /golden"
+)
+
+
 def alias_version(
     stubs: Stubs, name: str, resolved: dict[str, Any] | None, *, code: str = "ParameterNotFound"
 ) -> None:
@@ -503,7 +511,10 @@ def alias_version(
     params = {"LaunchTemplateName": name, "Versions": ["1"], "ResolveAlias": True}
     if resolved is None:
         stubs.ec2.add_client_error(
-            "describe_launch_template_versions", code, expected_params=params
+            "describe_launch_template_versions",
+            code,
+            service_message="no parameter /golden",
+            expected_params=params,
         )
         return
     stubs.ec2.add_response(
@@ -525,7 +536,7 @@ def test_a_version_that_points_through_ssm_is_resolved(stubs: Stubs, ec2: EC2Cli
 @pytest.mark.parametrize(
     ("resolved", "reason"),
     [
-        (None, "ParameterNotFound"),
+        (None, NOT_RESOLVED),
         ({"ImageId": "resolve:ssm:/golden"}, "resolved to resolve:ssm:/golden"),
         ({}, "resolved to nothing"),
     ],
@@ -560,7 +571,7 @@ def test_list_warns_about_a_version_it_cannot_resolve(
     stubs.done()
     assert (
         "temt: warning: cannot resolve the AMI of mine version 1 "
-        "(resolve:ssm:/golden: ParameterNotFound)" in capsys.readouterr().err
+        f"(resolve:ssm:/golden: {NOT_RESOLVED})" in capsys.readouterr().err
     )
 
 
@@ -572,7 +583,7 @@ def test_prune_deregisters_nothing_when_a_version_cannot_be_resolved(stubs: Stub
     with pytest.raises(
         TemtError,
         match=r"cannot resolve the AMI of: mine version 1 "
-        r"\(resolve:ssm:/golden: ParameterNotFound\); nothing is deregistered",
+        rf"\(resolve:ssm:/golden: {re.escape(NOT_RESOLVED)}\); nothing is deregistered",
     ):
         images.prune(None, None, yes=True)
 
@@ -805,7 +816,7 @@ def test_prune_keeps_an_image_when_a_version_read_again_cannot_be_resolved(
     stubs.done()
     assert (
         f"temt: warning: keeping {OLD}: cannot resolve the AMI of: mine version 1 "
-        "(resolve:ssm:/golden: ParameterNotFound)\n"
+        f"(resolve:ssm:/golden: {NOT_RESOLVED})\n"
     ) in capsys.readouterr().err
 
 
@@ -944,7 +955,7 @@ def test_delete_warns_every_reason_with_force(
     captured = capsys.readouterr()
     assert (
         f"temt: warning: {OLD}: cannot resolve the AMI of: mine version 1 "
-        "(resolve:ssm:/golden: ParameterNotFound)\n"
+        f"(resolve:ssm:/golden: {NOT_RESOLVED})\n"
         f"temt: warning: {OLD}: pending; bake may be creating it\n"
     ) in captured.err
     assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
@@ -1002,7 +1013,7 @@ def test_delete_refuses_when_a_version_cannot_be_resolved(stubs: Stubs) -> None:
     with pytest.raises(
         TemtError,
         match=r"cannot resolve the AMI of: mine version 1 "
-        r"\(resolve:ssm:/golden: ParameterNotFound\); pass --force",
+        rf"\(resolve:ssm:/golden: {re.escape(NOT_RESOLVED)}\); pass --force",
     ):
         images.delete(OLD, None, None, force=False, yes=True)
 

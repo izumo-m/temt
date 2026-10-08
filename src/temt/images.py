@@ -129,7 +129,7 @@ def _resolve(ec2: EC2Client, name: str, number: Any) -> tuple[str | None, str]:
     except ClientError as e:
         if error_code(e) == resources.NO_SUCH_TEMPLATE:
             raise
-        return None, error_code(e)
+        return None, table.aws_error(e)
     image_id = (found[0].get("LaunchTemplateData") or {}).get("ImageId") if found else None
     if isinstance(image_id, str) and aws.is_image_id(image_id):
         return image_id, ""

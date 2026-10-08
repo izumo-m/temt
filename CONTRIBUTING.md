@@ -82,8 +82,8 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
 
 ## 言語
 
-- 文書（README、CONTRIBUTING、docs/）とコード内のコメントは日本語で書く。設計書（design/）は
-  英語で書く。
+- 文書（README、CONTRIBUTING、SECURITY、CLAUDE.md、docs/）とコード内のコメントは日本語で
+  書く。設計書（design/）は英語で書く。
 - コンソールに出す文は英語で、ASCII 文字だけを使う。
 - Issue と Pull Request は、日本語でも英語でもよい。
 

@@ -79,11 +79,6 @@ def _fetch(url: str) -> str:
 fetch: Callable[[str], str] = _fetch
 
 
-def _ascii(text: str) -> str:
-    """ASCII でない文字をエスケープした text。ログは ASCII だけで書く。"""
-    return text.encode("ascii", "backslashreplace").decode("ascii")
-
-
 def _reason(error: Exception) -> str:
     """問い合わせに失敗した理由。urllib の URLError は、元の理由を reason に持つ。
 
@@ -93,7 +88,7 @@ def _reason(error: Exception) -> str:
     text = str(reason if reason is not None else error) or type(error).__name__
     if isinstance(error, urllib.error.HTTPError):
         text = f"HTTP {error.code} {text}"
-    return table.printable(_ascii(text))
+    return table.printable(text)
 
 
 def _usable(address: IPv4Address | IPv6Address) -> bool:

@@ -1110,6 +1110,37 @@ def test_keypair_show_takes_a_file() -> None:
     """show の引数はキーペア名の規則を問わない。/ があればファイルとして扱う。"""
     assert cli.parse(["keypair", "show", "~/.ssh/id_ed25519"]).key == "~/.ssh/id_ed25519"
     assert cli.parse(["keypair", "show", "my key"]).key == "my key"
+    # ファイルの名前は、UTF-8 として読めないバイトを含んでもよい
+    assert cli.parse(["keypair", "show", "./a\udcffb"]).key == "./a\udcffb"
+
+
+def test_ami_delete_refuses_what_aws_cannot_take() -> None:
+    """UTF-8 として読めないバイトを含む名前は、AWS に送れないので先に断る。"""
+    with pytest.raises(UsageError) as caught:
+        _ = cli.parse(["ami", "delete", "temt-a\udcff"])
+    assert str(caught.value) == "ami delete: the AMI id or name is not valid UTF-8: temt-a?"
+
+
+def test_main_shows_a_file_error_like_other_paths(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ファイルの読み書きの失敗は、パスの表示できない文字を ? にして知らせる。"""
+
+    def fail(_: object) -> int:
+        raise PermissionError(13, "Permission denied", "/srv/a\udcff\x1bb")
+
+    monkeypatch.setattr(cli, "run", fail)
+    assert cli.main(["temt", "service", "list"]) == 1
+    assert capsys.readouterr().err == "temt: Permission denied: /srv/a??b\n"
+
+
+def test_main_with_stderr_closed_still_exits_with_the_code() -> None:
+    """起動したときから標準エラー出力が閉じていても（2>&-）、落ちずに終了コードを返す。"""
+    script = "import sys; from temt import cli; sys.exit(cli.main(['temt', 'no-such-command']))"
+    done = subprocess.run(
+        ["sh", "-c", '"$0" -c "$1" 2>&-', sys.executable, script], capture_output=True, check=False
+    )
+    assert done.returncode == 2
 
 
 @pytest.mark.parametrize(
@@ -1138,6 +1169,10 @@ def test_keypair_show_takes_a_file() -> None:
         (["keypair", "create", "a", "b"], "keypair create: unexpected argument: b"),
         (["keypair", "show", "a", "--yes"], "keypair show: unexpected argument: --yes"),
         (["keypair", "list", "a"], "keypair list: unexpected argument: a"),
+        (
+            ["keypair", "show", "a\udcffb"],
+            "keypair show: the key pair name is not valid UTF-8: a?b",
+        ),
         (
             ["keypair", "list", *SVC],
             "keypair list: --svc is not allowed; key pairs belong to no service",

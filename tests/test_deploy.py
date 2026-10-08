@@ -866,6 +866,23 @@ def test_remove_runs_uninstall_as_root_without_a_record(
     assert f"no deploy record {RECORD}; running uninstall as root" in capsys.readouterr().err
 
 
+def test_remove_warns_once_about_an_unreadable_record(
+    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """記録は 1 度だけ読むので、読めない記録の警告も 1 度だけ出す。"""
+    ready(aws_stubs)
+    aws_stubs.ssm.add_response(
+        "get_parameter", {"Parameter": {"Name": RECORD, "Value": "not json"}}, {"Name": RECORD}
+    )
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+    aws_stubs.done()
+    (_, _), (uninstall, _) = ssh.calls
+    assert uninstall[3].endswith(" temt /opt/temt/apps/jupyter root")
+    assert capsys.readouterr().err.count(f"cannot read the deploy record {RECORD}") == 1
+
+
 def test_remove_leaves_the_record_when_the_status_cannot_be_deleted(
     aws_stubs: Stubs, configured: Service, ssh: Ssh
 ) -> None:

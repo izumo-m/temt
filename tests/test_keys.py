@@ -123,6 +123,20 @@ def test_describe_tells_the_bits_and_the_type(home_dir: Path) -> None:
     assert keys.describe(keys.public_key(path)) == ("256", "ED25519")
 
 
+def test_a_comment_that_is_not_utf8_goes_to_aws_as_it_is(home_dir: Path) -> None:
+    """コメントの UTF-8 として読めないバイトは、ssh-keygen が出したまま EC2 に渡す。"""
+    path = make(home_dir / "k", comment=os.fsdecode(b"user@\xff\xfehost"))
+    line = keys.public_key(path)
+    assert keys.material(line).endswith(b" user@\xff\xfehost")
+    assert keys.describe(line) == ("256", "ED25519")
+
+
+@pytest.mark.parametrize("body", ["\u3042", "AA\udcff"], ids=["not ascii", "not utf8"])
+def test_fingerprint_of_a_body_that_is_not_ascii(body: str) -> None:
+    with pytest.raises(TemtError, match="^not a public key: ssh-ed25519$"):
+        _ = keys.fingerprint(f"ssh-ed25519 {body} c")
+
+
 def test_describe_of_something_that_is_not_a_public_key() -> None:
     with pytest.raises(TemtError, match="ssh-keygen"):
         _ = keys.describe("ssh-ed25519 AAAA")

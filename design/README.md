@@ -15,8 +15,9 @@ Where this and the code disagree, decide which is right before changing either.
 
 temt builds the cycle of preparing a service, launching its instance, logging in
 with ssh, installing apps (`deploy`), turning the instance into an AMI (`bake`),
-terminating it, and cleaning up. An unused instance terminates itself through the
-bundled app `idle-shutdown` ([apps/idle-shutdown.md](apps/idle-shutdown.md)).
+terminating it, and cleaning up. Once the bundled app `idle-shutdown` is deployed and
+baked, an unused instance terminates itself
+([apps/idle-shutdown.md](apps/idle-shutdown.md)).
 
 ## Files
 

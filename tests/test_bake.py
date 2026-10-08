@@ -891,6 +891,27 @@ def test_it_stops_when_the_instance_goes_away_while_it_stops(
     assert image_id(configured) == OLD
 
 
+def test_it_stops_when_aws_refuses_to_stop_the_instance(
+    aws_stubs: Stubs, configured: Service
+) -> None:
+    """確認を待つ間に止まっていれば、AWS が断る。status を見てやり直すよう添える。"""
+    found(aws_stubs, an_instance(INSTANCE, "running"))
+    checked(aws_stubs)
+    aws_stubs.ec2.add_client_error(
+        "stop_instances",
+        service_error_code="IncorrectInstanceState",
+        service_message="This instance is not in a state from which it can be stopped.",
+        expected_params=BY_ID,
+    )
+
+    with pytest.raises(TemtError) as caught:
+        bake.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value).endswith("; see 'temt status --svc dev-main' and bake again")
+    assert image_id(configured) == OLD
+
+
 def test_the_deadlines_are_the_ones_in_the_design() -> None:
     from temt import instances
 

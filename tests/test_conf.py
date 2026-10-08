@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import tomlkit
 
 from temt import conf, names
 from temt.conf import Conf, Ingress, LaunchTemplate, SecurityGroup
@@ -159,12 +160,18 @@ def test_load_without_a_file_tells_to_run_apply(service: Service) -> None:
 def test_load_shows_a_conf_dir_with_a_control_character_safely(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """TEMT_CONF_DIR から来るパスも、表示できない文字を ? にして誤りに入れる。"""
-    monkeypatch.setenv(names.CONF_DIR_ENV, f"{home_dir}/\x1b[2J")
+    """ホームから来るパスも、表示できない文字を ? にして誤りに入れる。
+
+    TEMT_CONF_DIR は表示できない文字を断るので、ホームのほうに入れる。
+    """
+    home = home_dir / "\x1b[2J"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     with pytest.raises(TemtError) as caught:
         conf.load(Service("dev-main"))
     assert str(caught.value) == (
-        f"no config file: {home_dir}/?[2J/dev-main.toml; run 'temt apply --svc dev-main' first"
+        f"no config file: {home_dir}/?[2J/.config/temt/dev-main.toml; "
+        "run 'temt apply --svc dev-main' first"
     )
 
 
@@ -346,6 +353,30 @@ def test_update_adds_the_key_to_the_existing_table(service: Service) -> None:
     )
 
 
+def test_update_adds_the_key_before_the_comments_of_the_next_table(service: Service) -> None:
+    """後ろのコメントは次の見出しのものなので、その前に残す。例の見出しを戻しても、
+    足した項目はそのテーブルのものにならない。"""
+    write(
+        service,
+        '[launch-template]\nInstanceType = "t3.micro"\n\n# about the rules\n'
+        "# [[security-group.ingress]]\n# Port = 22\n[x]\nA = 1\n",
+    )
+    assert conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9") is True
+    text = read(service)
+    assert text == (
+        '[launch-template]\nInstanceType = "t3.micro"\nImageId = "ami-9"\n\n'
+        "# about the rules\n# [[security-group.ingress]]\n# Port = 22\n[x]\nA = 1\n"
+    )
+    uncommented = text.replace("# [[", "[[").replace("# Port", "Port")
+    assert tomlkit.parse(uncommented)["launch-template"]["ImageId"] == "ami-9"
+
+
+def test_update_adds_the_key_to_a_table_that_has_only_comments(service: Service) -> None:
+    write(service, '[launch-template]\n# InstanceType = "t3.small"\n')
+    conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9")
+    assert read(service) == '[launch-template]\nImageId = "ami-9"\n# InstanceType = "t3.small"\n'
+
+
 def test_update_adds_the_key_next_to_a_dotted_key(service: Service) -> None:
     """ドット付きキーで書かれたテーブルには、同じ形で足す。読み直しても同じ内容になる。"""
     write(service, 'launch-template.InstanceType = "t3.small"\n')
@@ -503,10 +534,10 @@ def test_a_cidr_that_is_not_one(service: Service, written: str) -> None:
 @pytest.mark.parametrize(
     ("written", "message"),
     [
-        pytest.param("fe80::1%\\u001b[2J/128", "must not carry a zone id: fe80::1%?[2J/128"),
+        pytest.param("fe80::1%\\u001b[2J/128", "must be an IPv4 or IPv6 CIDR: fe80::1%?[2J/128"),
         pytest.param(
             "fe80::1%\\u001b[2J/64",
-            "must be an IPv4 or IPv6 CIDR: fe80::1%?[2J/64 has host bits set",
+            "must be an IPv4 or IPv6 CIDR: fe80::1%?[2J/64",
             id="host bits set",
         ),
     ],
@@ -514,7 +545,7 @@ def test_a_cidr_that_is_not_one(service: Service, written: str) -> None:
 def test_a_cidr_with_a_control_character_is_shown_safely(
     service: Service, written: str, message: str
 ) -> None:
-    """ip_network は、ゾーン ID の中の制御文字をそのまま通し、誤りの文にもそのまま書く。"""
+    """ip_network は、ゾーン ID の中の制御文字をそのまま通すので、先に断る。"""
     write(service, INGRESS + f'Port = 22\nCidr = "{written}"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)

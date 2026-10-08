@@ -47,7 +47,9 @@ Observed on real AWS when `start` launches right after `apply` created the role 
 instance profile:
 
 1. EC2 does not know the new instance profile name yet: `run-instances` is refused
-   (`Invalid IAM Instance Profile name`) for a few seconds.
+   (`Invalid IAM Instance Profile name`) for a few seconds. `apply` may already have
+   shown this as a launch template warning, when it created the template or a version
+   ([topics/launch-template.md](../topics/launch-template.md#versions)).
 2. After `destroy` and an `apply` that recreates the profile under the same name, EC2
    may still resolve the name to the deleted profile's ID. The launch succeeds, but the
    instance's `IamInstanceProfile` ID differs from IAM's `InstanceProfileId`, so it can
@@ -187,7 +189,12 @@ The boot_id is read on each poll as follows, the same in 4 and 7.
   record yet (`InvocationDoesNotExist`) and a refusal with `InvalidInstanceId` mean not
   finished yet. `Success` with non-empty standard output gives the boot_id. Any other
   finish (including `Success` with empty standard output), or not finishing within 1
-  minute of sending, abandons it and sends again on the next poll.
+  minute of sending, abandons it and sends again on the next poll. The first such
+  finish (not the 1-minute abandonment) is reported once per wait, as progress:
+  `get-command-invocation <command ID>: <Status> (<StatusDetails>): <first non-empty
+  line of standard error>; sending it again` (`, but printed nothing` for `Success`).
+  Resending usually works, but when the command keeps failing inside the instance
+  (for example, a full disk), the timeout alone would point at the reboot instead.
 - The delivery timeout (`TimeoutSeconds`) and the execution timeout inside the instance
   (`executionTimeout`) are both 30 seconds. The command should be cut off at their sum,
   60 seconds, but one caught in the reboot can be reported finished late, so it is

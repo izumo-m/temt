@@ -7,6 +7,7 @@ instances.connect 自身は test_instances で、relay.run 自身は test_relay 
 
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1233,6 +1234,24 @@ def test_it_checks_the_commands_before_touching_aws(
         proxy.run(configured, 22)
     assert aws_stubs.passed == []
     assert not execs.calls
+
+
+def test_it_connects_with_stderr_closed(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """標準エラー出力が閉じていても（2>&-）、落ちずに aws-cli に引き継ぐ。"""
+    _ = required
+    monkeypatch.setattr(sys, "stderr", None)
+    ready(aws_stubs)
+    proxy.run(configured, 22)
+    monkeypatch.undo()
+    aws_stubs.done()
+    [(file, argv, _)] = execs.calls
+    assert (file, argv) == ("aws", SSM_ARGV)
 
 
 def test_main_reports_a_failed_exec(

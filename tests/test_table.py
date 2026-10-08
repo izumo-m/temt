@@ -134,3 +134,40 @@ def test_aws_error_makes_one_line(text: str, shown: str) -> None:
     "; " でつなぐ。表示できない文字は ? にする。
     """
     assert table.aws_error(Exception(text)) == shown
+
+
+def test_out_replaces_what_cannot_be_utf8(capsysbinary: pytest.CaptureFixture[bytes]) -> None:
+    """printable を通さない値（app get）でも、UTF-8 にできない文字は ? にして落ちない。"""
+    table.out("a\udcffb\n")
+    assert capsysbinary.readouterr().out == b"a?b\n"
+
+
+@pytest.mark.parametrize(
+    ("error", "shown"),
+    [
+        pytest.param(
+            PermissionError(13, "Permission denied", "/srv/a\udcff\x1bb"),
+            "Permission denied: /srv/a??b",
+            id="path",
+        ),
+        pytest.param(
+            OSError(18, "Invalid cross-device link", b"/a\xff", None, "/b"),
+            "Invalid cross-device link: /a? -> /b",
+            id="two paths",
+        ),
+        pytest.param(OSError("disk \x1b full"), "disk ? full", id="no path"),
+    ],
+)
+def test_os_error_shows_the_path_like_other_paths(error: OSError, shown: str) -> None:
+    """パスは repr でなく、表示できない文字を ? にした形で出す。"""
+    assert table.os_error(error) == shown
+
+
+def test_out_writes_nothing_when_stdout_is_closed(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """起動したときから標準出力が閉じていれば（>&-）、読み手がいないので落ちずに何もしない。"""
+    monkeypatch.setattr(sys, "stdout", None)
+    table.out("ID\n")
+    monkeypatch.undo()
+    assert capsys.readouterr() == ("", "")

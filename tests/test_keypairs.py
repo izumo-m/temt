@@ -382,6 +382,25 @@ def test_show_a_public_key_file(
     ]
 
 
+def test_show_a_public_key_file_whose_comment_is_not_utf8(
+    stubs: Stubs, in_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """コメントの UTF-8 として読めないバイトは、秘密鍵から読んだときと同じく ? にする。"""
+    public_key = make_key(in_home / "k", "")
+    _ = (in_home / "k.pub").write_bytes(public_key.encode() + b" c\xff\n")
+    stubs.ec2.add_response(
+        "describe_key_pairs", {"KeyPairs": [a_pair("a", public_key)]}, {"IncludePublicKey": True}
+    )
+
+    keypairs.show("./k.pub", None)
+
+    stubs.done()
+    shown = capsys.readouterr().out.splitlines()
+    assert "  type:        ED25519, 256 bits" in shown
+    assert "  comment:     c?" in shown
+    assert f"  public key:  {public_key} c?" in shown
+
+
 def test_show_a_locked_key_uses_the_pub_next_to_it(
     stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -476,50 +495,135 @@ def test_create_makes_a_key_and_imports_it(
     assert f"imported the key pair work (key-0), {keys.fingerprint(public_key)}\n" in shown
 
 
-@pytest.mark.parametrize(
-    ("existing", "hint"),
-    [
-        ("work", ", or set KeyName to work and run apply to register the existing key"),
-        # 公開鍵だけでは apply は登録できないので、名前を変えるよう告げるだけにする
-        ("work.pub", ""),
-    ],
-)
-def test_create_stops_when_a_local_key_exists(
-    stubs: Stubs, home_dir: Path, existing: str, hint: str
+def test_create_registers_the_local_key_that_exists(
+    stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """手元にある鍵は作り直さず、そのまま登録する。"""
+    _ = home_dir
+    public_key = make_key(keys_dir() / "work", "mine")
+    looked_up(stubs, "work")
+    stubs.ec2.add_response(
+        "import_key_pair",
+        {"KeyName": "work", "KeyPairId": "key-0", "KeyFingerprint": "x"},
+        {
+            "KeyName": "work",
+            "PublicKeyMaterial": public_key.encode(),
+            "TagSpecifications": [
+                {"ResourceType": "key-pair", "Tags": [{"Key": "temt:keypair", "Value": "work"}]}
+            ],
+        },
+    )
+
+    keypairs.create("work", None)
+
+    stubs.done()
+    assert keys.public_key(keys_dir() / "work") == public_key
+    assert told(capsys.readouterr().out) == [
+        f"imported the key pair work (key-0), {keys.fingerprint(public_key)}"
+    ]
+
+
+def test_create_does_nothing_when_both_exist_and_match(
+    stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _ = home_dir
-    keys_dir().mkdir(parents=True)
-    (keys_dir() / existing).write_text("x\n", encoding="utf-8")
+    public_key = make_key(keys_dir() / "work")
+    looked_up(stubs, "work", a_pair("work", f"{public_key}\n"))
+
+    keypairs.create("work", None)
+
+    stubs.done()
+    assert told(capsys.readouterr().out) == [
+        "the key pair work (key-work) already matches ~/.ssh/temt/keys/work, "
+        f"{keys.fingerprint(public_key)}"
+    ]
+
+
+def test_create_stops_when_the_key_pair_exists_without_the_local_key(
+    stubs: Stubs, home_dir: Path
+) -> None:
+    """秘密鍵は作り直せないので、新しく作らずに止める。"""
+    _ = home_dir
+    looked_up(stubs, "work", a_pair("work", "ssh-ed25519 AAAA"))
     with pytest.raises(TemtError) as caught:
         keypairs.create("work", None)
     assert str(caught.value) == (
-        f"~/.ssh/temt/keys/{existing} already exists; choose another name{hint}"
+        "the key pair work exists in EC2, but ~/.ssh/temt/keys/work does not; put its private "
+        "key there, or run 'temt keypair delete work' and create it again"
     )
-    stubs.done()
-
-
-def test_create_stops_when_the_key_pair_exists(stubs: Stubs, home_dir: Path) -> None:
-    _ = home_dir
-    looked_up(stubs, "work", a_pair("work", "ssh-ed25519 AAAA"))
-    with pytest.raises(TemtError, match="^the key pair work already exists in EC2$"):
-        keypairs.create("work", None)
     stubs.done()
     assert not (keys_dir() / "work").exists()
 
 
-def test_create_removes_the_key_when_aws_refuses(
+def test_create_stops_when_they_differ(stubs: Stubs, home_dir: Path) -> None:
+    _ = home_dir
+    make_key(keys_dir() / "work")
+    other = make_key(keys_dir() / "other")
+    looked_up(stubs, "work", a_pair("work", other))
+    with pytest.raises(TemtError) as caught:
+        keypairs.create("work", None)
+    assert str(caught.value) == (
+        "the key pair work in EC2 does not match ~/.ssh/temt/keys/work; "
+        "'temt keypair show work' lists the local keys that match it"
+    )
+    stubs.done()
+
+
+def test_create_stops_when_the_key_pair_has_no_public_key(stubs: Stubs, home_dir: Path) -> None:
+    _ = home_dir
+    make_key(keys_dir() / "work")
+    looked_up(stubs, "work", a_pair("work", ""))
+    with pytest.raises(
+        TemtError, match="^AWS did not return a readable public key of the key pair work$"
+    ):
+        keypairs.create("work", None)
+    stubs.done()
+
+
+def test_create_stops_when_only_the_pub_exists(stubs: Stubs, home_dir: Path) -> None:
+    """公開鍵だけでは登録しても使えず、作れば .pub を上書きしてしまう。"""
+    _ = home_dir
+    keys_dir().mkdir(parents=True)
+    (keys_dir() / "work.pub").write_text("x\n", encoding="utf-8")
+    looked_up(stubs, "work")
+    with pytest.raises(TemtError) as caught:
+        keypairs.create("work", None)
+    assert str(caught.value) == (
+        "~/.ssh/temt/keys/work.pub exists without ~/.ssh/temt/keys/work; "
+        "remove it to create a new key"
+    )
+    stubs.done()
+    assert (keys_dir() / "work.pub").read_text(encoding="utf-8") == "x\n"
+
+
+def test_create_stops_when_the_local_key_cannot_be_read(stubs: Stubs, home_dir: Path) -> None:
+    _ = home_dir
+    locked_key(keys_dir() / "work")
+    looked_up(stubs, "work")
+    with pytest.raises(TemtError, match="^cannot read ~/.ssh/temt/keys/work: "):
+        keypairs.create("work", None)
+    stubs.done()
+
+
+def test_create_keeps_the_key_when_aws_refuses(
     stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """断られたら作った鍵を消し、もう一度 create できるようにする。消したことを知らせる。"""
+    """断られても作った鍵は残す。送り直した要求が Duplicate で返ったときは登録できて
+    いるので、やり直せば一致するキーペアとして終わる。"""
     _ = home_dir
     looked_up(stubs, "work")
     stubs.ec2.add_client_error("import_key_pair", "InvalidKeyPair.Duplicate")
     with pytest.raises(ClientError):
         keypairs.create("work", None)
     stubs.done()
-    assert not (keys_dir() / "work").exists()
-    assert not (keys_dir() / "work.pub").exists()
-    assert "removed the key ~/.ssh/temt/keys/work\n" in capsys.readouterr().out
+    public_key = keys.public_key(keys_dir() / "work")
+    assert (keys_dir() / "work.pub").exists()
+    assert "removed" not in capsys.readouterr().out
+
+    looked_up(stubs, "work", a_pair("work", public_key))
+    keypairs.create("work", None)
+    stubs.done()
+    assert "already matches" in capsys.readouterr().out
 
 
 def test_delete_removes_the_key_pair_and_the_local_key(
@@ -599,11 +703,50 @@ def test_delete_leaves_a_key_pair_without_the_tag(stubs: Stubs, home_dir: Path) 
     assert (keys_dir() / "legacy").exists()
 
 
-def test_delete_a_key_pair_that_does_not_exist(stubs: Stubs) -> None:
+def test_delete_when_there_is_nothing_to_delete(
+    stubs: Stubs, home_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ = home_dir
     looked_up(stubs, "nothing")
-    with pytest.raises(TemtError, match="^no key pair named nothing$"):
-        keypairs.delete("nothing", None, yes=True)
+    keypairs.delete("nothing", None, yes=True)
     stubs.done()
+    assert told(capsys.readouterr().out) == [
+        "no key pair nothing in EC2 and no local key; nothing to delete"
+    ]
+
+
+def test_delete_only_the_local_key(
+    stubs: Stubs,
+    home_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """EC2 に無くても、手元の鍵は確かめてから消す。他の環境の警告も出す。"""
+    _ = home_dir
+    make_key(keys_dir() / "temt")
+    looked_up(stubs, "temt")
+    monkeypatch.setattr(sys, "stdin", Terminal("y\n"))
+
+    keypairs.delete("temt", None, yes=False)
+
+    stubs.done()
+    assert not (keys_dir() / "temt").exists()
+    assert not (keys_dir() / "temt.pub").exists()
+    captured = capsys.readouterr()
+    assert captured.err.splitlines() == [
+        ENVIRONMENT,
+        "temt: warning: ~/.ssh/temt/keys/temt is shared by every region and account; "
+        "if the key is also registered elsewhere, run 'temt keypair delete temt' there "
+        "too, or apply there stops with a key mismatch",
+        "delete the local key of temt? [y/N] ",
+    ]
+    assert told(captured.out) == [
+        "delete:",
+        "  ~/.ssh/temt/keys/temt",
+        "  ~/.ssh/temt/keys/temt.pub",
+        "deleted ~/.ssh/temt/keys/temt",
+        "deleted ~/.ssh/temt/keys/temt.pub",
+    ]
 
 
 def test_delete_keeps_everything_when_not_confirmed(

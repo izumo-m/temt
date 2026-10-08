@@ -2007,6 +2007,52 @@ def test_point_image_deletes_the_versions_it_read(
     )
 
 
+def test_point_image_does_not_claim_the_instance_profile_exists(
+    ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """bake はプロファイルを確かめないので、プロファイルが無いという警告に何も添えない。"""
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_launch_template_versions",
+            listed(a_version({"ImageId": IMAGE}, 1)),
+            {"LaunchTemplateName": TEMPLATE},
+        )
+        stub.add_response(
+            "create_launch_template_version",
+            {
+                "LaunchTemplateVersion": {"VersionNumber": 2},
+                "Warning": {
+                    "Errors": [
+                        {
+                            "Code": resources.PROFILE_NOT_READY,
+                            "Message": f"The IamInstanceProfile.Name '{NAME}' does not exist.",
+                        }
+                    ]
+                },
+            },
+            {
+                "LaunchTemplateName": TEMPLATE,
+                "SourceVersion": "1",
+                "LaunchTemplateData": {"ImageId": NEW_IMAGE},
+            },
+        )
+        stub.add_response(
+            "modify_launch_template",
+            {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
+            {"LaunchTemplateName": TEMPLATE, "DefaultVersion": "2"},
+        )
+        stub.add_response(
+            "delete_launch_template_versions",
+            {"SuccessfullyDeletedLaunchTemplateVersions": [{"VersionNumber": 1}]},
+            {"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
+        )
+        resources.point_image(ec2, service, NEW_IMAGE)
+        stub.assert_no_pending_responses()
+    shown = capsys.readouterr().err
+    assert f"{resources.PROFILE_NOT_READY}: The IamInstanceProfile.Name '{NAME}'" in shown
+    assert resources.NOT_READY_NOTE not in shown
+
+
 def test_point_image_stops_without_a_default_version(ec2: EC2Client, service: Service) -> None:
     """既定バージョンが 1 つに決まらなければ、新しいバージョンを作らずに止まる。"""
     with Stubber(ec2) as stub:
@@ -2593,15 +2639,25 @@ def test_other_errors_from_reading_what_holds_the_role_are_left_to_destroy(
 def test_a_role_that_gets_held_after_the_check_is_reported(
     iam: IAMClient, service: Service
 ) -> None:
-    """確かめた後に付けられて DeleteConflict になっても、同じように告げて終了する。"""
+    """確かめた後に付けられたときも、外したことが IAM にまだ映らないときも DeleteConflict に
+    なる。どちらか分からないので、AWS の文を添えて両方の直し方を告げる。"""
     with Stubber(iam) as stub:
         unheld(stub)
         stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
         stub.add_client_error(
-            "delete_role", service_error_code=resources.DELETE_CONFLICT, http_status_code=409
+            "delete_role",
+            service_error_code=resources.DELETE_CONFLICT,
+            service_message="Cannot delete entity, must remove roles from instance profile first.",
+            http_status_code=409,
         )
-        with pytest.raises(TemtError, match=f"the role {NAME} still has a managed policy"):
+        with pytest.raises(TemtError) as caught:
             resources.delete_role(iam, service)
+    assert str(caught.value) == (
+        f"cannot delete the role {NAME}: An error occurred (DeleteConflict) when calling the "
+        "DeleteRole operation: Cannot delete entity, must remove roles from instance profile "
+        "first.; if nothing is attached to it, IAM may not show the change yet, so run destroy "
+        "again; otherwise detach it by hand and run destroy again"
+    )
 
 
 def names(count: int) -> list[str]:
@@ -2774,3 +2830,28 @@ def test_association_changes_show_a_script_that_temt_changed() -> None:
     [line] = found.changes()
     assert (line.mark, line.kind, line.detail) == ("~", "association", "script")
     assert "-old line" in line.body
+
+
+def test_old_versions_are_deleted_in_batches_aws_accepts(
+    ec2: EC2Client, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """1 回に渡せる数を超えれば分けて頼み、断られた回があっても残りを続ける。"""
+    numbers = [str(one) for one in range(2, resources.VERSIONS_PER_CALL + 3)]
+    first, rest = numbers[: resources.VERSIONS_PER_CALL], numbers[resources.VERSIONS_PER_CALL :]
+    with Stubber(ec2) as stub:
+        stub.add_client_error(
+            "delete_launch_template_versions",
+            service_error_code="UnauthorizedOperation",
+            service_message="not allowed",
+            expected_params={"LaunchTemplateName": "temt-a", "Versions": first},
+        )
+        stub.add_response(
+            "delete_launch_template_versions",
+            {"SuccessfullyDeletedLaunchTemplateVersions": []},
+            {"LaunchTemplateName": "temt-a", "Versions": rest},
+        )
+        resources._delete_versions(ec2, "temt-a", numbers)
+        stub.assert_no_pending_responses()
+    err = capsys.readouterr().err
+    assert err.count("cannot delete the old versions") == 1
+    assert "not allowed" in err

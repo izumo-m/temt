@@ -202,11 +202,13 @@ def cidr(value: str) -> str:
     比べられない。ホスト部にビットが立っていれば、書き誤りとして知らせる。ゾーン ID
     の付いたアドレス（fe80::1%eth0）は ip_network が通すが、AWS は受けない。
     """
+    if not value.isprintable():
+        # ip_network は、ゾーン ID の中の制御文字を通し、誤りの文にそのまま書く。誤りの
+        # 文は repr で値を書くこともあり、UTF-8 として読めないバイトは \udcff の形で出る
+        raise ValueError(f"Cidr must be an IPv4 or IPv6 CIDR: {printable(value)}")
     try:
         network = ip_network(value)
     except ValueError as error:
-        # 誤りの文は多くが repr で値を書くが、ホスト部にビットが立っているときは、ゾーン ID
-        # の中の制御文字もそのまま書く
         raise ValueError(f"Cidr must be an IPv4 or IPv6 CIDR: {printable(str(error))}") from None
     if "%" in str(network):
         raise ValueError(f"Cidr must not carry a zone id: {printable(value)}")
@@ -744,7 +746,8 @@ def update(service: Service, values: Conf, key: str, value: str) -> bool:
     "launch-template.InstanceType" のようにテーブル名と区切りを前に置く。
     書かれている値が既に同じなら、ファイルには触らない。書き換えるときも、既に書かれて
     いる項目の順序と、項目に付いたコメントは変えない。最上位の項目は最初のテーブルの
-    前に置く。ファイルが無ければ見出しのコメントを付けて作り、テーブルが無ければ足す。
+    前に置く。テーブルに足す項目は、その最後の項目の次に置く（_put）。ファイルが無ければ
+    見出しのコメントを付けて作り、テーブルが無ければ足す。
     """
     assign(values, key, value)
     *parents, name = key.split(SEPARATOR)
@@ -762,7 +765,7 @@ def update(service: Service, values: Conf, key: str, value: str) -> bool:
         table = table[parent]
     if table.get(name) == value:
         return False
-    table[name] = value
+    _put(table, name, value)
     replace_text(path, tomlkit.dumps(document))
     return True
 
@@ -778,10 +781,12 @@ EDIT_ERRORS = (TOMLKitError, AttributeError, KeyError, IndexError, TypeError, Va
 
 
 def _trailing(table: Any) -> list[Any]:
-    """テーブルの配列の要素の、最後の項目より後ろにあるコメントと空行を取り外して返す。
+    """テーブル（テーブルの配列の要素も）の、最後の項目より後ろにあるコメントと空行を
+    取り外して返す。
 
-    tomlkit は、次の見出しの前にあるコメントと空行を、前の要素の中身として持つ。要素を
-    消すときや、後ろに要素を足すときは、それらを次のものの前に残すために取り外す。
+    tomlkit は、次の見出しの前にあるコメントと空行を、前のテーブルの中身として持つ。
+    テーブルを消すときや、後ろに要素や項目を足すときは、それらを次のものの前に残す
+    ために取り外す。
     """
     body = table.value.body
     count = len(body)
@@ -816,16 +821,18 @@ def _joined(before: Sequence[Any], after: Sequence[Any]) -> list[Any]:
     return joined
 
 
-def _describe(table: Any, description: str) -> None:
-    """規則のテーブルの Description を書く。
+def _put(table: Any, name: str, value: Any) -> None:
+    """テーブルの項目を書く。
 
-    無い項目を足すときは、テーブルの後ろにあるコメントより前、最後の項目の次に置く。
+    無い項目を足すときは、テーブルの後ろにあるコメントと空行より前、最後の項目の次に
+    置く。そのコメントは次の見出しの説明か、コメントにした例であることが多い。後ろに
+    足すと、例の見出しを戻したときに、足した項目がそのテーブルのものになってしまう。
     """
-    if "Description" in table or not isinstance(table, Table):
-        table["Description"] = description
+    if name in table or not isinstance(table, Table):
+        table[name] = value
         return
     moved = _trailing(table)
-    table["Description"] = description
+    table[name] = value
     for item in moved:
         table.value.append(None, item)
 
@@ -1010,7 +1017,7 @@ def edit_ingress(
         for index, description in (described or {}).items():
             table = document[SECURITY_GROUP][INGRESS][index]
             if description:
-                _describe(table, description)
+                _put(table, "Description", description)
             elif "Description" in table:
                 del table["Description"]
         for index in sorted(removed, reverse=True):

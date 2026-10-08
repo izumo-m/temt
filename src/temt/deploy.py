@@ -26,7 +26,7 @@ import shlex
 import tarfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -87,7 +87,7 @@ mkdir -p "$1"
 rm -rf "$1/.$2."*
 tmp=$(mktemp -d "$1/.$2.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
-tar -xzf - -C "$tmp" --no-same-owner
+tar -xzf - -C "$tmp" --no-same-owner --warning=no-unknown-keyword
 chmod 755 "$tmp"
 if [ -e "$1/$2" ]; then
     old=$(mktemp -d "$1/.$2.old.XXXXXX")
@@ -509,7 +509,7 @@ def run(
     )
 
 
-def _recorded_user(name: str, found: Mapping[str, Any] | None) -> str:
+def _recorded_user(name: str, found: Record | None) -> str:
     """deploy の記録にある、install を実行したユーザー。記録か user が無ければ root。
 
     記録か user が無ければ、root で実行することを警告する。deploy が記録を書けずに
@@ -521,7 +521,7 @@ def _recorded_user(name: str, found: Mapping[str, Any] | None) -> str:
     if found is None:
         msg.warn(f"no deploy record {name}; running {UNINSTALL} as {ROOT_USER}; {hint}")
         return ROOT_USER
-    user = app.parse_record(name, str(found.get("Value") or "")).fields.get("user")
+    user = found.fields.get("user")
     if user is None:
         msg.warn(f"no user in the deploy record {name}; running {UNINSTALL} as {ROOT_USER}; {hint}")
         return ROOT_USER
@@ -531,7 +531,7 @@ def _recorded_user(name: str, found: Mapping[str, Any] | None) -> str:
 
 
 def _left(
-    ec2: EC2Client, service: Service, name: str, found: Mapping[str, Any] | None, one: Instance
+    ec2: EC2Client, service: Service, name: str, found: Record | None, one: Instance
 ) -> Record | None:
     """外したあとに残す記録。アプリが起動テンプレートの AMI に焼いてなければ None。
 
@@ -542,7 +542,7 @@ def _left(
     """
     if found is None:
         return None
-    record = app.parse_record(name, str(found.get("Value") or ""))
+    record = found
     image_id = record.fields.get("baked_image")
     if not image_id or image_id != resources.default_image(ec2, service):
         return None
@@ -587,13 +587,17 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
         if code not in (0, ABSENT_CODE):
             raise TemtError(f"cannot check {directory} on {one.id} (exit {code})")
         present = code == 0
-        found = app.read(ssm, record)
+        parameter = app.read(ssm, record)
         # ディレクトリも記録も無ければ、アプリ ID の打ち間違いとみなす
-        if not present and found is None:
+        if not present and parameter is None:
             raise TemtError(
                 f"no app {app_id} for {service.name}: no {directory} on {one.id}, "
                 f"and no record {record}"
             )
+        # 読めない記録の警告を 1 度だけ出すよう、ここで 1 度だけ読む
+        found = None
+        if parameter is not None:
+            found = app.parse_record(record, str(parameter.get("Value") or ""))
         what = f"remove {app_id} from {one.id}"
         # uninstall を実行するユーザー。ディレクトリが無ければ実行しないので決めない
         runner = ROOT_USER

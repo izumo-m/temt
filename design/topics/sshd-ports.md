@@ -58,7 +58,12 @@ instance is started again.
    the request is refused, warn (`association <name>-sshd: cannot ask to run it now:
    <error>; it runs when an instance starts next time`) and continue; it runs at the
    next launch. If the content is the same, do nothing; on a launching instance State
-   Manager runs it by itself.
+   Manager runs it by itself. Accepted gap: if `apply` stops between creating the
+   association and requesting the run while an instance is running, a rerun finds it
+   unchanged and requests nothing, so that instance stays `(not run)` in `status`
+   until it is terminated and started again (or `SshdPorts` is changed). It needs an
+   interrupt or a connection error (a `BotoCoreError`, which is not caught as a refusal)
+   in that window right at the first creation.
 
 `destroy` deletes every association named `<name>-sshd` and reports each as
 `association <name>-sshd (<association ID>): deleted` (or `absent` if it vanished in

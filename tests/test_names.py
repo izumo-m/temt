@@ -132,6 +132,9 @@ def test_a_relative_value_rejected(
         "/srv/a\\b",
         "/srv/a%b",
         "/srv/a$b",
+        "/srv/a\x1bb",
+        # UTF-8 として読めないバイト。Python は対にならないサロゲートとして読む
+        "/srv/a\udcffb",
     ],
 )
 def test_a_value_ssh_cannot_hold_rejected(
@@ -146,10 +149,10 @@ def test_a_value_ssh_cannot_hold_rejected(
 @pytest.mark.parametrize(
     ("value", "rule"),
     [
-        ("\x1b[2J/temt", "must be an absolute path"),
         (
             "/srv/\x1b[2J a",
-            "must not contain whitespace, a quote, a backslash, a percent sign, or a dollar sign",
+            "must not contain whitespace, a quote, a backslash, a percent sign, a dollar sign, "
+            "or an unprintable character",
         ),
     ],
 )

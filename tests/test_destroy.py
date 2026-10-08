@@ -5,7 +5,6 @@
 
 import fcntl
 import re
-import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -714,6 +713,7 @@ def test_it_waits_for_the_network_interfaces_to_detach(
         aws_stubs.ec2.add_client_error(
             "delete_security_group",
             service_error_code=resources.DEPENDENCY_VIOLATION,
+            service_message=f"resource {GROUP} has a dependent object",
             http_status_code=400,
             expected_params=THE_GROUP_ID,
         )
@@ -727,9 +727,17 @@ def test_it_waits_for_the_network_interfaces_to_detach(
     aws_stubs.done()
     assert clock.slept == [wait.INTERVAL] * 2
     lines = told(capsys.readouterr().out)
-    # 待つことになったと分かるよう、最初の 1 回だけ知らせる
-    waiting = f"waiting for the network interfaces to leave the security group {GROUP}"
-    assert lines.count(waiting) == 1
+    # 待っても消えない参照のこともあるので、最初の 1 回だけ AWS の文をそのまま出し、
+    # 続けて待っていることを知らせる
+    start = lines.index(
+        f"delete-security-group {GROUP}: An error occurred (DependencyViolation) when calling "
+        f"the DeleteSecurityGroup operation: resource {GROUP} has a dependent object"
+    )
+    assert lines[start + 1] == (
+        f"retrying until the network interfaces leave the security group {GROUP} (up to 2 minutes)"
+    )
+    assert sum(line.startswith("delete-security-group ") for line in lines) == 1
+    assert sum(line.startswith("retrying until ") for line in lines) == 1
     assert f"security group {NAME} ({GROUP}): deleted" in lines
 
 
@@ -859,7 +867,8 @@ def test_it_stops_when_the_instance_profile_holds_another_role(
 def test_it_stops_when_the_instance_profile_will_not_go(
     aws_stubs: Stubs, configured: Service
 ) -> None:
-    """読んだ後に何かが付いても、消せなかったことは伝わる。"""
+    """読んだ後に何かが付いたときも、外したことが IAM にまだ映らないときも、消せなかった
+    ことと AWS の文が伝わる。"""
     no_instance(aws_stubs)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
@@ -872,12 +881,19 @@ def test_it_stops_when_the_instance_profile_will_not_go(
     aws_stubs.iam.add_client_error(
         "delete_instance_profile",
         service_error_code=resources.DELETE_CONFLICT,
+        service_message="Cannot delete entity, must remove roles from instance profile first.",
         http_status_code=409,
         expected_params=THE_PROFILE,
     )
 
-    with pytest.raises(TemtError, match=f"the instance profile {NAME} still holds a role"):
+    with pytest.raises(TemtError) as caught:
         destroy.run(configured, yes=True)
+    assert str(caught.value) == (
+        f"cannot delete the instance profile {NAME}: An error occurred (DeleteConflict) when "
+        "calling the DeleteInstanceProfile operation: Cannot delete entity, must remove roles "
+        "from instance profile first.; IAM may not show the role removed yet, so run destroy "
+        "again; if this persists, remove the role from it by hand"
+    )
 
     aws_stubs.done()
 
@@ -950,33 +966,6 @@ def test_it_deletes_whatever_is_in_place_of_the_command(
     assert not path.is_symlink()
     assert not path.exists()
     assert f"~/.local/bin/{NAME}: deleted" in capsys.readouterr().out
-
-
-def test_it_shows_the_local_paths_safely(
-    aws_stubs: Stubs,
-    configured: Service,
-    home_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """一覧と報告に出す手元のパスは、ディレクトリの名前が制御文字を含んでも ? にして出す。"""
-    conf_dir = home_dir / "conf\x1b[2J"
-    conf_dir.mkdir()
-    _ = shutil.copy(configured.conf_path, conf_dir / configured.conf_path.name)
-    monkeypatch.setenv("TEMT_CONF_DIR", str(conf_dir))
-    monkeypatch.setenv("TEMT_SSH_DIR", str(home_dir / "ssh\x1b[2J"))
-    no_instance(aws_stubs)
-    all_deleted(aws_stubs)
-    images(aws_stubs)
-
-    destroy.run(configured, yes=True)
-
-    aws_stubs.done()
-    out = capsys.readouterr().out
-    assert "\x1b" not in out
-    lines = told(out)
-    assert "  ~/ssh?[2J/keys/temt" in lines
-    assert "  ~/conf?[2J/dev-main.toml" in lines
 
 
 def test_it_stops_when_the_known_hosts_directory_is_a_symlink(

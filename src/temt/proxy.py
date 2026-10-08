@@ -14,7 +14,6 @@ boto3 を使うので、この module は cli.run が呼ばれたときに読み
 from __future__ import annotations
 
 import os
-import sys
 from typing import TYPE_CHECKING
 
 from temt import aws, conf, home, instances, msg, proc, relay, sshd, table
@@ -240,6 +239,7 @@ def run(service: Service, port: int) -> None:
     env["AWS_PAGER"] = ""
     _align_profile(values, env)
     home.use_known_hosts(service, one.id)
-    # exec の後は Python の出力バッファが失われるので、知らせたものを先に流す
-    sys.stderr.flush()
+    # exec の後は Python の出力バッファが失われるので、知らせたものを先に流す。標準エラー
+    # 出力が閉じていても落ちない
+    msg.flush()
     execvpe(argv[0], argv, env)

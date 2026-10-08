@@ -207,6 +207,11 @@ pair, and AMIs are kept, and the next `apply` uses them as they are. There is no
    - If the role has a managed policy or another instance profile attached, stop
      without deleting even the inline policies, because deleting them first would lose
      only the hand-attached policies while the role remains.
+   - Deleting the instance profile or the role can still fail with `DeleteConflict`:
+     right after the role was removed from the profile, IAM may not show it yet, and
+     something may have been attached after the check. AWS's text does not tell which,
+     so the error quotes it and gives both remedies (run destroy again; if it persists,
+     or something is attached, remove or detach it by hand).
 5. Delete `~/.ssh/temt/known_hosts.d/<name>/` and the service command
    `~/.local/bin/<name>`. The service command is deleted whatever its content. If the
    known_hosts directory is a symlink, stop without following it

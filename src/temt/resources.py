@@ -72,7 +72,9 @@ DELETE_CONFLICT = "DeleteConflict"
 # 終了したインスタンスのネットワークインターフェースがまだセキュリティグループに
 # 付いているときに、削除が返す誤りの名前。外れるまで繰り返せば消せる
 DEPENDENCY_VIOLATION = "DependencyViolation"
-# その待ち合わせの締め切り（秒）
+# delete-launch-template-versions に 1 回で渡せるバージョンの数の上限
+VERSIONS_PER_CALL = 200
+# その待ち合わせの締め切り（秒）。外れるのはふつう数十秒以内なので、余裕を見る
 GROUP_DEADLINE = 120
 # EC2 が、作ったばかりのインスタンスプロファイルをまだ見つけられないときの誤り。
 # update は起動テンプレートより先にインスタンスプロファイルを揃えるので、この誤りは
@@ -790,17 +792,19 @@ def template_data(
     return data
 
 
-def _warnings(result: Mapping[str, Any], name: str) -> None:
+def _warnings(result: Mapping[str, Any], name: str, *, profile_aligned: bool) -> None:
     """AWS が返した起動テンプレートの警告を伝える。
 
     AWS は作るときに中身を最後まで検査せず、問題があれば Warning で返す。捨てると
-    次の start まで分からないので、そのまま見せる。インスタンスプロファイルが無いと
-    いう警告だけは、直前に揃えたものが見えていないだけなので、そう添える。
+    次の start まで分からないので、そのまま見せる。profile_aligned（apply の update が
+    直前にインスタンスプロファイルを揃えた）なら、プロファイルが無いという警告は、
+    揃えたものが見えていないだけなので、そう添える。bake はプロファイルを確かめない
+    ので添えない。手で消されていれば、待っても直らないからである。
     """
     warning: Mapping[str, Any] = result.get("Warning") or {}
     for error in warning.get("Errors") or []:
         code = error.get("Code")
-        note = f" ({NOT_READY_NOTE})" if code == PROFILE_NOT_READY else ""
+        note = f" ({NOT_READY_NOTE})" if profile_aligned and code == PROFILE_NOT_READY else ""
         msg.warn(
             f"launch template {name}: {code}: {table.printable(str(error.get('Message')))}{note}"
         )
@@ -881,8 +885,15 @@ def _delete_versions(ec2: EC2Client, name: str, numbers: list[str]) -> None:
 
     ここに来る時点でテンプレートは新しい既定バージョンに切り替わっている。消し残しは
     次の start にも ssh の設定にも響かないので、呼び出しそのものを断られたときも
-    知らせるだけにして、apply や bake の残りの手順を続ける。
+    知らせるだけにして、apply や bake の残りの手順を続ける。1 回に渡せる数には上限が
+    あるので、VERSIONS_PER_CALL ずつに分けて頼む。
     """
+    for start in range(0, len(numbers), VERSIONS_PER_CALL):
+        _delete_some_versions(ec2, name, numbers[start : start + VERSIONS_PER_CALL])
+
+
+def _delete_some_versions(ec2: EC2Client, name: str, numbers: list[str]) -> None:
+    """_delete_versions の 1 回分。"""
     try:
         deleted = ec2.delete_launch_template_versions(LaunchTemplateName=name, Versions=numbers)
     except ClientError as e:
@@ -1090,7 +1101,7 @@ def point_image(ec2: EC2Client, service: Service, image_id: str) -> None:
     made = _version(added.get("LaunchTemplateVersion", {}).get("VersionNumber"), name)
     _ = ec2.modify_launch_template(LaunchTemplateName=name, DefaultVersion=str(made))
     msg.info(f"launch template {name}: {UPDATED} (version {made}, {image_id})")
-    _warnings(added, name)
+    _warnings(added, name, profile_aligned=False)
     _delete_versions(ec2, name, others)
 
 
@@ -1272,7 +1283,7 @@ def template(ec2: EC2Client, service: Service, found: TemplateDiff, group_id: st
         )
         number = _version(made["LaunchTemplate"].get("DefaultVersionNumber"), name)
         msg.info(f"launch template {name}: {CREATED} (version {number})")
-        _warnings(made, name)
+        _warnings(made, name, profile_aligned=True)
         return
     if found.tags:
         _ = ec2.create_tags(
@@ -1289,7 +1300,7 @@ def template(ec2: EC2Client, service: Service, found: TemplateDiff, group_id: st
     number = _version(added.get("LaunchTemplateVersion", {}).get("VersionNumber"), name)
     _ = ec2.modify_launch_template(LaunchTemplateName=name, DefaultVersion=str(number))
     msg.info(f"launch template {name}: {UPDATED} (version {number})")
-    _warnings(added, name)
+    _warnings(added, name, profile_aligned=True)
     # 消す相手は、検出したときに控えたもの
     _delete_versions(ec2, name, [str(one) for one in found.versions if one != number])
 
@@ -1610,7 +1621,10 @@ def _delete_group(ec2: EC2Client, service: Service, group_id: str) -> None:
     """セキュリティグループを 1 つ消す。
 
     終了したインスタンスのネットワークインターフェースが外れるまで、削除は
-    DependencyViolation で失敗する。外れるのを締め切りまで待つ。
+    DependencyViolation で失敗する。外れるのを締め切りまで待つ。他のセキュリティ
+    グループの規則などが参照していても同じ誤りになり、こちらは待っても消えない。
+    AWS の文では見分けられないので、最初の 1 回にその文をそのまま出し、待っていることを
+    続けて知らせる。待ちきれずに終わっても、原因はその行で分かる。
     """
     stage = f"the network interfaces to leave the security group {group_id}"
     told = False
@@ -1623,8 +1637,12 @@ def _delete_group(ec2: EC2Client, service: Service, group_id: str) -> None:
             code = error_code(e)
             if code == DEPENDENCY_VIOLATION:
                 if not told:
-                    # 待つことになったと分かるよう、最初の 1 回だけ知らせる
-                    msg.info(f"waiting for {stage}")
+                    msg.info(f"delete-security-group {group_id}: {table.aws_error(e)}")
+                    minutes = GROUP_DEADLINE // 60
+                    msg.info(
+                        f"retrying until the network interfaces leave the security group "
+                        f"{group_id} (up to {minutes} minutes)"
+                    )
                     told = True
                 return None
             if code != NO_SUCH_GROUP:
@@ -1676,12 +1694,14 @@ def delete_instance_profile(iam: IAMClient, service: Service) -> None:
     try:
         _ = iam.delete_instance_profile(InstanceProfileName=service.name)
     except ClientError as e:
-        # 上で確かめているので、ふつうはここに来ない。読んだ後に足されたときの備え
+        # ロールを外した直後は、IAM に反映されるまで同じ誤りになることがある。読んだ後に
+        # 足されたときもここに来る。どちらか分からないので、AWS の文を添える
         if error_code(e) != DELETE_CONFLICT:
             raise
         raise TemtError(
-            f"the instance profile {service.name} still holds a role; "
-            f"remove it by hand and run destroy again"
+            f"cannot delete the instance profile {service.name}: {table.aws_error(e)}; "
+            "IAM may not show the role removed yet, so run destroy again; if this persists, "
+            "remove the role from it by hand"
         ) from None
     msg.info(f"instance profile {service.name}: {DELETED}")
 
@@ -1761,12 +1781,15 @@ def delete_role(iam: IAMClient, service: Service) -> None:
         if code == NO_SUCH_ENTITY:
             msg.info(f"role {service.name}: {ABSENT}")
             return
-        # 上で確かめているので、ふつうはここに来ない。読んだ後に付けられたときの備え
+        # インスタンスプロファイルから外した直後は、IAM に反映されるまで同じ誤りになる
+        # ことがある。読んだ後に付けられたときもここに来る。どちらか分からないので、AWS
+        # の文を添える
         if code != DELETE_CONFLICT:
             raise
         raise TemtError(
-            f"the role {service.name} still has a managed policy or an instance profile attached; "
-            f"detach it by hand and run destroy again"
+            f"cannot delete the role {service.name}: {table.aws_error(e)}; if nothing is "
+            "attached to it, IAM may not show the change yet, so run destroy again; "
+            "otherwise detach it by hand and run destroy again"
         ) from None
     msg.info(f"role {service.name}: {DELETED}")
 

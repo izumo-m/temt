@@ -10,6 +10,7 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TextIO
 
 from temt.msg import UsageError
 
@@ -84,6 +85,28 @@ def aws_error(e: Exception) -> str:
     return text
 
 
+def _filename(value: object) -> str:
+    """OSError の持つパスを表示する形。バイト列なら、Python がファイル名を読むように読む。"""
+    if isinstance(value, (str, bytes, os.PathLike)):
+        return printable(os.fsdecode(value))
+    return printable(str(value))
+
+
+def os_error(e: OSError) -> str:
+    """OSError の文。理由とパスを、表示できない文字を置き換えて並べる。
+
+    str(e) はパスを repr で書くので、制御文字や UTF-8 として読めないバイトが \\x1b や
+    \\udcff の形で出て、printable が置き換える他のパスの表示と揃わない。そこで理由
+    （strerror）とパスを別に取り出す。パスを持たない OSError は str(e) を置き換える。
+    """
+    if e.filename is None:
+        return printable(str(e))
+    text = f"{e.strerror or type(e).__name__}: {_filename(e.filename)}"
+    if e.filename2 is not None:
+        text += f" -> {_filename(e.filename2)}"
+    return text
+
+
 def _cell(value: str | None) -> str:
     """表に書く値。空なら EMPTY、表示できない文字は UNPRINTABLE にする。"""
     if not value:
@@ -126,12 +149,18 @@ def _aligned(lines: Sequence[Sequence[str]]) -> str:
 def out(text: str) -> None:
     """text をそのまま UTF-8 で標準出力に書く。読み手が先に閉じれば、何も言わずにやめる。
 
-    表と、app get の値と、diff の変更に使う。ロケールの文字コードで書くと、ASCII しか書けない
-    ロケールでは値を出せないので、UTF-8 のバイト列で書く。
+    表と、app get の値と、diff の変更と、--help と --version に使う。ロケールの文字コード
+    で書くと、ASCII しか書けないロケールでは値を出せないので、UTF-8 のバイト列で書く。
+    起動したときから標準出力が閉じていれば（>&-）、読み手がいないので何もしない。
     """
+    stdout: TextIO | None = sys.stdout
+    if stdout is None:
+        return
     try:
         sys.stdout.flush()
-        sys.stdout.buffer.write(text.encode())
+        # 値は printable を通してあるが、通さずに出す値（app get）に UTF-8 にできない
+        # 文字があっても落ちないよう、? にする
+        sys.stdout.buffer.write(text.encode(errors="replace"))
         sys.stdout.buffer.flush()
     except BrokenPipeError:
         # 読み手（head など）が先に閉じた。残りは捨て、終わるときに Python が書き出し

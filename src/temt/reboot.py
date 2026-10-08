@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
 
-from temt import aws, conf, instances, lock, msg, wait
+from temt import aws, conf, instances, lock, msg, table, wait
 from temt.aws import error_code, field
 from temt.msg import TemtError
 
@@ -78,10 +78,11 @@ def _send(ssm: SSMClient, instance_id: str) -> str | None:
     return field(sent.get("Command") or {}, "CommandId")
 
 
-def _result(ssm: SSMClient, command_id: str, instance_id: str) -> tuple[str, str]:
-    """送った Run Command の状態と、標準出力の前後の空白を除いたものを返す。
+def _result(ssm: SSMClient, command_id: str, instance_id: str) -> tuple[str, str, str]:
+    """送った Run Command の状態と、標準出力の前後の空白を除いたもの、失敗の様子を返す。
 
-    まだ実行の記録が無いときと、エージェントが受け取れないと断られたときは、まだ
+    失敗の様子は、状態に StatusDetails と、標準エラー出力の空でない最初の行を添えた
+    もの。まだ実行の記録が無いときと、エージェントが受け取れないと断られたときは、まだ
     終わっていないものとする。
     """
     try:
@@ -89,8 +90,15 @@ def _result(ssm: SSMClient, command_id: str, instance_id: str) -> tuple[str, str
     except ClientError as e:
         if error_code(e) not in (NO_INVOCATION, NOT_REACHABLE):
             raise
-        return PENDING, ""
-    return found.get("Status") or "", (found.get("StandardOutputContent") or "").strip()
+        return PENDING, "", ""
+    status = found.get("Status") or ""
+    detail = status or "(no status)"
+    if found.get("StatusDetails"):
+        detail += f" ({found.get('StatusDetails')})"
+    error = (found.get("StandardErrorContent") or "").strip()
+    if error:
+        detail += f": {error.splitlines()[0].strip()}"
+    return status, (found.get("StandardOutputContent") or "").strip(), table.printable(detail)
 
 
 class _Reader:
@@ -117,6 +125,8 @@ class _Reader:
         self.sending = sending
         self.command_id: str | None = None
         self.sent_at = 0.0
+        # 成功せずに終わったことを知らせたか
+        self.told = False
 
     def poll(self) -> str | None:
         """読めた boot_id を返す。まだ読めていなければ None。"""
@@ -131,11 +141,20 @@ class _Reader:
             self.command_id = _send(self.ssm, self.instance_id)
             self.sent_at = wait.clock()
             return None
-        status, output = _result(self.ssm, self.command_id, self.instance_id)
+        status, output, detail = _result(self.ssm, self.command_id, self.instance_id)
         if status in UNFINISHED and wait.clock() - self.sent_at < COMMAND_PATIENCE:
             return None
-        self.command_id = None
-        return output if status == SUCCESS and output else None
+        command_id, self.command_id = self.command_id, None
+        if status == SUCCESS and output:
+            return output
+        if status not in UNFINISHED and not self.told:
+            # 送り直せば読めることが多いが、実行に失敗し続けるときに理由が分かるよう、
+            # 最初の 1 回だけ AWS の返した様子を知らせる
+            if status == SUCCESS:
+                detail += ", but printed nothing"
+            msg.info(f"get-command-invocation {command_id}: {detail}; sending it again")
+            self.told = True
+        return None
 
 
 def _async_hint(service: Service) -> str:

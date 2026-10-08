@@ -271,7 +271,7 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
    as the user, with `/` as the current directory. ssh's output goes to stdout and
    stderr as it is.
 4. Write the record `/<name>/<app ID>/deploy`: `user` is the user that ran `install`,
-   `deployed` is the local time when `install` finished, in UTC, `instance` is the ID of
+   `deployed` is when `install` finished by the client's clock, in UTC, `instance` is the ID of
    the instance, and `options` is the values decided in step 2 whose source is `given` or
    `kept`. Carry over `baked_version`, `baked_image`, and `baked_options` from the
    previous record.
@@ -331,7 +331,7 @@ Depending on the previous record:
 
 | Previous record | Behavior |
 | --- | --- |
-| None (first `deploy`, or after `app remove` or `destroy`), or `removed` is this instance | Nothing is carried over |
+| None (first `deploy`, or after `destroy` or an `app remove` that deleted the record), or `removed` is this instance | Nothing is carried over. A kept record whose `removed` names another instance (the removal was lost) carries its `options` over; `app remove` set them to the baked options |
 | Readable from SSM, but the record is unreadable or its `options` is malformed | Exit without changing anything, telling the user to give the options again with `--reset`. If the app declares no options, nothing would be carried over, so it does not stop; a malformed `options` is discarded with a warning |
 | Has a name the app does not declare | Warn, drop it, and continue. It disappears from the record too |
 | A carried-over value does not match `pattern` | Exit without changing anything, telling the user to give `<name>=<value>`, or `<name>=` if there is a default |
@@ -408,7 +408,10 @@ removed from the config file and `apply`ed by the user after removing the app.
    retry continue from where it stopped. Other values of the app and the role's policies
    are not deleted.
 4. With `--bake`, do `bake` steps 5-9 ([ami.md](ami.md#bake)) holding the same lock.
-   Without it, report that the app stays in the AMI until baked.
+   Without it, report
+   `removed <app ID> from <instance-id>; run 'temt bake --svc <svc>' to remove it from
+   the next instance too`. This is printed even when the record was deleted because the
+   app is not in the template's AMI, where baking changes nothing for it.
 
 ## Bundled apps
 

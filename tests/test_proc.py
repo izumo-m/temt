@@ -55,6 +55,14 @@ def test_run_puts_a_failure_on_one_line() -> None:
     assert str(caught.value) == f"{sys.executable}: WARNING: TOO OPEN Load key: bad permissions"
 
 
+def test_run_replaces_bytes_that_cannot_be_read() -> None:
+    """鍵のパスに読めないバイトがあっても、ssh-keygen の言うことを ? にして知らせる。"""
+    bad = "import sys; sys.stderr.buffer.write(b'Load key \"/k/a\\xffb\": bad'); sys.exit(1)"
+    with pytest.raises(TemtError) as caught:
+        proc.run([sys.executable, "-c", bad])
+    assert str(caught.value) == f'{sys.executable}: Load key "/k/a?b": bad'
+
+
 def test_stream_shows_the_output_as_it_is(capfd: pytest.CaptureFixture[str]) -> None:
     """子の標準出力は標準出力に、標準エラー出力は標準エラー出力に、そのまま見せる。"""
     code = proc.stream(["sh", "-c", "cat; echo out; echo err >&2; exit 3"], b"in\n")

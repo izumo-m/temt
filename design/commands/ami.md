@@ -101,9 +101,23 @@ When `bake` stops partway (interrupt, deadline, AWS error):
   `deploy` again and bake to align them).
 - After the template is pointed in 8, before the records are rewritten: the records stay
   unbaked, the records' AMI and the template's AMI disagree, and `app list` shows
-  `lost`. The apps are in the AMI, so `deploy` again and bake to align them. Run
-  `terminate`.
+  `lost`. The instance is still `stopped`, so run `bake` again: every record aligns
+  (`removed` ones are deleted), and `ami prune` deletes the extra AMI. Records already
+  rewritten when it stopped (one `put-parameter` each) show `lost` after that; `deploy`
+  them again and bake. Or run
+  `terminate`; the apps are in the AMI, so `deploy` again and bake to align them.
 - 9: run `terminate`.
+
+Wherever the template ends up at the new AMI while the records were not rewritten and
+the instance is gone (the alternative after 6; `terminate` after the config file was
+rewritten or the template was pointed in 8; and step 8 failing to read the records,
+after which `bake` warns `cannot read the deploy records: ...` and terminates), a record
+whose `instance` is this instance shows `lost` although the app is in the new AMI
+(`deploy` again and bake), and a record whose `removed` is this instance also shows
+`lost`. That app is not in the new AMI, so do not `deploy` it again; later bakes never
+touch the record (`removed` no longer matches and `baked_image` is not the source AMI),
+so delete it: `start`, then `app remove` (the directory is absent and `baked_image` is
+not the template's AMI, so the record is deleted).
 
 If `bake` stopped before pointing the template, no template refers to the new AMI, so
 `ami prune` deletes it. When the config file's `ImageId` points at that AMI (stopped
@@ -132,7 +146,8 @@ listed. Without it, all temt AMIs in the environment decided by `--profile` and
 For `USED`, every version of every launch template in the account and region is looked
 at, not only temt's. A version whose `ImageId` is an SSM parameter (`resolve:ssm:`) is
 resolved by AWS (`ResolveAlias`) and counts as referring to the AMI it points at now. If
-it cannot be resolved, warn, naming the version. `ami prune` deletes the prune candidates
+it cannot be resolved, warn, naming the version and the reason (AWS's error text when
+AWS refuses to resolve it). `ami prune` deletes the prune candidates
 (names `bake` makes, state `available` or `failed`) whose `USED` is `-`. Rows are
 ordered by the `temt:service` value and creation time. AMIs in `deregistered`, visible
 right after deregistration, and `disabled` AMIs, which `describe-images` does not return

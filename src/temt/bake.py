@@ -259,7 +259,9 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
     """
     # 手順 5
     if one.state == instances.RUNNING:
-        instances.stop(ec2, one.id)
+        # 確認を待つ間に止まったり終了したりしていれば、AWS が断る
+        with instances.refused(service, "bake"):
+            instances.stop(ec2, one.id)
         instances.wait_stopped(ec2, one.id)
     # 手順 6
     image_id, name = _create(ec2, service, one.id)

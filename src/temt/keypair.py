@@ -135,7 +135,7 @@ def _register(ec2: EC2Client, service: Service, values: Conf, found: KeyDiff) ->
         msg.info(f"created the key {printable(tilde(path))}")
     _ = ec2.import_key_pair(
         KeyName=values.KeyName,
-        PublicKeyMaterial=_mine(service, path).encode(),
+        PublicKeyMaterial=keys.material(_mine(service, path)),
         TagSpecifications=tags(values.KeyName),
     )
     msg.info(f"imported the key pair {values.KeyName}")
