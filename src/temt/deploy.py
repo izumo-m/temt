@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from types_boto3_ssm.client import SSMClient
 
     from temt.app import Record
-    from temt.conf import Conf
     from temt.instances import Instance
     from temt.manifest import Manifest
     from temt.names import Service
@@ -224,21 +223,7 @@ def _ssh(service: Service, command: str, data: bytes | None = None) -> int:
     return proc.stream([SSH, "-T", service.name, command], data)
 
 
-def _profile_hint(service: Service, values: Conf) -> str:
-    """--profile が ssh の側に届かないことの手がかり。届かないときだけ添える。
-
-    ProxyCommand の proxy は --profile を受け取らず、設定ファイルの AwsProfile か、
-    無ければ AWS の既定の規則でプロファイルを決める。
-    """
-    if conf.OPTION_PROFILE is None or values.AwsProfile == conf.OPTION_PROFILE:
-        return ""
-    return (
-        f"; --profile does not reach the ssh proxy, so write AwsProfile in "
-        f"{table.printable(tilde(service.conf_path))}"
-    )
-
-
-def _reach(service: Service, values: Conf, one: Instance) -> None:
+def _reach(service: Service, one: Instance) -> None:
     """ssh でつながり、sudo が使え、つながった先が one であることを確かめる。
 
     何かを変える前に呼ぶ。初めてつなぐインスタンスのホスト鍵を確かめられないときなどに、
@@ -248,18 +233,16 @@ def _reach(service: Service, values: Conf, one: Instance) -> None:
     """
     msg.info(f"checking that 'ssh {service.name}' reaches {one.id}")
     code, out = proc.read([SSH, "-T", service.name, f"sudo -n cat {INSTANCE_ID_FILE}"])
-    hint = _profile_hint(service, values)
     if code != 0:
         raise TemtError(
-            f"cannot reach {one.id} with 'ssh {service.name}' (exit {code}){hint}; "
-            f"nothing was changed"
+            f"cannot reach {one.id} with 'ssh {service.name}' (exit {code}); nothing was changed"
         )
     # ログインシェルが何かを書いても、ID だけを取り出す
     found = INSTANCE_ID_RE.findall(out)
     if found[-1:] != [one.id]:
         raise TemtError(
             f"'ssh {service.name}' reached {found[-1] if found else 'an unknown instance'}, "
-            f"not {one.id}{hint}; nothing was changed"
+            f"not {one.id}; nothing was changed"
         )
 
 
@@ -467,7 +450,7 @@ def run(
         # 手順 2
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "deploy")
-        _reach(service, values, one)
+        _reach(service, one)
         _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user")
         before = _previous(ssm, record_name)
         # このインスタンスから外したアプリは、外す前のオプションを引き継がない。焼いた版は
@@ -579,7 +562,7 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "app remove")
         # 確認の前に、読むだけで分かることを確かめる
-        _reach(service, values, one)
+        _reach(service, one)
         check = CHECK_SCRIPT.format(absent=ABSENT_CODE, no_uninstall=NO_UNINSTALL_CODE)
         code = _ssh(service, _remote(check, directory))
         if code == NO_UNINSTALL_CODE:

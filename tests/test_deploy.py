@@ -1183,9 +1183,7 @@ def test_it_stops_when_ssh_reaches_another_instance(
 
     with pytest.raises(
         TemtError,
-        match=f"'ssh {NAME}' reached i-0fedcba9876543210, not {INSTANCE}; --profile does not "
-        "reach the ssh proxy, so write AwsProfile in ~/.config/temt/dev-main.toml; "
-        "nothing was changed",
+        match=f"^'ssh {NAME}' reached i-0fedcba9876543210, not {INSTANCE}; nothing was changed$",
     ):
         if command == "deploy":
             deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
@@ -1575,27 +1573,6 @@ def test_install_check_and_uninstall_commands_pass_through_the_shell(
     assert over_ssh(deploy._remote(deploy.UNINSTALL_SCRIPT, str(directory), "root"), shell) == 0
     assert not directory.exists()
     assert over_ssh(deploy._remote(check, str(directory)), shell) == deploy.ABSENT_CODE
-
-
-def test_the_profile_hint_is_only_for_a_profile_that_does_not_reach_ssh(
-    aws_stubs: Stubs,
-    configured: Service,
-    jupyter: Path,
-    ssh: Ssh,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--profile を付けていなければ、つながらない理由は --profile ではない。"""
-    ready(aws_stubs)
-    ssh.reached = None
-
-    with pytest.raises(TemtError) as caught:
-        deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-    assert "--profile" not in str(caught.value)
-
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    ready(aws_stubs)
-    with pytest.raises(TemtError, match="--profile does not reach the ssh proxy"):
-        deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
 
 # --- オプション ---

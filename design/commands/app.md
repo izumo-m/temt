@@ -248,7 +248,8 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
    needed because the `proxy` in ssh's `ProxyCommand` does not receive `--profile`; it
    looks up the instance with `AwsProfile` of the config file, or the profile chosen by
    AWS's default rules ([commands/ssh.md](ssh.md), [config.md](../config.md#profile)).
-   Only when `--profile` is given and differs from `AwsProfile`, it says so. The
+   The error adds no hint about `--profile`: the user docs say it does not reach ssh,
+   and a hint could not tell `AWS_PROFILE` from `AwsProfile` for the user. The
    `ProxyCommand`'s waiting notices and ssh's errors go to stderr as they are.
 
    If the user that runs `install` is not root, check with `id -u` that the user exists on
