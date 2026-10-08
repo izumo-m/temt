@@ -7,6 +7,7 @@ from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from types import FrameType
 from typing import Any, NoReturn
@@ -159,8 +160,14 @@ def stub_failures() -> Iterator[list[BotoCoreError]]:
 API_CALL = "_make_api_call"
 
 
+@cache
 def offline() -> boto3.Session:
-    """資格情報とリージョンを明示した、何も探しに行かない Session。"""
+    """資格情報とリージョンを明示した、何も探しに行かない Session。
+
+    テストのあいだ 1 つを使い回す。Session を作るたびに botocore が API の定義を読み
+    直し、テストが遅くなるからである。クライアントはテストごとに作るので、Stubber は
+    テストをまたがない。
+    """
     return boto3.Session(region_name=REGION, aws_access_key_id="x", aws_secret_access_key="y")
 
 
