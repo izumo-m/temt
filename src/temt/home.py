@@ -246,8 +246,8 @@ def _proxy_command(service: Service) -> str:
     （空白や % を含みうる）を ssh の設定に出さないためである。temt はパスでなく名前で
     書き、env が PATH から探す。入れ方や版で temt の場所が変わっても、書き直さずに済む。
     %r は ssh がログインするユーザーで、proxy はそのユーザーに鍵を送る。ssh は %r を
-    そのまま埋めるので、シングルクォートで囲み、シェルに展開させない。シェルの記号を
-    断らない古い OpenSSH でも、ユーザー名からコマンドを差し込まれないようにする。
+    そのまま埋めるので、シングルクォートで囲み、シェルに展開させない。' を含む
+    ユーザー名は、OpenSSH 9.6 からは ssh が断る。
     """
     assigned = " ".join(f"{env}='{tilde(path)}'" for env, path in places().items())
     return f"env {assigned} {PREFIX} proxy --svc {service.svc} --user '%r' %p"

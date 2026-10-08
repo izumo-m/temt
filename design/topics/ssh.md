@@ -75,9 +75,9 @@ Host temt-dev-main
 - `ProxyCommand` calls `temt` by name, not by path, and passes
   `proxy --svc <svc> --user '%r' %p`. `%r` is the user ssh logs in as, so that `proxy`
   sends the login key for that user even when it is given on ssh's command line. ssh
-  puts `%r` in as it is, so it is in single quotes: the shell does not expand it, and
-  an OpenSSH old enough to let shell characters into a user name cannot be made to run
-  a command through it.
+  puts `%r` in as it is, so it is in single quotes and the shell does not expand it. A
+  user name containing `'` would break out of the quotes; OpenSSH 9.6 and later refuse
+  such names on the command line.
   `env` looks up `temt` in the PATH inherited from ssh, so changing how or which version
   of `temt` is installed needs no rewrite. The aws-cli that `proxy` calls is looked up in
   the same PATH. `%p` is the `Port` value, or the `ssh -p` value when given.

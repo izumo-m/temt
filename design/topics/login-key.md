@@ -38,6 +38,8 @@ The ssh config alone decides it; the config file has no key setting.
   ([ssh.md](ssh.md#the-ssh-directorys-config)). To use another key, edit
   `IdentityFile` there.
 - `proxy` asks `ssh -G <name>` for `user` and the `identityfile` lines, in ssh's order.
+  With `--user`, it asks `ssh -G -l <user> <name>`, so that `Match user` blocks are read
+  as ssh reads them.
   `ssh -G` prints them unexpanded, so `proxy` expands a leading `~`, `%d` (home), `%u`
   (local user), `%r` (remote user), and `%%`; any other token, or `${NAME}`, stops with
   `temt cannot expand IdentityFile <value>; write it as a path`.
@@ -54,6 +56,12 @@ The ssh config alone decides it; the config file has no key setting.
   that does not ends `proxy` with a usage error.
 - `~user/` is not expanded; such a path is taken as relative, has no `.pub`, and is
   skipped.
+- `ssh -G` is asked about `<name>`, not the name typed. With an alias (`Host
+  temt-dev-main dev`, `ssh dev`), `IdentityFile` lines that only `Host dev` or `Match
+  originalhost dev` give are not seen. The `Include` at the top of `~/.ssh/config` puts
+  the block's own lines first, so this matters only when none of those has a `.pub`.
+  Passing `%n` in `ProxyCommand` would fix it but changes the ssh config temt writes;
+  the requester chose to leave it.
 
 ## The default key
 

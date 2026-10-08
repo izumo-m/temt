@@ -235,7 +235,8 @@ AWS の一覧（`describe-instances`）は、要求から数秒遅れて変わ�
 - ssh の設定。`~/.ssh/temt/config` に `Host temt-<svc>` のブロックが
   足され、`~/.ssh/config` の先頭に、目印のコメントと
   `Include ~/.ssh/temt/config` の 2 行が足される
-- ログインの鍵 `~/.ssh/temt/keys/temt`。無ければ作られる（[ログインの鍵](#ログインの鍵)）
+- ログインの鍵 `~/.ssh/temt/keys/temt`。Host ブロックがこの鍵を使っていて、無ければ
+  作られる（[ログインの鍵](#ログインの鍵)）
 - サービスのコマンド `temt-<svc>`。`~/.local/bin` に無ければ書かれる
   （[サービスのコマンド](#サービスのコマンド)）
 
@@ -867,7 +868,7 @@ Session Manager 経由に戻すには、`TEMT_LOGIN` を消すか `ssm` にす�
 
 ## ログインの鍵
 
-temt は EC2 にキーペアを登録しない。ssh がつなぐたびに、`proxy` が ssh の使う鍵の公開鍵を
+temt は EC2 にキーペアを登録しない。ssh がつなぐたびに、temt が ssh の使う鍵の公開鍵を
 EC2 Instance Connect でインスタンスに送る。送った鍵が認められるのは 60 秒だけで、
 ssh はその間にログインする。AWS に鍵を残さないので、マシンごとに別の鍵でよい。
 
@@ -880,7 +881,7 @@ ssh はその間にログインする。AWS に鍵を残さないので、マシ
 `~/.ssh/temt/keys/temt` を書く。この鍵はどのサービスにも共通で、無ければ `apply` が
 作る。自分の鍵を使うには、`IdentityFile` を書き換える。`apply` はそれを書き換えない。
 
-`proxy` が送るのは、鍵の隣にある `.pub` である。`.pub` があれば、パスフレーズ付きの
+送るのは、鍵の隣にある `.pub` である。`.pub` があれば、パスフレーズ付きの
 鍵も使える。秘密鍵を ssh-agent に置き、`IdentityFile` に `.pub` を書いたときは、
 その `.pub` を送る。鍵を替えても、インスタンスを作り直す必要はない。次につないだときから
 新しい鍵が送られる。
@@ -889,8 +890,8 @@ ssh はその間にログインする。AWS に鍵を残さないので、マシ
 Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 `Permission denied (publickey)` で止まる。
 
-インスタンスの `~/.ssh/authorized_keys` にある鍵でも、そのまま入れる。
-送る鍵は、`authorized_keys` には書かれない。
+インスタンスの `~/.ssh/authorized_keys` にある鍵でも、そのまま入れる。ただし、その鍵でも
+隣に `.pub` があり、鍵を送れる必要がある。送る鍵は、`authorized_keys` には書かれない。
 
 ## アプリ
 

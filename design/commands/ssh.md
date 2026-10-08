@@ -4,9 +4,9 @@
 
 Runs as ssh's ProxyCommand. `<port>` defaults to 22 and accepts only an integer from 1
 to 65535. `--user` is the user ssh logs in as (`%r`), whom the login key is sent for;
-`ssh -G` cannot see a user given on ssh's command line (`ssh other@<name>`). It follows
-the user-name rule ([app.md](app.md#users)); one that does not is a usage error. Without
-it, the user from `ssh -G` is used. Does not take the lock.
+`ssh -G` cannot see a user given on ssh's command line (`ssh other@<name>`), so `proxy`
+passes it as `ssh -G -l <user>`. It follows the user-name rule ([app.md](app.md#users));
+one that does not is a usage error. Without it, the user from `ssh -G` is used. Does not take the lock.
 
 ## Routes
 

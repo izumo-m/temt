@@ -813,7 +813,11 @@ def test_main_writes_the_notices_only_to_stderr(
 
 
 def test_main_passes_the_user_from_ssh(
-    aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str]
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    ssh_config: SshConfig,
 ) -> None:
     """ProxyCommand の --user '%r' は、cli から proxy まで届き、そのユーザーに鍵を送る。"""
     _ = (configured, required)
@@ -822,6 +826,7 @@ def test_main_passes_the_user_from_ssh(
     key_sent(aws_stubs, {**SEND, "InstanceOSUser": "admin"})
     assert cli.main(["temt", "proxy", "--svc", "dev-main", "--user", "admin", "22"]) == 0
     assert execs.keys_sent == [1]
+    assert ssh_config.asked == [["ssh", "-G", "-l", "admin", NAME]]
 
 
 def test_main_refuses_a_user_that_breaks_the_rule(

@@ -119,12 +119,13 @@ def _expand(value: str, user: str) -> Path:
 def offered(host: str, user: str | None = None) -> tuple[str, Path]:
     """ssh が host にログインするユーザーと、送る公開鍵のファイル。ssh -G に尋ねる。
 
-    user は ssh から受け取ったユーザーで、あれば ssh -G のものより優先する。ssh は
-    IdentityFile を並んだ順に試すので、その順で、隣に .pub がある最初の鍵を使う。
+    user は ssh から受け取ったユーザーで、あれば ssh -G に -l で渡す。ssh のコマンド行で
+    変えたユーザーは ssh -G に見えず、Match user のブロックが読み落とされるからである。
+    ssh は IdentityFile を並んだ順に試すので、その順で、隣に .pub がある最初の鍵を使う。
     パスフレーズ付きの鍵でも、.pub があれば使える。IdentityFile が .pub そのものを
     指していれば（秘密鍵を ssh-agent やハードウェアの鍵に置く使い方）、それを使う。
     """
-    shown = proc.run([SSH, "-G", host])
+    shown = proc.run([SSH, "-G", *(["-l", user] if user else []), host])
     found = ""
     files: list[str] = []
     for line in shown.splitlines():

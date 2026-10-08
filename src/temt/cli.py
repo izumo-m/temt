@@ -400,7 +400,7 @@ class Request:
     yes: bool = False
     bake: bool = False
     force: bool = False
-    # --user の値。TARGET_COMMANDS だけが取る。省かれていれば None
+    # --user の値。TARGET_COMMANDS と ssh proxy が取る。省かれていれば None
     user: str | None = None
     # APP_OPTION_COMMANDS が取るオプションの名前と値。並びは打たれた順。値が None なら、
     # <名前>= で既定に戻す

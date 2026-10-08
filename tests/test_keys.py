@@ -248,10 +248,11 @@ def test_offered_expands_the_login_user(home_dir: Path, monkeypatch: pytest.Monk
 def test_offered_prefers_the_user_given_by_ssh(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ssh のコマンドラインで変えたユーザー（%r）は ssh -G に見えないので、渡されたものを使う。"""
+    """ssh のコマンドラインで変えたユーザー（%r）は ssh -G に見えないので、-l で渡す。"""
     put(home_dir / "keys" / "admin.pub")
-    _ = answer(monkeypatch, "identityfile ~/keys/%r", "user ubuntu")
+    called = answer(monkeypatch, "identityfile ~/keys/%r", "user admin")
     assert keys.offered(HOST, "admin") == ("admin", home_dir / "keys" / "admin.pub")
+    assert called == [["ssh", "-G", "-l", "admin", HOST]]
 
 
 def test_offered_takes_an_identity_file_that_is_a_public_key(
@@ -283,6 +284,16 @@ def test_offered_stops_without_a_public_key(
         f"put the .pub next to the key, or delete IdentityFile from the Host {HOST} block "
         "and run 'temt apply' to use the default key"
     )
+
+
+def test_offered_skips_a_path_under_another_users_home(
+    home_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """~user/ は展開しない。相対パスとして扱われ、.pub が無いので飛ばされる。"""
+    monkeypatch.chdir(tmp_path)
+    put(home_dir / "second.pub")
+    _ = answer(monkeypatch, "user ubuntu", "identityfile ~root/key", "identityfile ~/second")
+    assert keys.offered(HOST) == ("ubuntu", home_dir / "second.pub")
 
 
 def test_offered_stops_without_an_identity_file(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,24 +344,36 @@ def test_offered_reads_what_ssh_reads_from_the_host_block(
     home.prepare_dirs()
     edit = home.detect_host_block(Service("dev-main"), Conf())
     assert home.write_edit(edit)
-    config = tmp_path / "ssh-config"
-    put(
-        config,
-        f"Host {HOST}\n    IdentityFile %d/.ssh/missing\n\n"
-        + edit.after
-        + "\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n",
+    config = f"Host {HOST}\n    IdentityFile %d/.ssh/missing\n\n" + edit.after
+    use_config(tmp_path, monkeypatch, config + "\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n")
+    _ = make(keys.default_path())
+    _ = make(home_dir / ".ssh" / "id_ed25519")
+    assert keys.offered(HOST) == ("ubuntu", keys.public_path(keys.default_path()))
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs ssh")
+def test_offered_reads_the_block_for_the_user_given_by_ssh(
+    home_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ssh のコマンド行で変えたユーザーの Match user ブロックも、ssh と同じく読む。"""
+    use_config(
+        tmp_path,
+        monkeypatch,
+        f"Host {HOST}\n    IdentityFile ~/a\n\nMatch user admin\n    IdentityFile ~/admin\n",
     )
+    put(home_dir / "admin.pub")
+    assert keys.offered(HOST, "admin") == ("admin", home_dir / "admin.pub")
+
+
+def use_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str) -> None:
+    """手元の ssh に、config を -F で読ませる ssh を PATH の先頭に置く。"""
+    path = put(tmp_path / "ssh-config", config)
     real = shutil.which("ssh")
     assert real is not None
     bin_dir = tmp_path / "bin"
-    put(
-        bin_dir / "ssh", f'#!/bin/sh\nexec {shlex.quote(real)} -F {shlex.quote(str(config))} "$@"\n'
-    )
+    put(bin_dir / "ssh", f'#!/bin/sh\nexec {shlex.quote(real)} -F {shlex.quote(str(path))} "$@"\n')
     (bin_dir / "ssh").chmod(0o755)
-    _ = make(keys.default_path())
-    _ = make(home_dir / ".ssh" / "id_ed25519")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-    assert keys.offered(HOST) == ("ubuntu", keys.public_path(keys.default_path()))
 
 
 # --- 公開鍵のファイル ---
