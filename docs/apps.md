@@ -77,7 +77,7 @@ WantedBy=multi-user.target
 ```
 
 入れて、ssh のポート転送で見る。ブラウザで `http://localhost:8000/` を開くと
-`index.html` の中身が出る。転送は Ctrl-C で閉じる。
+`index.html` の中身が出る。
 
     temt-<svc> start
     temt-<svc> deploy ./hello
@@ -87,7 +87,7 @@ WantedBy=multi-user.target
 
     ssh temt-<svc> journalctl -u hello
 
-確かめ終えたら、残すなら焼き、残さないなら外す。どちらか一方を打つ。`bake` は
+確かめ終えたら、残すなら焼き、残さないなら外す。`bake` は
 インスタンスを終了する。
 
     temt-<svc> bake                 # 残すなら
@@ -224,11 +224,8 @@ root である。`HOME` はそのユーザーのホームになるので、mise 
 
 root 以外で実行するときは、`sudo -n -H -u <ユーザー>` を通すので、次に気をつける。
 
-- root が要る操作（`/etc` に置く、`systemctl` など）には `sudo` を付ける。ubuntu
-  ユーザーはパスワードなしで `sudo` を使える。ほかのユーザーは、sudoers に書かない
+- ubuntu ユーザーはパスワードなしで `sudo` を使える。ほかのユーザーは、sudoers に書かない
   限り使えない。
-- `sudo` は環境変数を落とす。`DEBIAN_FRONTEND=noninteractive sudo apt-get ...` では
-  なく、`sudo DEBIAN_FRONTEND=noninteractive apt-get ...` と書く。
 - `PATH` は sudo の `secure_path` で、`~/.local/bin` は入らず、`.profile` や
   `.bashrc` も読まれない。入れたばかりのコマンドは、`"$HOME/.local/bin/mise"` の
   ようにフルパスで呼ぶ。
@@ -262,32 +259,28 @@ fi
   新しい `install` が消す。
 - **自分のファイルは、スクリプトのあるディレクトリから探す。** カレントディレクトリは `/` なので、
   `here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")` のように求める。
-- **問いかけるコマンドを使わない。** 端末は無く、標準入力は空である。apt なら
-  `apt-get update` のあと、`DEBIAN_FRONTEND=noninteractive apt-get install -y` の
-  ように書く。出力は手元にそのまま出る。
+- **問いかけるコマンドを使わない。** 端末は無く、標準入力は空である。出力は手元に
+  そのまま出る。
 - **apt のロックを待つ。** `start` の直後は、起動時の自動更新が apt のロックを
   持っていることがある。`apt-get install` には `-o DPkg::Lock::Timeout=300` を
   付けて待たせる。`apt-get update` はロックを待たずに失敗するので、失敗したら少し
   待ってやり直すように書くか、`deploy` し直す。
 - **常駐するものは systemd などで起動する。** `install` の出力を引き継いだ
   プロセスが残ると、ssh が終わらず、`deploy` が終わらない。`install` から
-  バックグラウンドに回すなら、出力を `/dev/null` へ向ける。起動時に AWS などへ
-  つなぐサービスは、ユニットに `Wants=network-online.target` と
-  `After=network-online.target` を書く。
+  バックグラウンドに回すなら、出力を `/dev/null` へ向ける。
 - **状態を `/opt/temt/apps/<アプリID>/` に書かない。** このディレクトリは `deploy` の
   たびに新しいものと入れ替わる。
 - **`/etc/ssh/sshd_config.d/` に `Port` を書かない。** sshd の待ち受けポートは設定
   ファイルの `SshdPorts` が決める（[usage.md](usage.md#sshd-のポートを変える)）。
   アプリが `Port` を足すと、揃える仕組みが失敗して前のポートに戻る。
-- **失敗したら 0 以外で終わる。** `set -euo pipefail` を付けておけば、途中の
-  コマンドの失敗で止まる。`install` が失敗すると `deploy` も失敗し、記録は書かれず、
+- **失敗したら 0 以外で終わる。** `install` が失敗すると `deploy` も失敗し、記録は書かれず、
   `--bake` を付けていても焼かれない。更新に失敗したときは、ファイルは新しい版に
   なっているが、記録は前の版のままである。
 
 `deploy` は途中で失敗しても巻き戻さない。直してもう一度 `deploy` する。Ctrl-C で
 止めても、インスタンスの上の `install` は走り続けることがある。
 
-`uninstall` は、`install` が入れたものを消す。`/opt/temt/apps/<アプリID>/` は、
+`/opt/temt/apps/<アプリID>/` は、
 `uninstall` が成功したあとに temt が消すので、消さなくてよい。実行されるのは
 インスタンスに入っている版の `uninstall` なので、手元で後から足したときは、
 先に `deploy` し直す。
@@ -297,10 +290,10 @@ fi
 インスタンスのディスクは、`terminate` でも自動終了でも消える。残したい状態は、
 S3 などインスタンスの外に置く。インスタンスの中のデータは `/var/lib/<アプリID>/`
 などに置くが、焼けば AMI に残り、そこから起動したインスタンスに持ち越される。
-焼きたくないものは、焼く前に消すか `/run` に置く。`/run` の中身は再起動で消える。
+焼きたくないものは、焼く前に消すか `/run` に置く。
 
 `install` が入れたものも、焼けば AMI に残り、そこから起動したインスタンスでは
-`install` は実行されない。`systemctl enable` したサービスは、起動のたびに動く。
+`install` は実行されない。
 インスタンスごとに変わるもの（IP アドレス、起動時刻、一時的な鍵など）は `install` で
 決めず、起動のたびにサービスが求めるようにする。
 
@@ -314,10 +307,7 @@ S3 などインスタンスの外に置く。インスタンスの中のデー�
 
 付けたばかりの権限は、IAM に反映されるまで数秒かかることがある。`apply` の直後に
 `deploy` して `install` がすぐその権限を使うなら、少し待ってから `deploy` するか、
-`install` が失敗したときに少し待ってやり直すように書く。権限を変える時点と
-アプリを入れ替える時点は分けられるので、新しいアプリが新しい権限を要るときは、
-先に新旧の両方で動く権限を `apply` してから `deploy` し、古い権限を消して
-もう一度 `apply` する。
+`install` が失敗したときに少し待ってやり直すように書く。
 
 ### アプリの値
 
@@ -348,8 +338,6 @@ greeting=$(aws ssm get-parameter --region "$region" --name "/$name/hello/greetin
     --query Parameter.Value --output text 2>/dev/null) || greeting="hello"   # 無ければ既定
 ```
 
-`app set` で変えた値は、動いているサービスが読み直すか、再起動するまで効かない。
-
 手元から値を書けるのは、`deploy` が記録を書いたあとである。`app set` は、記録の
 無いアプリには書かない。記録は `install` が成功してから書かれるので、初めて
 `deploy` するときの `install` と、そのとき起動するサービスは、値が無いまま動く。
@@ -358,7 +346,7 @@ greeting=$(aws ssm get-parameter --region "$region" --name "/$name/hello/greetin
 
     temt-<svc> app set hello greeting=hi
 
-インスタンスからも、同じ階層になら書ける。値は 4 KB までで、`String` で書く。
+インスタンスからも、同じ階層になら書ける。`String` で書く。
 
 ```bash
 aws ssm put-parameter --region "$region" --name "/$name/hello/last-run" \
@@ -372,9 +360,7 @@ aws ssm put-parameter --region "$region" --name "/$name/hello/last-run" \
 
 アプリは、いまの状態を 1 行の文字列でキー `status`（`/temt-<svc>/<アプリID>/status`）
 に書ける。手元の `temt-<svc> status` が、アプリごとに値と、最後に書かれてからの
-経過時間を出す（[usage.md](usage.md#状態を見る)）。いつ書くか、何を書くかは
-アプリが決める。状態が変わったときだけ書いてもよいし、定期的に書いて動いている
-ことを示してもよい。改行や制御文字は `?` に置き換えられるので、1 行で書く。
+経過時間を出す（[usage.md](usage.md#状態を見る)）。改行や制御文字は `?` に置き換えられるので、1 行で書く。
 時刻を含めるときは、インスタンスのローカル時刻にタイムゾーンの名前を添える
 （`date '+%Y-%m-%d %H:%M:%S %Z'`）。temt は値を書き換えずに出すので、ssh で見る
 時刻と揃い、[timezone-tokyo](apps/timezone-tokyo.md) を入れれば日本時間になる。
@@ -401,8 +387,7 @@ status` が `stale` を添える。`idle-shutdown` は、これで電源を切�
 
 temt と一緒に配る `idle-shutdown` も同じ形のアプリである。systemd のタイマー、PAM、
 sshd の設定、ログインのメッセージを入れて外す `install` と `uninstall` がある。
-入っている temt の中のディレクトリは、`temt app list` の `PATH` に出る。temt の中なので、
-そこで直さない。土台にするなら、写してから直す。
+入っている temt の中のディレクトリは、`temt app list` の `PATH` に出る。土台にするなら、写してから直す。
 
     temt app list
     mkdir -p ~/src/my-apps

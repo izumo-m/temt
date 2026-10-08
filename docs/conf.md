@@ -56,8 +56,7 @@ Description = "home"
   すべてのサービスに効く。AWS に反映するのは、サービスごとの `apply` である。
 - `--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も、
   共通ファイルの `AwsProfile` と `AwsRegion` を使う。環境変数 `AWS_PROFILE` や
-  `AWS_REGION` より優先するので、作業中のプロジェクトが環境変数で別のアカウントを
-  指していても、temt はつられない。
+  `AWS_REGION` より優先する。
 
 ## 項目
 
@@ -72,10 +71,7 @@ Description = "home"
 | `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `ap-northeast-1` |
 | `SshdPorts` | `apply`、`diff` | `[22]`。インスタンスの sshd が待ち受けるポートの配列（`[2222]`、`[2222, 443]`）。1 から 65535 の整数で、重ねて書けない。先頭が ssh の Host ブロックの `Port` になる |
 
-**`AwsProfile`。** 書かなければ、temt はプロファイルを指定しない。資格情報は AWS の
-既定の規則（環境変数 `AWS_PROFILE` や `AWS_DEFAULT_PROFILE`、環境変数の鍵、
-`~/.aws/` の `[default]` プロファイルなど）で決まる。プロファイルを固定するには
-次の 3 つの方法がある。
+**`AwsProfile`。** プロファイルを固定するには、次の 3 つの方法がある。
 
 - `--profile <プロファイル>` を付ける（`temt apply --svc <svc> --profile work`）。
   `apply` はその値を `AwsProfile` に書くので、次からは付けなくてよい。`apply` 以外の
@@ -85,9 +81,7 @@ Description = "home"
   入れると、temt は `AWS_DEFAULT_PROFILE` を使う。aws-cli v2 を単独で使うときは
   `AWS_PROFILE` が先なので、両方を使うなら同じ値にする。
 
-固定をやめるときは、`AwsProfile` の行を消すか、値を空文字列にする。共通ファイルに
-書いた値は、共通ファイルから消す。`--profile` を付けずに `apply` を実行しても、
-この項目が書き直されることはない。
+`--profile` を付けずに `apply` を実行しても、この項目が書き直されることはない。
 
 **`AwsRegion`。** 無ければ `ap-northeast-1` になり、最初の `apply` がその値を書く。
 どのリージョンを使うかはこのファイルと共通ファイルだけで決まり、`--svc` を付けた
@@ -106,8 +100,7 @@ ssh の Host ブロックの `Port` に先頭のポートを書く
 起動すると、起動のたびに AMI のポートから切り替わり、ログインの
 メッセージがそのことを告げる。変えたら `apply` して、つながることを確かめ、
 `bake` する。直接接続（`TEMT_LOGIN=direct`）で使うなら、`[security-group]` の
-受信規則も同じポートに合わせる。temt は合わせない。セキュリティグループは
-インスタンスの外の仕組みなので、Session Manager 経由のログインには関わらない。
+受信規則も同じポートに合わせる。temt は合わせない。
 2 つ目以降のポートは `ssh -p <ポート> temt-<svc>` で指す。
 
 ### `[launch-template]`
@@ -179,7 +172,7 @@ Manager 経由だけになる。変えたら `apply` を実行する。動いて
 | `Protocol` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | `tcp`、`udp`、`icmp` のどれか。既定は `tcp` |
 | `Port` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | ポート。整数（`22`）か、範囲を表す整数 2 つの配列（`[22, 23]`）。0 から 65535。`tcp` と `udp` では必ず書き、`icmp` では書かない |
 | `Cidr` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 送信元の IPv4 か IPv6 の CIDR（`203.0.113.10/32`） |
-| `Description` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 規則の説明。省略できる。AWS コンソールの規則の Description に表示される |
+| `Description` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 規則の説明。省略できる |
 
 `Protocol`、`Port`、`Cidr` が同じ規則を 2 つ書くことはできない。AWS は規則を
 プロトコル・ポート・送信元で見分け、説明はその規則に 1 つだけ付くからである。
@@ -209,7 +202,7 @@ IPv6 なら、AWS には ICMPv6 として渡す。
 **`Port`。** すべてのポートは `[0, 65535]` と書く。長さが 2 でない配列、下限が上限より
 大きい範囲、0 から 65535 の外の値は、エラーになる。
 
-**`Cidr`。** IPv4 か IPv6 かは書式から決まる。ネットワーク部より下にビットが立った
+**`Cidr`。** ネットワーク部より下にビットが立った
 値（`203.0.113.10/24`）は、書き誤りとしてエラーになる。IPv6 の規則は、
 `SubnetId` のサブネットに IPv6 の CIDR が結び付いていて、インスタンスに IPv6
 アドレスが付くときに効く。
@@ -292,8 +285,7 @@ Resource = [
   ので、`/*` と並べて書く。`SecureString` を使うなら、既定の鍵 `aws/ssm` で
   暗号化したものは KMS の権限を足さずに読み書きできる。自分で作った鍵を使うときは、
   その鍵への `kms:Encrypt` と `kms:Decrypt` をここに足し、鍵ポリシーでもロールに
-  許す。パラメータの層（tier）が Advanced（大きな値を置ける有料の層。AWS の日本語の
-  資料では「高度」）なら、`kms:GenerateDataKey` も足す。
+  許す。パラメータの層（tier）が Advanced なら、`kms:GenerateDataKey` も足す。
 
 足すときは、既定の 2 つの Statement を残す。消すと、ssh も `reboot` も sshd の
 ポートの同期も効かなくなる。`[[role.policy.ec2]]` をすべて消して `apply` すれば、
@@ -302,8 +294,7 @@ Resource = [
 アプリが使う権限は、アプリごとに別の名前で書く。`deploy` はロールに触らないので、
 権限を変える時点とアプリを入れ替える時点を分けられる。例えば、先に `apply` で
 新旧のアプリの両方が使える権限にし、アプリを `deploy` してから、古い権限を消して
-`apply` する。ポリシーを分ける単位は、アプリごとでも、使う AWS のリソースごとでも
-よい。
+`apply` する。
 
 <ポリシー名> は、英小文字で始まり、英小文字・数字・ハイフンが続き、英小文字か数字で
 終わる、64 文字までの名前とする。
@@ -360,9 +351,6 @@ Resource = "arn:aws:s3:::my-bucket/*"
 ポリシーと書くポリシーを合わせて上限を超えるなら、先に消すものだけを設定ファイル
 から消して一度 `apply` してから、書き足す。
 
-ロールに手で付けたインラインポリシーのうち、名前が `temt-` で始まらないものと、
-管理ポリシーには、`apply` は触らない。
-
 ## `apply` が書くこと
 
 `apply` は、書く項目を検出して表示し、確認のあとの更新で、このファイルに書く。
@@ -370,8 +358,7 @@ Resource = "arn:aws:s3:::my-bucket/*"
 であれば、その行には触らない。書き換えるとき、既に書かれている項目とテーブルの
 順序、項目に付いたコメントは変えない。最上位の項目は最初のテーブルの前に足すので、
 テーブルの前に置いたコメントは、足した項目の前に残る。テーブルの項目は、そのテーブルの
-最後の項目の次に足すので、その後ろのコメントは、次の見出しの前に残る。以後はこの
-ファイルの内容を正として進める。
+最後の項目の次に足すので、その後ろのコメントは、次の見出しの前に残る。
 
 - `AwsRegion`、`InstanceType` は、既定や共通ファイルの値を使ったときもその値を書く。
 - `ImageId` には選んだ AMI の名前を書く。Ubuntu 24.04 の公開 AMI は自分の
@@ -395,7 +382,7 @@ Resource = "arn:aws:s3:::my-bucket/*"
   書き換えない。
 
 空でない値を `apply` が書き換えるのは、`--profile` で選ばれた `AwsProfile` だけで
-ある。空の値は書かれていないものとして読み、決めた値で埋める。
+ある。
 
 初回の `apply` が書くファイルは次のようになる。サービスの AMI がまだ無いので、
 `ImageId` は Ubuntu 24.04 の ID になる。
@@ -478,8 +465,7 @@ Resource = [
 `TEMT_LOGIN` と `AWS_PROFILE` は ProxyCommand に書かれないので、ssh を呼ぶエディター
 （VS Code の Remote-SSH など）にも渡るように設定する。
 
-`--profile` は、その実行だけ使うプロファイルで、`AwsProfile` より優先する。ssh の
-ProxyCommand には届かない。
+`--profile` は ssh の ProxyCommand には届かない。
 
 ## 場所を変える環境変数
 
@@ -500,8 +486,7 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
   ただし、同じ場所かどうかの判定（`TEMT_SSH_DIR` が `~/.ssh` でないか、サービスを
   `apply` した場所が今と同じか）では、`..` とシンボリックリンクを解いてから
   比べる。
-- `*`、`?`、`[` は使えるが、ssh の `Include` は glob（`*` などでファイル名を
-  合わせるパターン）として読むので、`apply` はその行にだけバックスラッシュを
+- `*`、`?`、`[` は使えるが、ssh の `Include` は glob として読むので、`apply` はその行にだけバックスラッシュを
   付けて書く。
 - `TEMT_SSH_DIR` は `~/.ssh` そのものを指せない。temt の `config` が
   `~/.ssh/config` と同じファイルになり、自分自身を `Include` してしまう。
@@ -519,8 +504,7 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 伝えるため、`apply` は 2 つとも、既定のままでも `env` で渡す。ホームの下の
 場所は `~` で始まる形で書き、`proxy` が自分で展開する。ssh は ProxyCommand に
 自分の環境変数を渡すので、書かなければ `proxy` は ssh を打ったシェルの値を
-読んでしまう。書いておけば、シェルに変数が無くても、別の値があっても、ssh の
-接続は `apply` のときと同じ場所を使う。
+読んでしまう。
 
     ProxyCommand env TEMT_CONF_DIR='/srv/temt/conf' TEMT_SSH_DIR='/srv/temt/ssh' temt proxy --svc dev-main --user '%r' %p
 
@@ -528,8 +512,7 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 `apply` したサービスにも ssh でつながる。ただし、同じサービスの設定ファイルを
 2 つの場所に置くことはできない。別の場所にまだあれば、`apply` はその場所を
 挙げて止まる。場所を移すときは、設定ファイルを新しい場所へ動かしてから `apply`
-を実行する。設定ファイルには鍵が入らないので、
-バージョン管理下のディレクトリにも置ける。`apps/` に置いたアプリも同じである。
+を実行する。
 
 `TEMT_SSH_DIR` を変えたら、`apply` をやり直す。新しい場所に鍵が無ければ `apply` が
 作る。前の場所の `config` を手で移したときは、Host ブロックの `IdentityFile` が前の
@@ -537,5 +520,4 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 `Include` が新しい場所を指すように書き換わり、前の場所にある Host には ssh でつながらなくなる。
 `apply` は、そのうち新しい場所に無い Host を挙げて警告する。前の場所にある鍵や
 known_hosts を temt が動かすことはなく、`destroy` もそのとき変数が指す場所だけを
-片づけるので、要るものは手で移す。鍵を置く場所なので、バージョン管理下の
-ディレクトリは指さない。
+片づけるので、要るものは手で移す。
