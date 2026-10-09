@@ -23,6 +23,10 @@ one target.
   updated, or deleted; do not report what was left unchanged. Changes in AWS between
   detection and update are not handled.
 
+When the config file does not exist, step 1 also asks `[y/N]` (`no config file: <path>;
+create service <name>?`) before anything reads AWS, so a mistyped `<svc>` stops there.
+`--yes` skips this question too. A new service is thus asked twice.
+
 If it fails midway, running the same command again continues from where it stopped.
 If it stops during the update phase, whatever was already written stays.
 

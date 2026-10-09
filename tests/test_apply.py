@@ -1933,13 +1933,18 @@ def test_a_first_apply_that_is_declined_makes_nothing(
     )
     step4(aws_stubs)
     step5(aws_stubs, WRITTEN, associated=False)
-    monkeypatch.setattr(sys, "stdin", Terminal("\n"))
+    monkeypatch.setattr(sys, "stdin", Terminal("y\n\n"))
 
     with pytest.raises(TemtError, match="cancelled"):
         apply.run(service, yes=False)
 
     aws_stubs.done()
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"no config file: {service.conf_path}; create service {NAME}? [y/N] "
+        "apply these changes? [y/N] "
+    )
+    out = captured.out
     assert "+   conf " in out
     assert ["+", "key", KEY] in heads(out)
     assert not service.conf_path.exists()
@@ -1947,6 +1952,41 @@ def test_a_first_apply_that_is_declined_makes_nothing(
     assert not ssh_dir().exists()
     assert not service.command_path.exists()
     assert not (Path.home() / ".ssh").exists()
+
+
+def test_a_first_apply_asks_before_reading_aws(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """設定ファイルが無ければ、AWS を読む前に、サービスを作るかを聞く。y と答えなければ、
+    何も表示せず、何も作らない。"""
+    monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
+
+    with pytest.raises(TemtError, match="cancelled"):
+        apply.run(service, yes=False)
+
+    aws_stubs.done()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"no config file: {service.conf_path}; create service {NAME}? [y/N] "
+    assert not service.conf_path.exists()
+    assert not ssh_dir().exists()
+    assert not service.command_path.exists()
+
+
+def test_a_first_apply_needs_yes_without_a_terminal(
+    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """設定ファイルが無く、標準入力が端末でなければ、--yes が無い限り AWS を読まずに止まる。"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+
+    with pytest.raises(TemtError, match="pass --yes"):
+        apply.run(service, yes=False)
+
+    aws_stubs.done()
+    assert not service.conf_path.exists()
 
 
 def test_apply_goes_on_when_the_answer_is_yes(

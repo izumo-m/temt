@@ -365,6 +365,12 @@ def run(service: Service, *, yes: bool) -> None:
     # 手順 1。同じサービスを別の場所から apply していれば、何かを書く前に止める。
     # AWS のリソースも同じ名前なので、別の定義で上書きしてしまう
     home.check_owner(service)
+    # 打ち間違えた名前でサービスを作り始めないよう、AWS を読む前に聞く
+    if not service.conf_path.exists():
+        msg.confirm(
+            f"no config file: {printable(str(service.conf_path))}; create service {service.name}?",
+            yes=yes,
+        )
     # 手順 2 は書かれていない ImageId と SubnetId を解くのに AWS を読むので、まず読めた
     # 分の設定で Session を作る。リージョンは設定ファイルか既定で決まっているので、
     # 向き先は動かない
