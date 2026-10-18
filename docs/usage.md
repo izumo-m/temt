@@ -15,11 +15,11 @@ ssh の設定に書かれる ProxyCommand は `temt` を、`temt` は `ssh`、`a
 `session-manager-plugin` を、PATH から探す。ssh を打つシェルにも、ssh を呼ぶ
 エディター（VS Code の Remote-SSH など）にも、これらが PATH にあるようにしておく。
 
-AWS の資格情報は、EC2、IAM、SSM を操作できる権限と、ロールに付ける権限を確かめる
+AWS の資格情報は、EC2、IAM、SSM を操作できる権限と、インスタンスロールに付ける権限を確かめる
 IAM Access Analyzer の `access-analyzer:ValidatePolicy`、ログインの鍵をインスタンスに
-送る EC2 Instance Connect の `ec2-instance-connect:SendSSHPublicKey` を持つプロファイルとして
-`~/.aws/` に設定しておく。サービスのリージョンは環境変数では与えられない。設定
-ファイルか共通ファイルで指定する（[conf.md](conf.md)）。
+送る EC2 Instance Connect の `ec2-instance-connect:SendSSHPublicKey` を持つ AWS のプロファイルとして
+`~/.aws/` に設定しておく。サービスのリージョンは、最初の `apply` が設定ファイルに書き、
+そのあとはそれを使う（[conf.md](conf.md#最上位)）。
 
 ## 入れ方
 
@@ -74,7 +74,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 ハイフンが続き、英小文字か数字で終わる（`dev-main` など）。`temt-<svc>` が 64 文字に
 収まる長さにする。`defaults` は共通ファイルの名前なので使えない。
 
-以下、サービス名を `<svc>` と書く。ssh の Host 名や AWS のリソース名はすべて
+以下、サービス名を `<svc>` と書く。ssh の Host 名や、temt が作る AWS のリソースの名前は
 `temt-<svc>` になる。
 
 ### ファイルの場所
@@ -114,10 +114,13 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 | `temt instance show --svc <svc>` | `status` | インスタンスの状態を見る |
 | `temt instance list [--svc <svc>] [--format <列>]` | | インスタンスの一覧を見る |
 | `temt ami bake --svc <svc> [--yes]` | `bake` | インスタンスを AMI にする |
+| `temt ami import --svc <svc> <インスタンスID> [--yes]` | | 止まっている EC2 インスタンスを取り込む |
 | `temt ami list [--svc <svc>] [--format <列>]` | | AMI の一覧を見る |
 | `temt ami prune [--svc <svc>] [--yes]` | | どのテンプレートも指していない AMI を消す |
 | `temt ami delete [--svc <svc>] <AMI の ID または名前> [--force] [--yes]` | | 指した AMI を 1 つ消す |
 | `temt template show --svc <svc>` | | 起動テンプレートを見る |
+| `temt role import --svc <svc> <IAM ロール名または ARN> [--yes]` | | インスタンスロールを temt の管理に移す |
+| `temt role delete --svc <svc> [--yes]` | | temt のインスタンスロールとインスタンスプロファイルを消す |
 | `temt sg list --svc <svc> [--format <列>]` | | 設定ファイルの受信規則の一覧を見る |
 | `temt sg add --svc <svc> <ポート> [<CIDR>] [--description <説明>]` | | 設定ファイルに受信規則を足す |
 | `temt sg remove --svc <svc> <ポート> [<CIDR>]` | | 設定ファイルから受信規則を消す |
@@ -131,6 +134,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 | `temt app deploy --svc <svc> <アプリIDまたはパス> [<名前>=<値>...] [--reset] [--user <ユーザー>] [--bake] [--yes]` | `deploy` | アプリを入れる |
 | `temt app remove --svc <svc> <アプリID> [--user <ユーザー>] [--bake] [--yes]` | | アプリを外す |
 | `temt ssh proxy --svc <svc> [ポート] [--user <ユーザー>]` | `proxy` | ssh の ProxyCommand として動く。手では打たない |
+| `temt ssh set-port --svc <svc> <ポート>... [--yes]` | | sshd の待ち受けポートを変える |
 
 警告、エラー、確認の問いかけと、それらに添える行は標準エラー出力に、それ以外は標準
 出力に出る。ただし、表や `diff` の変更だけを標準出力に残すよう、`--svc` を付けない
@@ -162,20 +166,21 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 ように引数を誤ったときも、対象が分かれば、その対象のコマンドだけの使い方が表示される。
 `temt --version` で、temt のバージョンが表示される。
 
-AWS のプロファイルを選ぶ `--profile <プロファイル>` は、AWS を呼ぶどの
-コマンドにも付けられる。リージョンを選ぶ `--region <リージョン>` は、`--svc` を
-付けないときだけ使える。`--svc` を付けたコマンドのリージョンは、設定ファイルと
-共通ファイルで決まる。AWS に問い合わせない `service list`、`sg list`、`sg add`、
+AWS のプロファイルを選ぶ `--profile <プロファイル>` と、リージョンを選ぶ
+`--region <リージョン>` は、AWS を呼ぶどのコマンドにも付けられる。`--svc` を付けた
+コマンドの `--region` は、設定ファイルに `AwsRegion` が無いときだけ使われ、最初の
+`apply` か `ami import` がその値を `AwsRegion` に書く。書いたあとは、違うリージョンを付けると引数の
+誤りになる。AWS に問い合わせない `service list`、`sg list`、`sg add`、
 `sg remove` と、`--svc` を付けない `app list` は、どちらも付けられない。
 
 `--svc` を付けない `ami list`、`instance list`、`ami prune`、`ami delete` は
 サービスの設定ファイルを読まないので、アカウントとリージョンを `--profile` と
 `--region` で選ぶ。省けば、共通ファイルの `AwsProfile` と `AwsRegion`
 （[conf.md](conf.md#全サービスに共通の値)）、AWS の既定の規則（`AWS_PROFILE`、
-`AWS_REGION`、プロファイルの `region` など）の順で決まる。どの環境を使ったかは、
+`AWS_REGION`、AWS のプロファイルの `region` など）の順で決まる。どの環境を使ったかは、
 最初の行に出る。`profile` は、`--profile`、共通ファイル、`AWS_PROFILE`、
 `AWS_DEFAULT_PROFILE` のどれかで選んだときだけ名前が出る。選んでいなければ
-`(none)` と出て、資格情報は `[default]` プロファイルや環境変数の鍵などから来ている。
+`(none)` と出て、資格情報は AWS の `[default]` プロファイルや環境変数の鍵などから来ている。
 
     temt --profile work --region us-east-1 ami prune
 
@@ -225,11 +230,11 @@ AWS の一覧（`describe-instances`）は、要求から数秒遅れて変わ�
 設定ファイルが無いときは、その前に、新しくサービスを作るかを `[y/N]` で聞く。
 
 - 設定ファイル `~/.config/temt/<svc>.toml`。無ければ既定値で書かれる
-- AWS リソース。IAM ロールとインスタンスプロファイル、セキュリティグループ、起動
-  テンプレート、sshd の待ち受けポートを揃える State Manager の関連付け。ロールには、
-  設定ファイルの `[[role.policy.<ポリシー名>]]` ごとにインラインポリシー
-  `temt-<ポリシー名>` が付く。`[[role.policy.ec2]]` は、無ければ既定が設定ファイルに
-  書かれる（[conf.md](conf.md#role)）
+- AWS リソース。インスタンスロールとインスタンスプロファイル、セキュリティグループ、
+  起動テンプレート。インスタンスロールには、設定ファイルの
+  `[[role.policy.<ポリシー名>]]` ごとにインラインポリシー `temt-<ポリシー名>` が付く。
+  `[[role.policy.ec2]]` は、無ければ既定が設定ファイルに書かれる
+  （[conf.md](conf.md#role)）
 - ssh の設定。`~/.ssh/temt/config` に `Host temt-<svc>` のブロックが
   足され、`~/.ssh/config` の先頭に、目印のコメントと
   `Include ~/.ssh/temt/config` の 2 行が足される
@@ -243,20 +248,21 @@ AWS の一覧（`describe-instances`）は、要求から数秒遅れて変わ�
 ### 設定を変える
 
 設定ファイルを直して、もう一度 `apply` を実行する。起動テンプレート、
-セキュリティグループの受信規則、ロールの権限、ssh の設定が追従する。動いている
-インスタンスは変わらず、次の `start` から反映される。受信規則はすぐに、sshd の
-待ち受けポートは数秒で、ロールの権限は IAM の反映を待てば、動いている
-インスタンスにも効く。項目と既定、`apply` が書き足す規則、最初の `apply` の前に
-項目を決めておく方法は [conf.md](conf.md) にある。
+セキュリティグループの受信規則、インスタンスロールの権限、ssh の設定が追従する。動いて
+いるインスタンスは変わらず、次の `start` から反映される。受信規則はすぐに、インスタンス
+ロールの権限は IAM の反映を待てば、動いているインスタンスにも効く。項目と既定、
+`apply` が書き足す規則、最初の `apply` の前に項目を決めておく方法は [conf.md](conf.md)
+にある。
 
 `apply` の前に、何が変わるかを `diff` で確かめられる。
 
     temt-<svc> diff
 
 変更は 1 つにつき 1 行で表示される。頭の `+` は作る・足す、`~` は直す、`-` は消す
-もので、続けて種類、名前、違いが並ぶ。ロールのポリシーの中身、関連付けのスクリプト、
-ssh の Host ブロックは、違う行が続けて字下げして表示される。違いが無ければ、標準出力
-には何も表示されない。`apply` も、確認を求める前に同じ形で表示する。
+もので、続けて種類、名前、違いが並ぶ。起動テンプレートは項目ごとに 1 行で、
+`NetworkInterfaces[DeviceIndex=0].SubnetId` のように項目の位置を書く。インスタンス
+ロールのポリシーの中身、ユーザーデータ、ssh の Host ブロックは、違う行が続けて字下げ
+して表示される。違いが無ければ、標準出力には何も表示されない。`apply` も、確認を求める前に同じ形で表示する。
 
 ### 同じ用途を設定違いで立てる
 
@@ -274,6 +280,77 @@ ssh の Host ブロックは、違う行が続けて字下げして表示され�
 AMI を焼いても表示されない。元のサービスの新しい AMI を使うときは、その名前を
 `ImageId` に書いて `apply` を実行する。
 
+### 既存のインスタンスを取り込む
+
+    temt ami import --svc <svc> <インスタンスID> --region <リージョン>
+    temt apply --svc <svc>
+
+ふだんは止めておき、要るときに開始している EC2 インスタンスを、temt のサービスに
+できる。`ami import` は、止まっているインスタンスのルートボリュームから AMI を作り、
+同じインスタンスを起動できる設定ファイルを書く。続けて `apply` を実行すると起動
+テンプレートができ、ほかのサービスと同じく、要るときに `start` で起動し、使い終わったら
+`terminate` で終了して使う。
+
+- 取り込めるのは止まっている（`stopped`）インスタンスだけで、設定ファイルの無い
+  サービスにだけ取り込める。確認の前に、作る AMI と写す設定を表示する。
+- 元のインスタンスと、それが使うセキュリティグループやインスタンスプロファイルには
+  何もしない。うまくいかなければ、元のインスタンスに戻れる。
+- リージョンは、元のインスタンスのあるリージョンを `--region` で指す（`AWS_REGION`
+  などでもよい）。使ったリージョンは設定ファイルに書かれる。`--profile` か共通
+  ファイルで選んだ AWS のプロファイルも書かれる。
+- 設定ファイルの `[launch-template]` には、元のインスタンスの設定が写る。セキュリティ
+  グループ、インスタンスプロファイル、キーペア、ユーザーデータも元のものを使い、temt の
+  セキュリティグループとインスタンスロールは作らない。共通ファイルも使わない
+  （`Defaults = false` が書かれる）。変えたいときは、取り込んだあとに設定ファイルを
+  直して `apply` する。
+
+取り込んだサービスは、`start` のたびに新しいインスタンスになる。インスタンス ID、
+MAC アドレス、ホスト名が変わり、それらに結び付いたもの（ライセンス、送信元/送信先
+チェックの設定、ボリュームと ENI のタグ）は引き継がれない。プライベート IP アドレスも
+起動のたびに変わる。固定したいときは、元のインスタンスを終了してから、
+`NetworkInterfaces` に `PrivateIpAddress = "<元の IP アドレス>"` を書いて `apply`
+する。ユーザーデータも `start` のたびに動くので、最初の起動だけでよい処理があれば、
+`UserData` の行を消す。
+
+ルートボリューム以外の EBS は AMI に入れない。使うなら、元のインスタンスから外し、
+インスタンスの中で付ける。
+
+temt のログインには、インスタンスに SSM エージェントと `ec2-instance-connect` が
+入っていて、インスタンスロールに SSM エージェントの権限があることが要る
+（[ログインの鍵](#ログインの鍵)、[conf.md](conf.md#role)）。元のインスタンスが SSM に
+登録されていなければ、取り込むときに警告し、`start` が SSM エージェントを待たない
+よう `WaitForSsm = false` を書く。ssh の Host ブロックには `User ubuntu` と `Port 22`
+が書かれるので、Ubuntu でないインスタンスや、sshd が 22 以外で待ち受けるインスタンス
+では、`~/.ssh/temt/config` の `Host temt-<svc>` ブロックを直す。
+
+temt のセキュリティグループも使うなら、`[launch-template]` の `Groups` に
+`${temt:name}` を足して `apply` する。そうすれば、受信規則を `sg add` などで書ける。
+ネットワークインターフェースに付けられるセキュリティグループの数に上限（既定は 5）が
+あり、temt のセキュリティグループの送信規則（すべての送信先を許す）も加わる。
+
+### インスタンスロールを temt の管理に移す
+
+    temt-<svc> role import <IAM ロール名または ARN>
+    temt-<svc> diff
+    temt-<svc> apply
+
+取り込んだサービスのインスタンスロールの権限を temt で扱うには、`role import` で、
+そのインスタンスロールの写しを temt の管理に移す。設定ファイルの `[role]` を、指した
+インスタンスロールのポリシーで丸ごと書き換え（インラインポリシーは
+`[[role.policy.<ポリシー名>]]` に、管理ポリシーは `ManagedPolicyArns` に）、
+`IamInstanceProfile` を temt のもの（`${temt:name}`）に書き換える。AWS には何もしない
+ので、`diff` で確かめてから `apply` する。`apply` が temt のインスタンスロールと
+インスタンスプロファイル `temt-<svc>` を作り、起動テンプレートを切り替える。動いている
+インスタンスは、`terminate` して `start` するまで前のインスタンスプロファイルのままである。
+元のインスタンスロールの ARN を名指ししているもの（S3 のバケットポリシー、KMS の
+キーポリシーなど）は、手で直す。
+
+    temt-<svc> role delete
+
+`role delete` は、temt が作ったインスタンスロールとインスタンスプロファイル
+`temt-<svc>` を消す。設定ファイルの `IamInstanceProfile` がそれを指しているあいだと、
+それを使うインスタンスがあるあいだは、消さずに止まる。
+
 ### サービスの一覧を見る
 
     temt service list
@@ -289,10 +366,9 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 
 `apply` する前の `ImageId` などは `-` になる。
 既定のある項目は、書いていなくても既定を表示する。`--format` で `SUBNET`、
-`INGRESS`（受信規則の数）、`SSHDPORTS`、`VOLUMESIZE` も表示できる
-（[一覧の表](#一覧の表)）。
+`INGRESS`（受信規則の数）も表示できる（[一覧の表](#一覧の表)）。
 
-    temt service list --format service,subnet,sshdports
+    temt service list --format service,subnet,ingress
 
 読めない設定ファイルと、名前がサービス名の規則に合わないファイル
 （`Web.toml` など）は、警告して飛ばし、残りを表示してから終了コード 1 で終わる。
@@ -310,11 +386,12 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 
 消えるものは次のとおり。
 
-- 起動テンプレート、sshd の待ち受けポートを揃える関連付け、`/temt-<svc>` の
-  階層の下にある SSM パラメータ、セキュリティグループ、
-  インスタンスプロファイル、IAM ロール。この順に消す。ロールに付いた
-  インラインポリシーは、手で付けたものも含めてすべて消える。確認の一覧に名前が
-  出る。手で付けた管理ポリシーがあれば、ロールを消さずに止まる
+- 起動テンプレート、`/temt-<svc>` の階層の下にある SSM パラメータ、セキュリティ
+  グループ、インスタンスプロファイル、インスタンスロール。この順に消す。消すのは temt が
+  作ったインスタンスプロファイルとインスタンスロール `temt-<svc>` だけで、取り込んだ
+  サービスが使うほかのものには触らない。インスタンスロールに付いたインラインポリシーは、
+  手で付けたものも含めてすべて消える。管理ポリシーは外す（管理ポリシーそのものは
+  残る）。確認の一覧に名前が出る
 - known_hosts のディレクトリ `~/.ssh/temt/known_hosts.d/temt-<svc>/`
 - サービスのコマンド `~/.local/bin/temt-<svc>`。中身にかかわらず消す
 
@@ -339,8 +416,9 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
     temt-<svc> start
 
 `start` は、インスタンスが動き出し、SSM エージェントが応答するまで待つ。ふつう
-1〜2 分かかる。段階が進むたびに 1 行ずつ表示する。`apply` で IAM のロールを作った
-直後は、その反映が追いつかずに、`start` が止まったり、ログインできるようにならな
+1〜2 分かかる。段階が進むたびに 1 行ずつ表示する。設定ファイルに
+`WaitForSsm = false` があれば、動き出したところで終わる（[conf.md](conf.md#最上位)）。
+`apply` でインスタンスロールを作った直後は、その反映が追いつかずに、`start` が止まったり、ログインできるようにならな
 かったりすることがある。表示にしたがって、少しあけてから起動し直す。`--async` で
 起動してつながらないときも、`terminate` して数分あけてから `start` し直す。既に
 動いていれば、2 台目を起動せず、ログインできることを確かめる。
@@ -364,11 +442,11 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 では AWS が断ることがあり、そのときは `status` を見てやり直す。終了の途中
 （`shutting-down`）のものは無いものとして扱い、新しく起動する。
 
-何かの手違いで同じ名前のインスタンスが 2 台以上あるときは、`start` は起動せず、
+何かの手違いで同じサービスのインスタンスが 2 台以上あるときは、`start` は起動せず、
 それらを表示して止まる
 （[インスタンスが 2 台になったとき](#インスタンスが-2-台になったとき)）。
 同じサービスで `start`、`stop`、`terminate`、`reboot`、`bake`、`destroy`、
-`deploy`、`app remove` のどれかが既に動いていれば、その終わりを待たず、動いて
+`ami import`、`set-port`、`deploy`、`app remove` のどれかが既に動いていれば、その終わりを待たず、動いて
 いると表示して終わる。
 
 ### 状態を見る
@@ -382,7 +460,6 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
     instance:   i-0123456789abcdef0 (running)
     ipv4:       203.0.113.10
     ssm-agent:  Online
-    sshd-ports: applied
     apps:       unbaked timezone-tokyo
     app status:
       idle-shutdown  power off in 42m (at 2026-09-29 06:12:03 UTC; idle 18m since pam, limit 1h)  [3m ago]
@@ -397,16 +474,6 @@ AMI を焼いても表示されない。元のサービスの新しい AMI を�
 - `ssm-agent` は、そのインスタンスの SSM エージェントの状態。`Online` なら
   Session Manager 経由でログインできる。起動してからエージェントが応答するまでは
   `(not registered)` で、`start` はこれが `Online` になるまで待つ。
-- `sshd-ports` は、sshd の待ち受けポートを設定ファイルの `SshdPorts` に揃える
-  関連付け `temt-<svc>-sshd`（[sshd のポートを
-  変える](#sshd-のポートを変える)）が、そのインスタンスで済んだか。見るのは
-  最後に `apply` した内容で、設定ファイルを直して `apply` していなければ、前の
-  内容についての表示である。`applied` なら済んでいる。`pending` は
-  起動直後などでまだ済んでいない。`failed` は、sshd の設定を確かめて
-  通らなかったか、新しいポートで待ち受けられずに、前のポートのまま戻したことを
-  表す。`(not run)` はまだ実行が始まっていない。`none` は関連付けそのものが
-  AWS に無く、`apply` が要る。ほかに AWS の状態がそのまま小文字で
-  出ることがある。
 - `apps` は、入れたり外したりして、まだ焼いていないアプリ。`unbaked` はインスタンスに
   だけあり、焼く前にインスタンスが終了すると消える。`lost` は、焼く前にインスタンスが
   終了して消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` する。
@@ -473,8 +540,7 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 続きから使いたいときは `stop` を使う（次の節）。
 
 再起動すると、インスタンスの上で `idle-shutdown limit` コマンドで変えた時間は元に
-戻る（[自動終了](apps/idle-shutdown.md)）。sshd の待ち受けポートを変えたことを知らせる
-ログインのメッセージも、焼くまでは出るはずのものが出なくなる。
+戻る（[自動終了](apps/idle-shutdown.md)）。
 
 ### 止めて再開する
 
@@ -501,13 +567,11 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 
 - 起動テンプレートは使わずに再開するので、止めている間に設定ファイルを変えて
   `apply` しても、AMI やインスタンスタイプなどの変更は、そのインスタンスには効かない。
-  効かせるには、`terminate` してから `start` する。受信規則とロールの権限は効く
-  （`SubnetId` を別の VPC のものに変えたときを除く。そのときは古い VPC のまま
-  再開する）。`SshdPorts` を変えたときは、再開すると揃う（再開した直後の `ssh` は、
-  揃うのを待ってからつながる）。
+  効かせるには、`terminate` してから `start` する。受信規則とインスタンスロールの
+  権限は効く（`SubnetId` を別の VPC のものに変えたときを除く。そのときは古い VPC の
+  まま再開する）。
 - 再起動と同じく、インスタンスの上で `idle-shutdown limit` コマンドで変えた時間は
-  元に戻り、sshd の待ち受けポートを変えたことを知らせるログインのメッセージも出なく
-  なる。
+  元に戻る。
 - 止まっているインスタンスも、そのまま `bake` で焼ける（[AMI にする](#ami-にする)）。
 
 `idle-shutdown` が電源を切ったときは、止まるのではなく終了する
@@ -519,7 +583,7 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
     temt-<svc> terminate
 
 対象のインスタンスの ID と状態を表示して `[y/N]` で確認を求める。`y` と答えると、
-インスタンスをボリュームごと終了し、known_hosts のファイルを消す。次に `start` すると、起動テンプレートの AMI から新しい
+インスタンスをルートボリュームごと終了し、known_hosts のファイルを消す。次に `start` すると、起動テンプレートの AMI から新しい
 インスタンスが立ち上がる。残したいものがあれば、終了する代わりに `bake` で AMI に
 する（[AMI にする](#ami-にする)）。入れてまだ焼いていないアプリがあれば、終了すると
 消えることを確認の前に警告する（`unbaked apps will be lost: timezone-tokyo`）。外して
@@ -530,7 +594,7 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 
 終了が完了するまで待つ。`--async` を付けると、AWS が終了の要求を受け付けるまでしか
 待たない。どちらでも、known_hosts は片づける。インスタンスが
-1 台も無くても、エラーにはならない。何かの手違いで同じ名前のインスタンスが 2 台
+1 台も無くても、エラーにはならない。何かの手違いで同じサービスのインスタンスが 2 台
 あるときは、両方とも終了する（1 台だけ残すときは
 [インスタンスが 2 台になったとき](#インスタンスが-2-台になったとき)）。
 
@@ -546,8 +610,8 @@ temt と一緒に配るアプリ `idle-shutdown` を入れて焼いておけば�
 焼く前に自分で終了したときは警告が出ないので、入れたアプリを残したいときは、
 離れる前に `status` の `apps` を見て焼いておく。
 
-作った AWS リソース（IAM ロール、インスタンスプロファイル、セキュリティグループ、
-起動テンプレート、関連付け）はそのまま残る。これらには費用はかからない。
+作った AWS リソース（インスタンスロール、インスタンスプロファイル、セキュリティ
+グループ、起動テンプレート）はそのまま残る。これらには費用はかからない。
 消すには `destroy` を使う（[片づける](#片づける)）。
 
 ### インスタンスが 2 台になったとき
@@ -569,12 +633,13 @@ ID を省いて `terminate` すると、すべてを終了する。
 
 ### ディスクを広げる
 
-インスタンスのルートボリュームの大きさは、設定ファイルの `VolumeSize`（GiB）で
-決める。書かなければ AMI と同じ大きさで、素の Ubuntu なら 8 GiB である。
-`[launch-template]` に書いて `apply` する。
+インスタンスのルートボリュームの大きさは、設定ファイルの `[launch-template]` に
+`BlockDeviceMappings` の要素を足し、その `Ebs.VolumeSize`（GiB）で決める。
+`DeviceName` を省けば、AMI のルートボリュームを指す。書かなければ AMI と同じ大きさで、
+素の Ubuntu なら 8 GiB である。書いて `apply` する。
 
-    [launch-template]
-    VolumeSize = 30
+    [[launch-template.BlockDeviceMappings]]
+    Ebs.VolumeSize = 30
 
     temt-<svc> apply
 
@@ -590,12 +655,12 @@ ID を省いて `terminate` すると、すべてを終了する。
 
 中身を残さなくてよければ、`terminate` してから `start` する。
 
-EBS は縮められない。大きくして焼いた AMI は、そのあと `VolumeSize` の行を消しても、
-焼いたときの大きさのまま起動する。AMI のルートボリュームより小さい `VolumeSize` は
+EBS は縮められない。大きくして焼いた AMI は、そのあと `Ebs.VolumeSize` の行を消しても、
+焼いたときの大きさのまま起動する。AMI のルートボリュームより小さい `Ebs.VolumeSize` は
 書けず、`apply` が止まる。AMI の大きさは `template show` の `root volume` で
-分かる。大きくして起動したインスタンスを、その大きさより小さい `VolumeSize` に
+分かる。大きくして起動したインスタンスを、その大きさより小さい `Ebs.VolumeSize` に
 直してから焼こうとすると、`bake` は焼かずに止まる。焼くと、次の `start` を AWS が
-断る AMI ができるからである。`VolumeSize` をインスタンスの大きさ以上に戻すか、
+断る AMI ができるからである。`Ebs.VolumeSize` をインスタンスの大きさ以上に戻すか、
 行を消すかし、どちらも `apply` してから焼く。
 
 ## AMI
@@ -612,9 +677,9 @@ EBS は縮められない。大きくして焼いた AMI は、そのあと `Vol
 `y` と答えると、次を順に行う。
 
 1. インスタンスが動いていれば停止する。
-2. 止まったインスタンスから AMI を作る。名前は `temt-<svc>-<YYMMDDHHMM>`（時刻は
-   手元の時刻）で、`temt:service=<svc>` のタグが付く。インスタンスの中には手を
-   加えない。
+2. 止まったインスタンスのルートボリュームから AMI を作る。ほかの EBS は AMI に
+   入れない。名前は `temt-<svc>-<YYMMDDHHMM>`（時刻は手元の時刻）で、
+   `temt:service=<svc>` のタグが付く。インスタンスの中には手を加えない。
 3. AMI が使える状態（`available`）になるまで待つ。ディスクの大きさによって、数分から
    それ以上かかる。締め切りは無い。
 4. 設定ファイルの `ImageId` を新しい AMI の名前に書き換え、起動テンプレートの
@@ -627,12 +692,9 @@ EBS は縮められない。大きくして焼いた AMI は、そのあと `Vol
 つねに完了を待つので、`--async` は無い。
 
 設定ファイルを直して `apply` をまだ実行していないときは、焼かずに、先に
-`apply` を実行するよう促して終わる。確かめるのは起動テンプレートの項目だけで、
-`SshdPorts` は確かめない。`SshdPorts` を変えたら、`apply` して `status` の
-`sshd-ports` が `applied` になってから焼く
-（[sshd のポートを変える](#sshd-のポートを変える)）。インスタンスが無いとき、停止や
+`apply` を実行するよう促して終わる。インスタンスが無いとき、停止や
 終了の途中（`stopping`、`shutting-down`）や起動の途中（`pending`）のとき、2 台以上
-あるとき、インスタンスのルートボリュームが `VolumeSize` より大きいとき
+あるとき、インスタンスのルートボリュームが `Ebs.VolumeSize` より大きいとき
 （[ディスクを広げる](#ディスクを広げる)）も、焼かずにその旨を
 表示して終わる。
 
@@ -689,8 +751,8 @@ AMI を、`temt ami list` はすべてのサービスの AMI を表示する。
 `USED` は、その AMI を指している起動テンプレートのバージョン
 （`<テンプレート名>:<バージョン>`、複数あれば `,` でつなぐ）で、無ければ `-` と
 出る。`--format` で、`temt:service` の値（`SERVICE`）も表示できる。`ami prune` は、
-`USED` が `-` の AMI のうち `bake` が作ったもの（状態が `available` か `failed`）の
-登録を解除し、スナップショットも消す。消すものだけを表示し、`[y/N]` で確認を
+`USED` が `-` の AMI のうち `bake` と `ami import` が作ったもの（状態が `available` か
+`failed`）の登録を解除し、スナップショットも消す。消すものだけを表示し、`[y/N]` で確認を
 求める。`--yes` を付けると確認しない。他のコマンド（`bake` など）が
 そのサービスを扱っていたときと、消す直前に起動テンプレートがその AMI を指して
 いたときは、その AMI を消さずに残りを続け、最後に残したものをまとめて表示して、
@@ -729,22 +791,30 @@ AWS がパラメータから引いた AMI を指すものとして扱う。パ�
 次の `apply` が何を変えるかは、`diff` で分かる（[設定を変える](#設定を変える)）。
 
     launch template temt-<svc>-template:
-      version:                3 (created 2026-09-20 18:00:00)
-      ImageId:                ami-0123456789abcdef0
-      InstanceType:           t3.micro
-      VolumeSize:             (not set)
-      SubnetId:               subnet-0123456789abcdef0 (vpc-0123456789abcdef0)
-      security groups:        sg-0123456789abcdef0
-      instance profile:       temt-<svc>
-      shutdown behavior:      terminate
-      cpu credits:            unlimited
-      public ipv4:            true
-      ipv6 addresses:         1
-      http tokens:            required
-      metadata tags:          enabled
-      instance tags:          Name=temt-<svc> temt:service=<svc>
-      network-interface tags: Name=temt-<svc> temt:service=<svc>
-      volume tags:            Name=temt-<svc> temt:service=<svc>
+      version: 3 (created 2026-09-20 18:00:00)
+      [launch-template]
+      ImageId = "ami-0123456789abcdef0"
+      InstanceType = "t3.micro"
+      InstanceInitiatedShutdownBehavior = "terminate"
+      IamInstanceProfile = { Name = "temt-<svc>" }
+
+      [[launch-template.NetworkInterfaces]]
+      DeviceIndex = 0
+      SubnetId = "subnet-0123456789abcdef0"  # vpc-0123456789abcdef0
+      AssociatePublicIpAddress = true
+      Groups = ["sg-0123456789abcdef0"]
+
+      [launch-template.MetadataOptions]
+      HttpTokens = "required"
+      InstanceMetadataTags = "enabled"
+
+      [launch-template.CreditSpecification]
+      CpuCredits = "unlimited"
+
+      [[launch-template.TagSpecifications]]
+      ResourceType = "instance"
+      Tags = [{ Key = "Name", Value = "temt-<svc>" }, { Key = "temt:service", Value = "<svc>" }]
+      ...
     image ami-0123456789abcdef0:
       name:        temt-<svc>-2609201800
       created:     2026-09-20 18:00:00
@@ -754,12 +824,13 @@ AWS がパラメータから引いた AMI を指すものとして扱う。パ�
     versions (* is the default):
       3 * 2026-09-20 18:00:00 ami-0123456789abcdef0 t3.micro subnet-0123456789abcdef0
 
-- 1 つめは、既定バージョンの内容。temt が管理する項目だけを表示する。`SubnetId` には
-  そのサブネットが属する VPC を添える。`VolumeSize` の `(not set)` は、AMI の
-  ルートボリュームと同じ大きさで起動することを表す。
+- 1 つめは、既定バージョンの中身。temt が足したセキュリティグループやタグも含めて、
+  起動テンプレートにあるものを、設定ファイルの `[launch-template]` と同じ形ですべて
+  表示するので、そのまま設定ファイルに写せる。`SubnetId` には、そのサブネットが属する
+  VPC を添える。
 - 2 つめは、`ImageId` が指す AMI。`root volume` はそのルートボリュームの大きさで、
-  `VolumeSize` はこれより小さくできない。EBS のルートボリュームが無い AMI では
-  `(no EBS root volume)` と出て、`VolumeSize` は書けない。登録が解除されていれば
+  `Ebs.VolumeSize` はこれより小さくできない。EBS のルートボリュームが無い AMI では
+  `(no EBS root volume)` と出て、`Ebs.VolumeSize` は書けない。登録が解除されていれば
   その旨を表示する。
   `latest` はこのサービスの `temt:service=<svc>` のタグを持つ最新の AMI で、
   テンプレートのものより新しければ `newer` と添える。他のサービスの AMI を指していても、
@@ -770,8 +841,10 @@ AWS がパラメータから引いた AMI を指すものとして扱う。パ�
 
 ## セキュリティグループ
 
-サービスのセキュリティグループの受信規則は、設定ファイルに書く。`sg` のコマンドで、
-設定ファイルの規則を足し引きし、AWS との違いを確かめられる。
+temt が作るセキュリティグループの受信規則は、設定ファイルに書く。`sg` のコマンドで、
+設定ファイルの規則を足し引きし、AWS との違いを確かめられる。取り込んだサービスの
+ように、temt のセキュリティグループを使っていないサービスでは、受信規則を書くと
+`apply` がエラーにする（[既存のインスタンスを取り込む](#既存のインスタンスを取り込む)）。
 
     temt-<svc> sg add 22 --description home
 
@@ -815,11 +888,11 @@ ssh に効くのは IPv4 の規則である。CIDR を自分で決めるなら�
 ### 直接接続
 
 Session Manager を通さず、インスタンスのパブリック IP アドレスへ直接つなぐと速い。
-代わりに、セキュリティグループの受信規則と、sshd のポート（`SshdPorts`。既定は 22）で
+代わりに、セキュリティグループの受信規則と、sshd のポート（既定は 22）で
 外に出られるネットワークが要る。使えない環境でも自動では切り替わらない。
 
 まず、自分のグローバル IP アドレスから sshd のポートへの受信規則を、設定ファイルに足して
-`apply` する（[セキュリティグループ](#セキュリティグループ)）。`SshdPorts` でポートを
+`apply` する（[セキュリティグループ](#セキュリティグループ)）。`set-port` でポートを
 変えているなら（[sshd のポートを変える](#sshd-のポートを変える)）、22 の代わりに
 そのポートを、複数ならポートごとに足す。
 
@@ -876,7 +949,7 @@ Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 アプリは、インスタンスの中で動くものを 1 つのディレクトリにまとめたものである。
 作り方は [apps.md](apps.md) にある。
 
-`deploy` はロールに触らない。アプリが AWS を使うなら、要る権限を設定ファイルに
+`deploy` はインスタンスロールに触らない。アプリが AWS を使うなら、要る権限を設定ファイルに
 書き、`deploy` より先に `apply` する（[apps.md](apps.md#aws-を使う)）。
 
 動いているインスタンスに入れ、確かめてから AMI に焼く。
@@ -991,7 +1064,7 @@ AMI にも残るので、オプションには秘密の値を渡さない。
 し直して焼けば、記録が揃う。
 
 `deploy` と `app remove` はインスタンスに ssh でつなぐ。ssh の `ProxyCommand` には
-`--profile` が届かないので、プロファイルは `AwsProfile` か `AWS_PROFILE` で選ぶ。
+`--profile` が届かないので、AWS のプロファイルは `AwsProfile` か `AWS_PROFILE` で選ぶ。
 届かずに別のインスタンスにつながったときは、何も変えずに止まる。Ctrl-C で止めても、インスタンスの上の `install` や `uninstall`
 は走り続けることがある。
 
@@ -1052,73 +1125,52 @@ known_hosts に記録される。
 
 ### sshd のポートを変える
 
-インスタンスの sshd が待ち受けるポートは、設定ファイルの `SshdPorts` で決める。
-書かなければ 22 である。変えるには、設定ファイルに書いて `apply` する。最上位の
-項目なので、`[launch-template]` などのテーブルより前に書く。
+    temt-<svc> ssh set-port 2222
 
-    SshdPorts = [2222]
+インスタンスの sshd が待ち受けるポートは、`ssh set-port` で変える。空白で区切って
+複数のポートを書ける（`ssh set-port 2222 443`）。
 
-    temt-<svc> apply
+`set-port` は、何をするかを表示して `[y/N]` で確認を求めてから、次を行う。
+`--yes` を付けると確認しない。
 
-`apply` は、関連付け `temt-<svc>-sshd`（インスタンスの sshd の設定を揃えるよう、
-Systems Manager の State Manager に登録する設定）を AWS に置き、ssh の設定の
-`Host temt-<svc>` ブロックに `Port 2222` を書く。関連付けは ssh を経由せずに
-インスタンスへ届き、動いているインスタンスにも数秒で効く。`status` の
-`sshd-ports` が `applied` になれば、`ssh temt-<svc>` は 2222 でつながる。`apply` の
-直後はまだ切り替わっておらず、つながらないことがある。Session Manager 経由でも
-直接接続でも同じである。sshd は、書いたポートだけで待ち受け、22 では受けなくなる。
-複数のポートを書けば（`[2222, 443]`）、そのすべてで待ち受け、先頭が ssh の設定の
-`Port` になる。ほかのポートは `ssh -p 443 temt-<svc>` のように指す。
-
-動いているインスタンスのポートを変えたときと、`-p` で別のポートに初めてつなぐ
-ときは、ホスト鍵の確認をもう一度求められる。
+1. インスタンスが無ければ起動し、止まっていれば再開する。
+2. SSM の Run Command で、インスタンスの sshd の設定を書き換えて、sshd を再起動する。
+   ssh を経由しないので、つながらないポートにしてしまっても、もう一度 `set-port` で
+   直せる。
+3. 焼く（[AMI にする](#ami-にする)）。インスタンスは終了し、まだ焼いていない
+   アプリも一緒に焼かれる。ポートが今と同じでも焼く。
+4. ssh の設定の `Host temt-<svc>` ブロックの `Port` を、先頭のポートに書き換える。
+   ほかのポートは `ssh -p 443 temt-<svc>` のように指す。
 
 直接接続で使うなら、セキュリティグループの受信規則も新しいポートに合わせる
-（[直接接続](#直接接続)）。ポートごとに規則が要る。temt は合わせない。
+（[直接接続](#直接接続)）。`set-port` は終わったときに、`sg` での変え方を表示する。
+temt は受信規則を変えない。
 
     temt-<svc> sg add 2222 --description home
     temt-<svc> sg remove 22
     temt-<svc> apply
 
-**焼くまでの振る舞い。** ポートの設定はインスタンスの中にあるので、焼かなければ
-次のインスタンスには残らない。今の `SshdPorts` と違うポートで焼いた AMI（素の
-Ubuntu を含む）から `start` で起動したインスタンスは、SSM エージェントが
-応答してから 10 秒ほどのあいだ AMI のポート（素の Ubuntu なら 22）で待ち受け、
-そのあと `SshdPorts` に切り替わる。`start` は切り替わりを待たない。この間に
-`ssh temt-<svc>` すると、切り替わるまで待ってからつながる。今の `SshdPorts` で
-焼いた AMI でも、起動直後に Session Manager 経由でつなぐと、関連付けが確かめ
-終わるまで（数秒）待つことがある。
+**失敗したとき。** `set-port` は元に戻さず、焼かず、`Port` も書き換えずに、
+インスタンスを動かしたまま終わる。スクリプトの出力と、直し方が表示される。
 
-AMI と違うポートで待ち受けているインスタンスには、ログインのたび（出る条件は
-自動終了の [ログインのメッセージ](apps/idle-shutdown.md#ログインのメッセージ) と
-同じ）に次のメッセージが出る。焼き忘れに気づくためのもので、今の `SshdPorts` で
-焼いた AMI から起動したインスタンスには出ない。
+- sshd を再起動する前に失敗したとき（sshd が設定を受け付けなかった、ほかのファイルにも
+  `Port` 行がある）は、sshd は前のポートで動いている。`ssh -p <前のポート> temt-<svc>`
+  で入って直す。直すまで、`reboot`、`stop`、`bake` はしない。取り込んだ
+  インスタンスで `/etc/ssh/sshd_config` に `Port` 行があるときも、ここで失敗する。
+- sshd を再起動した後に失敗したとき（新しいポートで待ち受けられない）は、どのポートでも
+  待ち受けていないことがある。`aws ssm start-session --target <インスタンスID>` で
+  シェルを開いて直すか、`terminate` してから `start` する（焼いていない分は失う）。
 
-    temt: sshd ports were changed from the AMI's (22 -> 2222); run 'temt bake --svc <svc>' to keep them in the AMI
+直したら、もう一度 `set-port` を実行する。
 
-つながることを確かめ、`status` の `sshd-ports` が `applied` なら、焼く。
-
-    temt-<svc> bake
-
-**間違えたとき。** つながらないポートにしてしまっても（受信規則が無い、手元の
-ネットワークが通さない）、関連付けは ssh を経由しないので、設定ファイルを直して
-`apply` すれば直る。sshd が受け付けない設定と、他のプログラムが使っていて待ち受け
-られないポートは、関連付けが前のポートに戻し、`status` の `sshd-ports` に `failed` と
-出る。理由は temt には出ないので、AWS の Systems Manager の State Manager にある
-`temt-<svc>-sshd` の実行履歴で見る。前のポートは、起動直後なら AMI のポート（素の
-Ubuntu なら 22）、そうでなければ直前の `SshdPorts` の値である。そのポートには
-`ssh -p <前のポート> temt-<svc>` で入れる。直接接続でそのポートの受信規則を消して
-いれば、`TEMT_LOGIN=ssm ssh -p <前のポート> temt-<svc>` で入る。直接接続は関連付けの
-結果を見ないので、失敗していても sshd が受け付けていないと出るだけである。`status` で
-確かめる。
-
-`apply` が関連付けの実行を求めるのは、関連付けを作ったときと中身を変えたときだけ
-である。ポートを使っていたプログラムを止めるなど、インスタンスの中で原因を直した
-あとに同じポートでやり直すには、aws-cli で実行を求める（`--profile` と `--region` は
-サービスのものに合わせる）。関連付けの ID は、1 行目で名前から引く。
-
-    aws ssm list-associations --association-filter-list key=AssociationName,value=temt-<svc>-sshd --query "Associations[?AssociationName=='temt-<svc>-sshd'].AssociationId" --output text
-    aws ssm start-associations-once --association-ids <上で出た ID>
+**`Port` と実際のポートが違うとき。** Host ブロックの `Port` は、起動テンプレートの
+AMI を替えたとき（古い AMI、他のサービスの AMI、`ImageId` の行を消して Ubuntu から
+選び直したときなど）と、`set-port` が失敗したときに、インスタンスの実際のポートと
+違ってしまう。つながらなければ、`~/.ssh/temt/config` の Host ブロックの `Port` を手で
+直す（`deploy` と `app remove` もこれに従う）。その場だけなら `ssh -p <ポート>
+temt-<svc>` でつなぐ。直接接続では、つながらなかったポートと、`Port` が違うかも
+しれないことが表示される。Session Manager 経由では、session-manager-plugin が、
+宛先のポートにつなげなかったと表示して終わる。
 
 ### `~/.ssh/temt/` の中身
 
@@ -1130,8 +1182,8 @@ known_hosts.d/<名前>/     インスタンスごとの known_hosts
 
 サービスに ssh の設定を足したいとき（`LocalForward` など）は、`config` の
 `Host temt-<svc>` ブロックに書き足す。`apply` は、そのサービスのブロックの
-中の temt が管理する項目（`User`、`Port`、`IdentitiesOnly`、`UserKnownHostsFile`、
-`ProxyCommand`）だけを書き換える。`IdentityFile` は、無いときだけ書く。他の項目、
+中の temt が管理する項目（`UserKnownHostsFile`、`ProxyCommand`）だけを書き換える。
+`User`（`ubuntu`）、`Port`（`22`）、`IdentityFile` は、無いときだけ書く。他の項目、
 他のブロック、コメントには触れない。`Host temt-<svc> <別名>` のように Host 行に別名を並べてもよく、`apply` は
 そのブロックをサービスのブロックとして扱う。
 

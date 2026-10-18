@@ -1,17 +1,38 @@
 # AMI
 
-`bake` creates AMIs from the service's instance. The launch template's `ImageId` comes
-from `ImageId` in the config file. Naming and tagging rules are in
-[naming.md](../naming.md).
+`bake` creates AMIs from the service's instance, and `ami import` from an existing
+stopped instance. The launch template's `ImageId` comes from `ImageId` in the config
+file. Naming and tagging rules are in [naming.md](../naming.md).
 
 ## Creating
 
-Step 6 of [`bake`](../commands/ami.md#bake): `create-image` from the stopped instance.
+Step 6 of [`bake`](../commands/ami.md#bake) and step 4 of [`ami
+import`](../commands/ami.md#ami-import): `create-image` from the stopped instance.
 
 - Name: `temt-<svc>-<YYMMDDHHMM>`. The time is the client's local time when
   `create-image` is called.
 - `TagSpecifications` puts `Name=<AMI name>` and `temt:service=<svc>` on the AMI and on
   its snapshots.
+- Only the root volume goes in. Every other EBS volume's device is given as `NoDevice`
+  in `BlockDeviceMappings`, since `create-image` by default snapshots every attached
+  EBS volume into the AMI. Instance store volumes (`VirtualName`) are not EBS and are
+  not left out.
+
+temt manages the root volume only. Other EBS volumes (external EBS) are attached
+(`attach-volume`) and mounted from inside the instance (an app, a systemd mount, a
+`mount.<type>` helper, ...); temt neither attaches nor detaches them. With an instance
+role temt manages, the permissions this needs (`ec2:AttachVolume`, ...) go in
+`[[role.policy.<policy name>]]`. Writing an external EBS volume in `/etc/fstab` without
+`nofail` stops the boot, a well-known matter temt does not handle (the requester). An
+external EBS volume attaches only to an instance in its AZ, and only to one instance
+unless it is Multi-Attach (io1 / io2), which cannot be given at launch or used for
+boot. Rejected: putting other EBS volumes in the AMI (each launch would copy them from
+snapshots, apart from the shared volume, and the copy would take the device name an app
+attaches its volume at); attaching them by `start` (a `[[volume]]` table).
+
+For the same reason, [Terminating](instance.md#terminating) sets `DeleteOnTermination`
+only on the root volume, and `ami import` asks `create-image` to set it true on the
+root volume (the only value `create-image` can change in an existing mapping).
 
 `bake` bakes the instance as it is, without touching its contents or cleaning anything
 up first. For example, lines in `~/.ssh/authorized_keys` (a key pair the source AMI
@@ -32,6 +53,10 @@ deletes the one AMI given by ID or name.
 `bake` points the template at the AMI only after it is `available`; `ami prune` does not
 delete an AMI in that window ([`ami
 prune`](../commands/ami.md#ami-prune)).
+
+A volume created from a snapshot is slow on its first read of each block, loaded lazily
+from S3. temt does nothing about it (the requester); where it matters (batch jobs, ...),
+the service handles it on its own, for example with another instance family.
 
 ## Selecting
 

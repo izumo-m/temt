@@ -30,8 +30,8 @@ The service is selected with `--svc <svc>`:
   (`service list`, `instance list`, `ami list`, `ami prune`, `ami delete`, `app list`)
   may omit it.
 - With `--svc`, the service's config file (over the defaults file) decides the
-  environment (region and profile), and the command deals only with that service's
-  things.
+  environment (region and profile; [config.md](config.md#region)), and the command
+  deals only with that service's things.
 - Without `--svc`, the command deals with the things of all services in the environment
   given by `--profile` and `--region`, else the defaults file and AWS's rules
   ([config.md](config.md#commands-without---svc)).
@@ -55,10 +55,13 @@ The service is selected with `--svc <svc>`:
 | | `instance show --svc <svc>` | `status` |
 | | `instance list [--svc <svc>] [--format <columns>]` | |
 | `ami` | `ami bake --svc <svc> [--yes]` | `bake` |
+| | `ami import --svc <svc> <instance ID> [--yes]` | |
 | | `ami list [--svc <svc>] [--format <columns>]` | |
 | | `ami prune [--svc <svc>] [--yes]` | |
 | | `ami delete [--svc <svc>] <AMI ID or name> [--force] [--yes]` | |
 | `template` | `template show --svc <svc>` | |
+| `role` | `role import --svc <svc> <role name or ARN> [--yes]` | |
+| | `role delete --svc <svc> [--yes]` | |
 | `sg` | `sg list --svc <svc> [--format <columns>]` | |
 | | `sg add --svc <svc> <port> [<CIDR>] [--description <description>]` | |
 | | `sg remove --svc <svc> <port> [<CIDR>]` | |
@@ -72,6 +75,7 @@ The service is selected with `--svc <svc>`:
 | | `app deploy --svc <svc> <app ID or path> [<name>=<value>...] [--reset] [--user <user>] [--bake] [--yes]` | `deploy` |
 | | `app remove --svc <svc> <app ID> [--user <user>] [--bake] [--yes]` | |
 | `ssh` | `ssh proxy --svc <svc> [<port>] [--user <user>]` | `proxy` |
+| | `ssh set-port --svc <svc> <port>... [--yes]` | |
 
 ## Parsing
 
@@ -119,13 +123,15 @@ operations can be typed in this form.
 ### Profile and region
 
 - `--profile <profile>` uses that profile for this run only, over `AwsProfile` in the
-  config file and the defaults file ([config.md](config.md#profile)). `apply` writes the
-  value to `AwsProfile`, so later commands use the same profile. It is a usage error for
+  config file and the defaults file ([config.md](config.md#profile)). `apply` and
+  `ami import` write the value to `AwsProfile`, so later commands use the same profile. It is a usage error for
   the commands that do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`,
   and `app list` without `--svc`.
-- `--region <region>` is accepted only by commands run without `--svc`, except
-  `service list` and `app list`. With `--svc` it is a usage error
-  ([config.md](config.md#region)).
+- `--region <region>` is accepted by the commands that call AWS. With `--svc`, it is
+  used only while the config file has no `AwsRegion`; the first `apply` and `ami import`
+  write it there, and a `--region` with another value is then a usage error
+  ([config.md](config.md#region)). It is a usage error for the commands that do not
+  call AWS, as `--profile` is.
 
 ### Messages
 
@@ -230,7 +236,7 @@ call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and `app list` witho
 
 Waiting for AWS or the instance to reach a state is done in stages, each with a deadline
 ([topics/instance.md](topics/instance.md#waiting)), except `bake` (and `deploy`/
-`app remove` with `--bake`) waiting for the AMI. When a deadline passes, the command
+`app remove` with `--bake`, `set-port`, and `ami import`) waiting for the AMI. When a deadline passes, the command
 exits saying which stage did not finish. Each stage reached is reported once.
 
 Other waits have no deadline of temt's own: `apply` waiting for `.config.lock` (held
@@ -241,8 +247,12 @@ failure surfaces as the botocore error.
 
 ### Missing config file
 
-- A command run with `--svc` other than `apply` and `destroy` exits, prompting to run
-  `apply`, if the config file is missing. `apply` starts from the defaults.
+- A command run with `--svc` other than `apply`, `destroy`, and `ami import` exits,
+  prompting to run `apply`, if the config file is missing. `apply` starts from the
+  defaults.
+- `ami import` requires the config file to be missing: it imports only into a service
+  that has none, and with one it exits doing nothing
+  ([commands/ami.md](commands/ami.md#ami-import)).
 - `destroy` does not prompt `apply`, since it would delete what `apply` makes. It needs
   the config file for the region and profile (`AwsRegion`, `AwsProfile`); if the file is
   missing, it exits
@@ -250,13 +260,13 @@ failure surfaces as the botocore error.
 
 ### Not applied
 
-- Commands that assume `apply` has been run (`start`, `bake`, `template show`, and the
-  `app` commands with `--svc`) look for the launch template before their first operation
-  on AWS, and if it is missing, exit prompting to run `apply`. `start` checks the
-  template also when it resumes a stopped instance.
+- Commands that assume `apply` has been run (`start`, `bake`, `template show`,
+  `set-port`, and the `app` commands with `--svc`) look for the launch template before
+  their first operation on AWS, and if it is missing, exit prompting to run `apply`.
+  `start` checks the template also when it resumes a stopped instance.
 - These do not check: `apply`, `diff`, `destroy`, `stop`, `terminate`, `reboot`,
-  `status`, `instance list`, `ami list`, `ami prune`, `ami delete`, `sg diff`, `sg show`,
-  `proxy`.
+  `status`, `instance list`, `ami import`, `ami list`, `ami prune`, `ami delete`,
+  `role import`, `role delete`, `sg diff`, `sg show`, `proxy`.
   - `status` does not stop; it shows that the service is not applied.
   - `sg show` shows that the next `apply` will create the security group if it is
     missing.
@@ -270,7 +280,8 @@ failure surfaces as the botocore error.
   `start-instances`, `stop-instances`, `terminate-instances`, `reboot-instances`).
 - Completion is:
   - `start`: the instance can be logged into (the SSM agent reports `Online` after the
-    launch).
+    launch); with `WaitForSsm = false`, the instance is `running`
+    ([commands/instance.md](commands/instance.md#start)).
   - `stop`: the instance is `stopped`.
   - `terminate`: the instance is `terminated`.
   - `reboot`: the instance has rebooted and can be logged into again (the boot_id is
@@ -300,8 +311,9 @@ as absent for most commands. The rules are in
 ### Confirmation
 
 - Before changing anything, these list the targets and ask for confirmation with
-  `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami prune`,
-  `ami delete`, and `deploy` and `app remove` with `--bake`.
+  `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`,
+  `ami prune`, `ami delete`, `role import`, `role delete`, `set-port`, and `deploy` and
+  `app remove` with `--bake`.
 - `apply` ends without asking if there are no differences.
 - The list of targets goes to stdout and the prompt to stderr; `stop`, `terminate`, and
   `reboot` print no separate list and name their targets in the prompt itself
@@ -312,8 +324,8 @@ as absent for most commands. The rules are in
 
 ### Locks
 
-`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `deploy`, and `app remove` take
-the per-service lock before acting. `ami prune` takes the lock of an AMI's service each
+`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`, `set-port`,
+`deploy`, and `app remove` take the per-service lock before acting. `ami prune` takes the lock of an AMI's service each
 time it deletes one AMI ([topics/instance.md](topics/instance.md#locks)).
 
 ## List tables

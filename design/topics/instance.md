@@ -7,11 +7,12 @@ stopped one. `reboot` reboots it without terminating. Each command's steps are i
 
 ## Finding
 
-Find instances whose `Name` tag is `<name>` and whose state is one of `pending`,
-`running`, `stopping`, `stopped`, `shutting-down`.
+Find instances whose tag `temt:service` is `<svc>` and whose state is one of `pending`,
+`running`, `stopping`, `stopped`, `shutting-down`. The `Name` tag is not used to manage
+anything, so it may hold any value (an imported service may keep the source's `Name`).
 
-- `start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `deploy`, `app remove`
-  find after taking the lock.
+- `start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `set-port`, `deploy`,
+  `app remove` find after taking the lock.
 - `proxy`, `status`, and `app list` find without taking the lock. `proxy` also decides
   where to connect from this result.
 
@@ -54,8 +55,10 @@ instances exist, the command behaves as if there were none:
 Step 4 of [`terminate`](../commands/instance.md#terminate). For each selected instance,
 do the following in order. With two or more, do it for all of them.
 
-1. If an EBS volume has `DeleteOnTermination` false, set it to true. Continue on
-   failure, reporting that the volume will remain.
+1. If the root volume has `DeleteOnTermination` false, set it to true. Continue on
+   failure, reporting that the volume will remain. Other EBS volumes are left as they
+   are: they are attached from inside the instance and outlive it
+   ([ami.md](ami.md#creating)).
 2. Call `terminate-instances`.
 3. Once the request is accepted, delete that instance's known_hosts file. If `current`
    pointed at it and is now a dangling link, delete `current` too. EC2 never reuses
@@ -63,8 +66,8 @@ do the following in order. With two or more, do it for all of them.
 
 ## Waiting
 
-Each waiting stage has a deadline, except `bake` (and `--bake`) waiting for the AMI
-(below). (`apply`
+Each waiting stage has a deadline, except `bake` (and `--bake`, `set-port`, and
+`ami import`) waiting for the AMI (below). (`apply`
 waiting for `.config.lock` is not a stage here and has none either; see
 [cli.md](../cli.md#deadlines).)
 
@@ -75,7 +78,7 @@ waiting for `.config.lock` is not a stage here and has none either; see
 | A public IPv4 address is assigned (`proxy` with `direct`) | 10 minutes |
 | After launch, login becomes possible (the SSM agent reports `Online` later than the launch) | 5 minutes |
 | After launch, sshd accepts connections (`proxy` with `direct`; each connection attempt up to 5 seconds) | 5 minutes |
-| After launch, the association that sets the sshd listening ports finishes (`proxy` with `ssm`; [sshd-ports.md](sshd-ports.md#right-after-launch)) | 5 minutes |
+| The script of `set-port` finishes through Run Command | Decided at implementation, well above the script's longest run |
 | Reading boot_id before the reboot (`reboot`) | 1 minute |
 | From requesting the reboot until boot_id reads as changed (`reboot`) | 10 minutes |
 | From requesting resume until `stopping` is no longer seen (`start`) | 10 minutes |
@@ -125,9 +128,9 @@ for the last seen state's change. A resume that fails at once and returns to `st
 
 ## Locks
 
-`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `deploy`, and `app remove`
-take an exclusive lock on the lock file `.lock` in the known_hosts directory before
-acting. If the lock cannot be taken, temt exits saying another command is running,
+`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`, `set-port`,
+`deploy`, and `app remove` take an exclusive lock on the lock file `.lock` in the
+known_hosts directory before acting. If the lock cannot be taken, temt exits saying another command is running,
 without waiting. Locks are per service, so different services can be operated in
 parallel. Before taking the lock, the ssh directory and `keys/` are prepared as in
 `apply` step 3 (created with mode 700, or tightened to 700) and the known_hosts directory

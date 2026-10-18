@@ -7,6 +7,10 @@ The `sg` commands handle the ingress rules of the security group
   and do not call AWS. `sg list` reads the config file over the defaults file; `sg add`
   and `sg remove` write only the config file. Only `apply` changes AWS; run `apply` after
   `sg add` and `sg remove` to bring the change to AWS.
+- `sg add` and `sg remove` do not check whether the template uses temt's security group;
+  `apply` does ([topics/security-group.md](../topics/security-group.md#when-it-is-created)).
+  Rejected: stopping them too; without calling AWS they cannot tell temt's security
+  group written by ID, and would stop wrongly.
 - `sg diff` and `sg show` read AWS but write nothing.
 - None of them takes the lock.
 
@@ -99,8 +103,12 @@ Removes rules from the config file.
 `sg diff --svc <svc>`
 
 Writes to stdout how the next `apply` would change the ingress rules, one per line. The
-comparison is against the security group named `<name>` in the VPC that `SubnetId`
-belongs to.
+comparison is against the security group named `<name>` in the VPC that `SubnetId` (of
+the `NetworkInterfaces` element with `DeviceIndex = 0`; the same below) belongs to.
+Whether `apply` would create the security group
+([topics/security-group.md](../topics/security-group.md#when-it-is-created)) is not
+looked at: without it, every rule is shown as `+`, as before `apply` (decided with the
+requester).
 
 - Each line starts with `+` (add), `~` (fix the description), or `-` (remove), followed
   by `PORT`, the source, and the description, aligned with spaces. On a `~` line the

@@ -181,7 +181,7 @@ value does not exist, it says so and does not treat it as an error.
 Installs an app on the running instance. It does not touch the role's policies: the
 permissions an app uses are written in `[[role.policy.<policy name>]]` of the config file
 and attached by `apply` ([conf.md](../../docs/conf.md#role),
-[resources.md](../resources.md#iam-role)). temt does not create the AWS resources an app
+[resources.md](../resources.md#instance-role)). temt does not create the AWS resources an app
 uses, such as S3 buckets, either. An app is one directory:
 
 ```
@@ -270,8 +270,8 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
 
    With `--bake`, check as in `bake` step 3 ([ami.md](ami.md#bake)) that the template
    matches the config file and that the instance's root volume is not larger than
-   `VolumeSize`; then list the install and what `bake` will do, and ask for
-   confirmation.
+   the root volume element's `Ebs.VolumeSize`; then list the install and what `bake`
+   will do, and ask for confirmation.
 3. Connect with `ssh -T <name>` and stream the tar.gz to stdin. On the instance, with
    `sudo`, extract it into a temporary directory under `/opt/temt/apps/` and swap it with
    `/opt/temt/apps/<app ID>/`. On failure partway, the temporary directory is removed and

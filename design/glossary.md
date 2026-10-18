@@ -19,7 +19,7 @@ avoid the ones marked "not".
 | service command (`~/.local/bin/<name>`) | サービスのコマンド | |
 | local, on the client | 手元 | The user's side, as opposed to the instance or AWS |
 | environment (account and region) | 環境 | |
-| profile | プロファイル | AWS profile |
+| profile | AWS のプロファイル | AWS profile. Not プロファイル alone, which can be read as the instance profile |
 | region | リージョン | |
 | location | 場所 | Not 置き場 |
 | global IP address | グローバル IP アドレス | The client's address as seen from the Internet |
@@ -60,8 +60,11 @@ avoid the ones marked "not".
 | deregister (an AMI) | 登録を解除する | Not 登録解除 |
 | Host block (in the ssh config) | Host ブロック | |
 | route (`TEMT_LOGIN`) | 経路 | |
-| IAM role | ロール、IAM のロール | |
+| instance role | インスタンスロール | The IAM role in an instance profile. AWS calls it the IAM role for Amazon EC2. Not ロール alone |
+| IAM role (in general) | IAM ロール | `role import` takes one by name or ARN |
 | instance profile | インスタンスプロファイル | Not プロファイル alone, which is the AWS profile |
+| import (`ami import`) | 取り込む | Make an AMI and a config file from an existing stopped instance |
+| source instance (of `ami import`) | 元のインスタンス | |
 | start (launch or resume) | 起動する、再開する | 再開 is starting a stopped instance |
 | stop | 停止する、止める | |
 | terminate | 終了する | |
@@ -72,7 +75,6 @@ avoid the ones marked "not".
 | default version | 既定バージョン | |
 | security group | セキュリティグループ | Never shortened to グループ |
 | ingress rule | 受信規則 | |
-| association (State Manager) | 関連付け | |
 | key pair | キーペア | EC2 key pair. temt registers none |
 | login key | ログインの鍵 | The key ssh uses for the instance; `proxy` sends its public key with EC2 Instance Connect |
 | EC2 Instance Connect | EC2 Instance Connect | |
@@ -81,7 +83,6 @@ avoid the ones marked "not".
 | git tag | git のタグ | Never just タグ |
 | direct connection (`TEMT_LOGIN=direct`) | 直接接続 | |
 | login message (motd) | ログインのメッセージ | |
-| marker (`/run/motd.d/50-temt-sshd`) | ログインのメッセージ | The user docs name only the message it shows |
 | marker comment (in `~/.ssh/config`) | 目印のコメント | |
 | clean up, tear down | 片づける | |
 

@@ -31,7 +31,9 @@ commands (finding, intermediate states, terminating, waiting and deadlines, lock
    state is no longer visible ([Until the previous state
    disappears](../topics/instance.md#until-the-previous-state-disappears)). Then wait
    until `running`; also keep waiting while the instance is not yet visible by ID right
-   after the launch. Then repeat `ssm describe-instance-information` until the SSM agent
+   after the launch. With `WaitForSsm = false` at the top level of the config file,
+   report that it is running and finish here. Otherwise repeat `ssm
+   describe-instance-information` until the SSM agent
    is reported `Online`, report that the instance is ready for login, and finish. Only
    an `Online` whose last ping (`LastPingDateTime`) is later than the instance's
    `LaunchTime` counts (`LaunchTime` becomes the resume time on a resume), because right
@@ -40,6 +42,16 @@ commands (finding, intermediate states, terminating, waiting and deadlines, lock
    `run 'temt terminate --svc <svc>', wait a few minutes, and start again`
    ([Right after apply](#right-after-apply)); otherwise, as `proxy` does,
    `see 'temt status --svc <svc>' or run 'temt reboot --svc <svc> --async'`.
+
+`WaitForSsm = false` is for an instance whose SSM agent does not register: `ami import`
+writes it when the source is not registered with SSM
+([ami.md](ami.md#ami-import)); unwritten or `true` waits. Nothing else changes: an
+instance profile temt does not manage changes nothing in `start`, and the other
+commands that use SSM (`proxy` on `ssm`, `reboot`, `set-port`) do not refuse in
+advance; they run and end with an error or a deadline, which says what was run and
+what happened (the requester). Rejected: skipping the wait when `IamInstanceProfile =
+false` (that value no longer exists), and refusing `set-port` and the like before
+launching.
 
 ### Right after apply
 
@@ -222,9 +234,6 @@ nor AWS. Shows:
 - Each instance's public IPv4 address, or that it has none.
 - Each instance's SSM agent state (`Online`, `ConnectionLost`, `Inactive`). An instance
   whose agent has never registered is shown as not registered.
-- For each instance, whether the association `<name>-sshd` that aligns the sshd
-  listening ports has finished running
-  ([Status display](../topics/sshd-ports.md#status-display)).
 - Unbaked apps, on the `apps:` line, only when the launch template exists. Decided from
   the deploy records by the same rule as `STATE` of [`app list`](app.md#app-list):
   `unbaked`, `lost`, and `removed` apps are listed in that order, and `removed` gets
@@ -278,8 +287,8 @@ instances are those that have the `temt:service` tag and are not `terminated`. W
 `--svc`, the service's config file decides the environment and only `temt:service=<svc>`
 instances are listed. Without it, all services' instances in the environment decided as in
 [Commands without --svc](../config.md#commands-without---svc) are listed. Instances of services without a config
-file also appear. Instances without the `temt:service` tag (e.g. launched by hand with
-`Name=<name>`) do not appear; `status` finds by `Name`, so they appear there. Rows are
+file also appear. Instances are found by the same tag as `status` and the others
+([Finding](../topics/instance.md#finding)). Rows are
 ordered by the `temt:service` value, launch time, and ID. The SSM agent is not looked
 at; `status` shows that.
 

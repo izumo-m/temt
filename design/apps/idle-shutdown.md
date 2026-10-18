@@ -25,26 +25,39 @@ days, or `off`.
 
 ## install
 
-1. Check and write the option `limit` with the program that was sent
+1. Check that the instance metadata gives the tag `temt:service`
+   ([Reporting](#reporting)). If not, fail with nothing installed, telling the user to
+   write `MetadataOptions.InstanceMetadataTags = "enabled"` in the config file and run
+   `apply`, and for the current instance to run `aws ec2
+   modify-instance-metadata-options --instance-id <id> --instance-metadata-tags
+   enabled`, then deploy again. temt's `deploy` does not check this: temt does not know
+   which apps need the tag (installing emacs does not). Rejected: `deploy` writing the
+   service name into a file (it would be baked into the AMI, and another service using
+   that AMI, such as one made by copying the config file, would read the original
+   name; the default policy writes only under its own `/temt-<svc>`); writing it with
+   cloud-init through the user data (temt would add its own part to the user's user
+   data, against the config file being the whole template, and what changes at every
+   launch comes from the instance metadata anyway).
+2. Check and write the option `limit` with the program that was sent
    (`python3 -I <dir>/idle_shutdown.py limit --deploy <value>`), before installing
    anything. A value the program refuses (over 365 days) fails here with nothing
    installed.
-2. If `aws` is not executable in any of the three places the program looks
+3. If `aws` is not executable in any of the three places the program looks
    ([Reporting](#reporting)), wait for snapd's seeding (`snap wait system seed.loaded`;
    right after boot it may not be done) and `snap install aws-cli --classic`. A failure
    fails `install`; the user deploys again.
-3. Place the files in the table, then `systemd-tmpfiles --create` for the tmpfiles
+4. Place the files in the table, then `systemd-tmpfiles --create` for the tmpfiles
    entry.
-4. `pam-auth-update --enable idle-shutdown`. If any `/etc/pam.d/common-*` was edited by
+5. `pam-auth-update --enable idle-shutdown`. If any `/etc/pam.d/common-*` was edited by
    hand, `pam-auth-update` writes nothing and still succeeds, so check that the line was
    added to `/etc/pam.d/common-session`; if not, fail telling the user to undo the hand
    edits.
-5. `systemctl daemon-reload` and `systemctl enable --now idle-shutdown.timer`. If the
+6. `systemctl daemon-reload` and `systemctl enable --now idle-shutdown.timer`. If the
    timer is enabled more than 5 minutes after boot, systemd runs the check once at once.
-6. `sshd -t`. If it fails, remove the sshd file placed and fail: baked as is, sshd would
+7. `sshd -t`. If it fails, remove the sshd file placed and fail: baked as is, sshd would
    not start on the next instance. Otherwise `systemctl try-reload-or-restart
    ssh.service` (current connections stay; new ones get the setting).
-7. `idle-shutdown report`, so that a new limit shows in `status` on the client without
+8. `idle-shutdown report`, so that a new limit shows in `status` on the client without
    waiting for the timer, then `idle-shutdown status` for the deploy output.
 
 The failures of `install` and `uninstall` are not listed in the usage doc: each message
@@ -223,9 +236,10 @@ Written:
 output) are cut and end with `...`; the journal line is not cut.
 
 The write is `aws ssm put-parameter --type String --overwrite` with `AWS_PAGER` empty.
-The name `temt-<svc>` comes from the instance metadata tag `Name` and the region from
-`placement/region`, through IMDSv2 without proxies (2 seconds per request); the launch
-template allows tags in the metadata. The permission is in the default inline policy
+The name `temt-<svc>` is made from the instance metadata tag `temt:service`, and the
+region comes from `placement/region`, through IMDSv2 without proxies (2 seconds per
+request); temt fills `MetadataOptions.InstanceMetadataTags = "enabled"` in the launch
+template, and `install` checks it. The permission is in the default inline policy
 `temt-ec2` of the instance role ([conf.md](../../docs/conf.md#role)). `aws` is looked up in `/snap/bin` (the aws-cli
 snap), `/usr/local/bin`, `/usr/bin`, not through `PATH`. Each write gets 15 seconds. A
 missing aws-cli, unreadable metadata, or a failed write (no permission, no network) only

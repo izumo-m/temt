@@ -20,23 +20,25 @@ are in [Creating](../topics/ami.md#creating).
    - Two or more: list them and exit, as `start` does.
    - `pending`, `stopping`: tell the user to wait for it to finish and retry, and exit.
    - `running`, `stopped`: go to 3.
-3. Compare the default version of the launch template with the config file on the four
-   keys that come from the config file. `ImageId` is compared after looking up the ID
-   of the AMI it refers to; if there is no usable AMI, it counts as differing.
-   `VolumeSize` is compared as: if not written, the template has no
-   `BlockDeviceMappings`; if written, the size is equal. If any key differs, or `ImageId` or
-   `SubnetId` is not written (an unwritten `InstanceType` is compared by its default), tell the user to run `apply` first and exit.
-   Then, if `VolumeSize` is written, compare it with the size of the instance's root
-   volume (the `VolumeId`, looked up with `describe-volumes`, of the
-   `BlockDeviceMappings` entry whose `DeviceName` is `RootDeviceName`). If the instance's
-   is larger, exit without baking, telling the user to raise `VolumeSize` to that size or
-   more, or remove the line, then `apply` and bake. Baking as is would make the AMI
-   larger than `VolumeSize`, and AWS would refuse the next `start`.
+3. Compare the whole content of the default version of the launch template with the
+   config file, as `diff` does ([Comparing](../topics/launch-template.md#comparing)).
+   `ImageId` is compared after looking up the ID of the AMI it refers to; if there is no
+   usable AMI, it counts as differing. If anything differs, or an item of [Filled when
+   missing](../topics/launch-template.md#filled-when-missing) is not written yet, tell
+   the user to run `apply` first and exit.
+   Then, if the root volume element has `Ebs.VolumeSize`, compare it with the size of
+   the instance's root volume (the `VolumeId`, looked up with `describe-volumes`, of the
+   instance's `BlockDeviceMappings` entry whose `DeviceName` is `RootDeviceName`). If
+   the instance's is larger, exit without baking, telling the user to raise
+   `Ebs.VolumeSize` to that size or more, or remove it, then `apply` and bake. Baking as
+   is would make the AMI larger than `Ebs.VolumeSize`, and AWS would refuse the next
+   `start`.
 4. Confirm, listing the instance ID and state and showing that it will stop the instance
    if `running`, create an AMI, rewrite `ImageId` in the config file when the AMI becomes
    usable, and terminate the instance.
 5. If `running`, stop it with `stop-instances` and wait until `stopped`.
-6. Create the AMI with `create-image` and report its ID and name.
+6. Create the AMI with `create-image` and report its ID and name. EBS volumes other
+   than the root volume are left out ([Creating](../topics/ami.md#creating)).
 7. Wait until the AMI is `available`, with no deadline: depending on the AMI's size it
    can take long, and stopping the wait changes nothing yet. If creation fails
    ([Waiting](../topics/instance.md#waiting)), exit with an error carrying the reason AWS
@@ -123,6 +125,182 @@ If `bake` stopped before pointing the template, no template refers to the new AM
 after rewriting in 8, or written by hand), run `apply` before `ami prune`. If it stopped
 before rewriting the config file and the user will `bake` again, losing it does no harm.
 
+## `ami import`
+
+`ami import --svc <svc> <instance ID> [--yes]`
+
+Imports an existing stopped instance, one usually kept stopped and started when needed,
+as a new service: makes an AMI from its root volume and a config file whose
+`[launch-template]` launches the same instance from that AMI. `apply` then creates the
+launch template, and the service runs in temt's usual cycle: `start` when needed,
+`terminate` when done. It has no short form.
+
+The requester's principles:
+
+- The service launches the same instance: a service that used to `start` and `stop` one
+  instance keeps working when the same instance is created and terminated instead.
+  Breaking it by importing is to be avoided above all.
+- Nothing is added or changed inside the instance.
+- The source instance and the AWS resources it uses (security groups, instance
+  profile, instance role, ...) are left as they are: not stopped, terminated, retagged,
+  or reattached. Changes are made afterwards by editing the config file and running
+  `apply`. The source remains the way back when the import does not work out.
+
+The contents carry over in the AMI; the source instance itself is not taken under temt.
+The import does not deploy `idle-shutdown`; the user deploys it afterwards, as for any
+service.
+
+1. If the config file exists, exit doing nothing: an import goes only into a service
+   without one. Find the instance by ID. If it is not `stopped`, exit telling the user
+   to stop it first; temt neither stops nor restarts it.
+2. Read its settings with `get-launch-template-data` and fix them as in [What is
+   copied](#what-is-copied). If something cannot be copied, exit.
+3. Confirm, showing the instance ID, its `Name` tag, the name of the AMI to make, the
+   settings to copy, the source's private IP address (and IPv6 address, if any) with
+   the note that it changes at every launch, and the EBS volumes other than the root
+   volume, one per line (device name and volume ID from `describe-instances`, size from
+   `BlockDeviceMappings[].Ebs.VolumeSize` of `get-launch-template-data`, so no more AWS
+   calls), followed by `not put in the AMI; to use one, detach it from the source
+   instance and attach it from inside the instance`. Unlike the other differences
+   below, these volumes are shown because temt chooses to leave them out of the AMI,
+   and the import should not end with their contents missing unnoticed. If the source
+   is not registered with SSM (`describe-instance-information`), warn here too.
+4. `create-image`: EBS volumes other than the root volume as `NoDevice`, and the root
+   volume's `DeleteOnTermination` true ([Creating](../topics/ami.md#creating)).
+5. Wait until `available`, with no deadline, as `bake` does. Errors such as an
+   unusable KMS key of an encrypted EBS are shown as AWS returned them, as in `bake`.
+6. Create the config file. If one appeared in the meantime, stop without overwriting
+   it: it is written only when new.
+7. Tell the user to run `apply`, which creates the launch template.
+
+The AMI's name and tags are those of `bake` (`temt-<svc>-<YYMMDDHHMM>`; `Name` and
+`temt:service=<svc>` on the AMI and its snapshots), so it shows in `ami list` and is a
+candidate of `ami prune`. Until `apply`, and after `destroy`, no launch template refers
+to it, so `ami prune` deletes it (showing its name before deleting). `apply` then stops
+because the AMI is missing; deleting the `ImageId` line as it suggests launches Ubuntu,
+which is seen at login, and the source remains, so the config file can be deleted and
+the import run again. Nothing is done about this (the requester).
+
+### What is copied
+
+The output of `get-launch-template-data` goes into `[launch-template]`
+([topics/launch-template.md](../topics/launch-template.md)); temt's own keys per item
+were rejected, since items temt does not know would not be copied. Items that would not
+make a template, or not the same instance, are fixed (checked on real AWS where noted
+in the rationale):
+
+| Item | Handling | Reason |
+| --- | --- | --- |
+| `ImageId` | The name of the AMI made | |
+| `BlockDeviceMappings` | Removed | The AMI's are used. They point at the source's volumes, and a volume added later has an empty `SnapshotId`, which AWS refuses |
+| `Placement.AvailabilityZoneId` | Removed | Cannot be given with `AvailabilityZone` (refused on real AWS) |
+| `NetworkInterfaces` `AssociatePublicIpAddress` | The ENI attribute (`describe-network-interface-attribute --attribute associatePublicIpAddress`) | A stopped instance returns `false`, having lost its public IP; the attribute keeps the launch setting |
+| `NetworkInterfaces` `PrivateIpAddresses` | Removed; the number of secondary ones goes to `SecondaryPrivateIpAddressCount` (not written when none) | [Addresses](#addresses) |
+| `NetworkInterfaces` `PrivateIpAddress`, `NetworkInterfaceId` | Removed | Values of the source; whether they come back is checked at implementation |
+| `NetworkInterfaces` `Ipv4Prefixes`, `Ipv6Prefixes` | Removed; their numbers go to `Ipv4PrefixCount`, `Ipv6PrefixCount` | The source keeps delegated prefixes too |
+| `NetworkInterfaces` `Ipv6Addresses` | Removed; the number goes to `Ipv6AddressCount`, `0` included | Without it, temt fills `1` and a subnet with IPv6 gives an address the source lacked |
+| `NetworkInterfaces` `DeleteOnTermination` | `true` on every element | ENIs attached later return `false`; copied as is, one would be made at every launch and left at every termination, piling up unseen. Every ENI of a template is made anew at launch, so deleting it with the instance is closest to the source. A `false` the user writes later is left alone |
+| `NetworkInterfaces` `Groups` | Copied as is | [Security groups](#security-groups) |
+| The four items that exist only when read | Removed | Cannot be written |
+| `InstanceInitiatedShutdownBehavior` | `terminate` | [Shutdown](#shutdown) |
+| `TagSpecifications` | Copied as is (the source's `Name` too); temt adds `temt:service`. Keys starting with `aws:` are removed, and the removal is reported | Volume and ENI tags are not returned, so not copied, and their `Name` becomes `<name>`. `aws:` keys are reserved by AWS (whether they come back is unchecked) |
+| `IamInstanceProfile` | Copied as is; not written when absent (`get-launch-template-data` then returns none, checked on real AWS) | [Instance profile](#instance-profile) |
+| `UserData` | Copied as is | [User data](#user-data) |
+| `InstanceMarketOptions` | Removed | A stopped Spot instance came from a persistent request (only those can stop); copied, AWS would launch the next one at every termination. It launches on demand; not reported. temt does nothing about an `InstanceMarketOptions` the user writes, persistent included (the requester). Rejected: making it a one-time Spot |
+| `DisableApiTermination`, `DisableApiStop` | Removed | temt keeps the contents in the AMI and terminating is routine; copied, AWS would refuse `terminate` and `stop`. Not reported; the user can write them |
+| Blank values (empty arrays, `GroupName = ""`, ...) | Removed | Count as not written; keeps the file short |
+
+The items of [Filled when missing](../topics/launch-template.md#filled-when-missing)
+are always written. When the source's value cannot be read, AWS's default (the value
+when launched without the item) is written, not temt's, since temt's would make a
+different instance silently. `InstanceInitiatedShutdownBehavior` is the exception.
+
+The config file also gets, at the top level:
+
+- `AwsRegion`, decided as in [Region](../config.md#region): the user points at the
+  source's region with `--region` and the like.
+- `AwsProfile` when it came from `--profile` or the defaults file.
+- `Defaults = false`, so that the service reads no defaults file
+  ([config.md](../config.md#defaults-file)).
+- `WaitForSsm = false` when the source is not registered with SSM
+  ([instance.md](instance.md#start)).
+
+Before implementing, check on real AWS that a template copied this way launches (making
+one was checked). `CpuOptions` and the like are copied as well.
+
+### Addresses
+
+The private IP and IPv6 addresses are not copied; they change at every launch. The
+source, kept stopped, holds its addresses, so a copied address would make AWS refuse
+`start` until the source is terminated, and the source must remain as the way back.
+Secondary private IPs and IPv6 addresses are copied by number. To fix the address, the
+user terminates the source and writes `PrivateIpAddress` in `NetworkInterfaces`. If two
+or more ENIs make `AssociatePublicIpAddress` invalid, `start` gets AWS's error.
+
+Elastic IPs are not handled: a launch template cannot attach one, and `start` does not.
+Nothing is reported when the source has one. Services that need a fixed instance ID
+(target groups, CloudWatch alarms, EventBridge, Route 53 health checks, SSM
+associations targeting the ID, Elastic IPs, ...) are outside temt: the import neither
+looks for them nor reports them, and `start` does not reattach them.
+
+Other unavoidable differences of a new instance are not reported but written briefly in
+the usage doc: each `start` makes a new instance, so the instance ID, MAC address, and
+host name change, and what is bound to them (licenses, the source/destination check,
+volume and ENI tags) does not carry over. Host keys are not mentioned, since temt keeps
+known_hosts per instance.
+
+### Security groups
+
+The source's security groups are copied into `Groups` by the IDs AWS returned, so they
+point at the same ones, and temt's security group is not made
+([topics/security-group.md](../topics/security-group.md#when-it-is-created)). Direct
+connection works if the source's security groups allow it; temt does not touch them.
+
+### Instance profile
+
+No instance profile on the source means none for the service: an import makes a
+template that launches the same instance, and temt's instance role and the like are
+extensions added later by editing the config file (the requester). An instance profile that no
+longer exists is copied as is: temt creates only `<name>`, so it is not silently made
+again, and `start` fails with AWS's error. Rejected: attaching temt's instance profile
+(credentials the source lacked); writing `IamInstanceProfile = false`.
+
+### User data
+
+Copied as is, without reporting. A first-boot-only step (`runcmd` and the like) runs at
+every `start`; if not wanted, the user deletes the `UserData` line. Rejected: not
+copying it, since settings that run at every boot (`bootcmd`, `#cloud-boothook`) and
+apps that read the user data from the instance metadata would silently stop working,
+and adding it later would mean extracting it from the source.
+
+### Shutdown
+
+`InstanceInitiatedShutdownBehavior` is `terminate` whatever the source's value (the
+requester): temt's cycle ends in termination, and with `stop`, a power-off from inside
+(an `idle-shutdown` deployed later included) would stop instead of terminate.
+`MetadataOptions.InstanceMetadataTags` is copied as is, without reporting; apps that
+need the service name check it in their own `install`
+([apps/idle-shutdown.md](../apps/idle-shutdown.md#install)).
+
+### Not handled
+
+What `start` or another command reports clearly as an error or a timeout gets no
+special handling (the requester: errors say what was run and what happened):
+
+- An AMI of an instance stopped by hibernation, or with hibernation enabled, may not
+  connect.
+- Tags in the instance metadata: keys with a space or `/` make the launch or
+  `modify-instance-metadata-options` fail.
+- A key pair the source names that no longer exists makes `start` fail.
+- Writing Elastic IPs in the usage doc.
+- Secrets in the user data showing in the local file and in `diff`; reporting the
+  change from `stop` to `terminate`; importing when AWS has resources of the same name
+  left.
+- An AMI deleted by `ami prune` before `apply` or after `destroy` (above).
+- The source requirements of temt's login (SSM agent, the instance role's SSM
+  permissions, `ec2-instance-connect`, the user of the Host block's `User`) are written
+  in the usage doc; only an unregistered SSM agent is warned about.
+
 ## `ami list`
 
 `ami list [--svc <svc>] [--format <columns>]`
@@ -147,7 +325,7 @@ at, not only temt's. A version whose `ImageId` is an SSM parameter (`resolve:ssm
 resolved by AWS (`ResolveAlias`) and counts as referring to the AMI it points at now. If
 it cannot be resolved, warn, naming the version and the reason (AWS's error text when
 AWS refuses to resolve it). `ami prune` deletes the prune candidates
-(names `bake` makes, state `available` or `failed`) whose `USED` is `-`. Rows are
+(names `bake` and `ami import` make, state `available` or `failed`) whose `USED` is `-`. Rows are
 ordered by the `temt:service` value and creation time. AMIs in `deregistered`, visible
 right after deregistration, and `disabled` AMIs, which `describe-images` does not return
 by default, are not shown.
@@ -166,7 +344,7 @@ decides where the locks are, is checked before starting so that the command does
 stop after the confirmation.
 
 1. Collect temt's AMIs as `ami list` does and narrow to candidates: names of the form
-   `temt-<value of temt:service>-<YYMMDDHHMM>` (names `bake` makes), in state
+   `temt-<value of temt:service>-<YYMMDDHHMM>` (names `bake` and `ami import` make), in state
    `available` or `failed`. `pending` is excluded because it is a `bake` in progress.
 2. Look at every version of every template as `ami list` does; keep candidates that are
    referred to and delete the rest. Even with `--svc`, all templates of the environment

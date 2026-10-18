@@ -1,10 +1,13 @@
 # Login key
 
-temt registers no EC2 key pair, and the launch template has no `KeyName`. Each time ssh
-connects, `proxy` sends the public key of the key ssh will use to the instance with EC2
-Instance Connect (`send-ssh-public-key`), right before handing the connection to ssh
+temt registers no EC2 key pair and does not write `KeyName`. Each time ssh connects,
+`proxy` sends the public key of the key ssh will use to the instance with EC2 Instance
+Connect (`send-ssh-public-key`), right before handing the connection to ssh
 ([commands/ssh.md](../commands/ssh.md#connecting)). The instance accepts that key for
-60 seconds, and ssh authenticates with it right after.
+60 seconds, and ssh authenticates with it right after. A `KeyName` the user writes in
+`[launch-template]` (`ami import` copies the source's) goes into the launch template as
+it is ([launch-template.md](launch-template.md#filled-when-missing)); the key pair's key
+then logs in alongside the one `proxy` sends.
 
 - Nothing about the key is kept in AWS, so there is nothing to register per region or
   account.

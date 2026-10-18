@@ -270,9 +270,9 @@ fi
   バックグラウンドに回すなら、出力を `/dev/null` へ向ける。
 - **状態を `/opt/temt/apps/<アプリID>/` に書かない。** このディレクトリは `deploy` の
   たびに新しいものと入れ替わる。
-- **`/etc/ssh/sshd_config.d/` に `Port` を書かない。** sshd の待ち受けポートは設定
-  ファイルの `SshdPorts` が決める（[usage.md](usage.md#sshd-のポートを変える)）。
-  アプリが `Port` を足すと、揃える仕組みが失敗して前のポートに戻る。
+- **`/etc/ssh/sshd_config.d/` に `Port` を書かない。** sshd の待ち受けポートは
+  `ssh set-port` で変える（[usage.md](usage.md#sshd-のポートを変える)）。アプリが
+  `Port` を足すと、`set-port` が失敗する。
 - **失敗したら 0 以外で終わる。** `install` が失敗すると `deploy` も失敗し、記録は書かれず、
   `--bake` を付けていても焼かれない。更新に失敗したときは、ファイルは新しい版に
   なっているが、記録は前の版のままである。
@@ -299,9 +299,9 @@ S3 などインスタンスの外に置く。インスタンスの中のデー�
 
 ## AWS を使う
 
-インスタンスは、サービスの IAM ロールの権限で AWS を呼べる。アプリが要る権限は、
+インスタンスは、サービスのインスタンスロールの権限で AWS を呼べる。アプリが要る権限は、
 設定ファイルの `[[role.policy.<ポリシー名>]]` に名前を付けて書き、`deploy` より先に
-`apply` する（[conf.md](conf.md#role)）。`deploy` はロールに触らない。S3 のバケット
+`apply` する（[conf.md](conf.md#role)）。`deploy` はインスタンスロールに触らない。S3 のバケット
 など、アプリが使う AWS のリソースは、temt の外で用意する。インスタンスで aws-cli を
 使うなら、`install` で入れておく（`snap install aws-cli --classic` など）。
 
@@ -319,10 +319,11 @@ S3 などインスタンスの外に置く。インスタンスの中のデー�
 
 自分のサービスの階層 `/temt-<svc>` の値は、権限を足さずに読み書きできる。temt が
 既定で付ける `temt-ec2` が許している（[conf.md](conf.md#role)）。既定では、ほかの
-階層のパラメータは読めない。インスタンスの中では、自分のサービスの名前 `temt-<svc>` を
-インスタンスメタデータのタグ `Name` から、リージョンを `placement/region` から
-得る。temt の起動テンプレートは、メタデータからタグを読めるようにしてある。次は
-キー `greeting` を読む例で、サービスの起動スクリプトなどに書く。
+階層のパラメータは読めない。インスタンスの中では、自分のサービス名 `<svc>` を
+インスタンスメタデータのタグ `temt:service` から、リージョンを `placement/region` から
+得る。temt の起動テンプレートは、既定でメタデータからタグを読めるようにしてある
+（`MetadataOptions.InstanceMetadataTags`）。次はキー `greeting` を読む例で、サービスの
+起動スクリプトなどに書く。
 
 ```bash
 imds() {
@@ -332,10 +333,21 @@ imds() {
     curl -sf -H "X-aws-ec2-metadata-token: $token" \
         "http://169.254.169.254/latest/meta-data/$1"
 }
-name=$(imds tags/instance/Name)   # temt-<svc>
+svc=$(imds tags/instance/temt:service)   # <svc>
+name="temt-$svc"
 region=$(imds placement/region)
 greeting=$(aws ssm get-parameter --region "$region" --name "/$name/hello/greeting" \
     --query Parameter.Value --output text 2>/dev/null) || greeting="hello"   # 無ければ既定
+```
+
+取り込んだサービスなど、メタデータのタグを読めないサービスもある。サービス名を使うアプリは、`install` の初めに読めるかを確かめ、読めなければ
+何も入れずに失敗する。
+
+```bash
+imds tags/instance/temt:service >/dev/null || {
+    echo 'cannot read the tag temt:service; write MetadataOptions.InstanceMetadataTags = "enabled" in the config file and run temt apply' >&2
+    exit 1
+}
 ```
 
 手元から値を書けるのは、`deploy` が記録を書いたあとである。`app set` は、記録の

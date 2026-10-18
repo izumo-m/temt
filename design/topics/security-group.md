@@ -5,10 +5,37 @@ Step 5 of [`apply`](../commands/service.md#apply) reconciles it; step 4 of
 commands ([commands/sg.md](../commands/sg.md)) show and edit the ingress rule definition
 in the config file; they never write to AWS.
 
+## When it is created
+
+`apply` creates it only when the launch template uses it by name: when temt fills
+`Groups` of the `NetworkInterfaces` element with `DeviceIndex = 0` (not written, and
+not left out because of `SecurityGroupIds`, `SecurityGroups`, or `NetworkInterfaceId`;
+[launch-template.md](launch-template.md#what-temt-adds)), or when a `Groups` names it
+(`<name>` or `${temt:name}`;
+[launch-template.md](launch-template.md#extensions-to-awss-form)). Whether to create it
+is decided by the name alone, as for the instance profile
+([resources.md](../resources.md#instance-profile-and-instance-role)). Its ingress rules
+are reconciled whenever it is among the template's security groups after resolving, an
+ID written by the user included. A template that
+lists only other security groups (as `ami import` writes: the source's, by the IDs AWS
+returned, so they point at the same ones) gets none, and temt does not touch those
+security groups. To use temt's as well, the user adds `${temt:name}` to `Groups` and
+runs `apply`; ENI security group limits and temt's egress rule then apply, and a limit
+exceeded is left to AWS's error.
+
+Ingress rules (`[[security-group.ingress]]`, the defaults file's included) while no
+security group of the template is temt's make `apply` stop, telling the user to add
+`${temt:name}` to `Groups` (as `[role]` does with an instance profile temt does not
+manage). `apply` resolves IDs, so temt's written by ID counts. Rejected: copying the
+source's security groups on `ami import` (rules of other security groups that refer to
+the source's, such as RDS, would stop matching); a variable
+`${temt:security-group-id}` (names in `Groups` make `${temt:name}` enough).
+
 ## Reconciling
 
-- Created in the VPC of the config file's `SubnetId`, with description `Managed by temt`
-  and two tags, `Name` and `temt:service`.
+- Created in the VPC of the `SubnetId` of the `NetworkInterfaces` element with
+  `DeviceIndex = 0`, with description `Managed by temt` and two tags, `Name` and
+  `temt:service`.
 - If it exists, missing tags are added and tags with a different value are corrected
   (`create-tags` overwrites the value of the same key). Other tags are not touched.
 - A security group of the same name in another VPC is not an error and is left as it is
@@ -92,7 +119,8 @@ Internet; through a VPN it is the VPN's exit address.
 ## Changing the VPC
 
 When `SubnetId` is changed to a subnet in another VPC, `apply` prepares the security
-group in the new VPC and the launch template points to it. A running instance keeps
+group in the new VPC and the launch template points to it (when temt fills `Groups` or
+`Groups` names it). A running instance keeps
 running with the old security group; from the next `start` it launches in the new VPC.
 The security group left in the old VPC is deleted by `destroy`.
 

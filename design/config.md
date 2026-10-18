@@ -12,7 +12,7 @@ environment, which ssh passes on.
 
 Commands with `--svc` other than `apply` exit when the file is missing, telling the
 user to run `apply` (`no config file: <path>; run 'temt apply --svc <svc>' first`).
-`destroy` is the exception ([cli.md](cli.md#missing-config-file)).
+`destroy` and `ami import` are the exceptions ([cli.md](cli.md#missing-config-file)).
 
 ## Defaults file
 
@@ -27,6 +27,17 @@ tell the user to change a value name the file it came from (`conf.source`).
 - A key written in the config file wins. A blank value (empty string or empty array)
   counts as not written, so the config file cannot clear a value of the defaults file.
 - Tables (`[launch-template]`) are merged key by key.
+- Arrays in `[launch-template]` whose elements are matched by a key
+  ([topics/launch-template.md](topics/launch-template.md#comparing):
+  `NetworkInterfaces`, `BlockDeviceMappings`, `TagSpecifications`, tags) are merged
+  element by element. Elements with the same key are merged key by key, the config
+  file's value winning; elements with different keys are both kept, the defaults
+  file's first. So an instance tag `Owner` in the defaults file and an instance tag
+  `Env` in the config file are both put on. Other arrays (`Groups` etc.) written in the
+  config file replace the defaults file's whole. Rejected: replacing every array whole;
+  once `apply` writes `SubnetId` into the config file's `NetworkInterfaces`, the
+  defaults file's `NetworkInterfaces` (`AssociatePublicIpAddress = false` etc.) would
+  stop working.
 - Ingress rules are joined: those of the defaults file first, then those of the config
   file. A rule (protocol, port, CIDR) written in both is an error naming the config
   file's rule, and stops every command with `--svc` that reads the config file,
@@ -36,13 +47,26 @@ tell the user to change a value name the file it came from (`conf.source`).
   same name of the defaults file. If the defaults file has `ec2`, `apply` does not
   write the default `ec2` into the config file.
 - `apply` treats values from the defaults file as it treats built-in defaults: what it
-  writes even when defaulted (`AwsRegion`, `InstanceType`, and the chosen `ImageId` and
-  `SubnetId`) is written into the config file at the first `apply`, so later edits of
-  the defaults file leave existing services as they are. This pins the region of an
-  existing service; following a changed `AwsRegion` would lose its resources. Keys
-  `apply` does not write (`AwsProfile`, `SshdPorts`, `VolumeSize`, ingress rules,
-  policies) keep following the defaults file. The requester chose this over not
-  writing values from the defaults file.
+  writes even when defaulted (`AwsRegion` and the items of [Filled when
+  missing](topics/launch-template.md#filled-when-missing)) is written into the config
+  file at the first `apply`, so later edits of the defaults file leave existing
+  services as they are. This pins the region of an existing service; following a
+  changed `AwsRegion` would lose its resources. Keys `apply` does not write
+  (`AwsProfile`, the other `[launch-template]` items, ingress rules, policies) keep
+  following the defaults file. The requester chose this over not writing values from
+  the defaults file.
+- `Defaults = false` at the top level of a config file makes that service read no
+  defaults file at all; unwritten or `true` reads it. `ami import` writes it, so that
+  the defaults file's `[launch-template]` items (a `KeyName` the source lacks, ...),
+  which the config file cannot clear, do not make the service differ from the source,
+  and so that its policies and ingress rules do not stop `apply`
+  ([resources.md](resources.md#instance-profile-and-instance-role),
+  [topics/security-group.md](topics/security-group.md#when-it-is-created)). The user
+  deletes the line to use the defaults file. In the defaults file itself the key is an
+  error.
+- When the defaults file's policies or ingress rules stop `apply` for a service whose
+  instance profile or security groups temt does not manage, the error names the
+  defaults file.
 - The name `defaults` is not a service name ([naming.md](naming.md#service-names)),
   and `service list` skips the file.
 
@@ -71,17 +95,23 @@ order to boto3, they would disagree when both are set with different values.
 The region is passed to boto3 as the `Session` argument and to aws-cli as `--region`.
 When calling aws-cli, `AWS_PAGER` is set empty.
 
-A command with `--svc` always has a region. If neither the config file nor the defaults
-file has one, `ap-northeast-1` is used; the first `apply` writes the value used into the
-config file. One config file
-corresponds to one instance, so to change the region, set up another `<svc>`.
+A command with `--svc` always has a region. When the config file has `AwsRegion`, only
+that value is used; a `--region` with another value is a usage error
+(`<svc> is in <region>; --region <value> differs`). When it has none, the region is the
+first found of `--region`, `AwsRegion` of the defaults file, the environment variables
+`AWS_REGION` and `AWS_DEFAULT_REGION`, the AWS profile's `region`, and
+`ap-northeast-1`: the order of [Commands without --svc](#commands-without---svc), with
+a default instead of an error at the end. The first `apply` and `ami import` write the
+value used into `AwsRegion`, after which it is fixed. `ami import` needs this to reach
+the source instance's region. One config file corresponds to one instance, so to change
+the region, set up another `<svc>`. Using one config file in several regions (as CDK
+does by changing `AWS_REGION`) is not considered; copy the config file under another
+name.
 
-A command with `--svc` decides its region from the config file and the defaults file
-only. To make sure of
-it, `temt` removes the environment variables `AWS_REGION` and `AWS_DEFAULT_REGION`
-from its own process when it starts. boto3 reads only `AWS_DEFAULT_REGION` and aws-cli
-reads `AWS_REGION` first, so if left in the environment, the two could point at
-different regions.
+`temt` removes `AWS_REGION` and `AWS_DEFAULT_REGION` from its own process when it
+starts, after saving them for the order above. boto3 reads only `AWS_DEFAULT_REGION`
+and aws-cli reads `AWS_REGION` first, so if left in the environment, the two could
+point at different regions.
 
 ## Commands without --svc
 
@@ -96,8 +126,7 @@ file.
   `AWS_REGION`, `AWS_DEFAULT_REGION`, and the profile's `region`. If none is found, it
   is an error (`no region; give --region, write AwsRegion in <defaults file>, set
   AWS_REGION, or write region in the AWS profile`).
-  The environment variables are saved before they are removed. boto3 does not read
-  `AWS_REGION`, so temt reads it and passes it.
+  boto3 does not read `AWS_REGION`, so temt reads it and passes it.
 
 One run handles one environment (account and region) only. At the start of the run,
 temt reports in one line the account from `get-caller-identity`, the region, and the
@@ -116,6 +145,7 @@ directory and the bundled apps.
 
 The config file holds no account. The credentials decide which account is used;
 running `apply` with credentials of another account creates the service anew in that
-account. `SubnetId` and `ImageId`, however, point at resources inside an account, so
-to create the service in another account, delete those lines before running `apply`
+account. Items that point at resources inside an account (`SubnetId`, `ImageId`, and
+when written, `Groups` by ID, `IamInstanceProfile` other than `${temt:name}`,
+`KeyName`, ...), however, must be deleted or rewritten before running `apply`
 ([docs/conf.md](../docs/conf.md#launch-template)).

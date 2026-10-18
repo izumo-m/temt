@@ -40,8 +40,10 @@ confirm the host key again.
 
 ## The ssh directory's config
 
-In its own service's `Host <name>` block, `apply` rewrites only the 5 keys temt manages,
-and writes `IdentityFile` only when the block has none.
+In its own service's `Host <name>` block, `apply` rewrites only the 2 keys temt manages
+(`UserKnownHostsFile` and `ProxyCommand`: where temt's files are and how temt is
+called, not values the user holds), and writes `User`, `Port`, and `IdentityFile` only
+when the block has none.
 If the block is missing it is appended (after a blank line if the file is not empty); if
 the file is missing it is created with mode 600. Unmanaged keys, other blocks, and
 comments are left untouched.
@@ -55,21 +57,28 @@ Host temt-dev-main
     User               ubuntu
     Port               22
     IdentityFile       ~/.ssh/temt/keys/temt
-    IdentitiesOnly     yes
     UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current
     ProxyCommand       env TEMT_CONF_DIR='~/.config/temt' TEMT_SSH_DIR='~/.ssh/temt' temt proxy --svc dev-main --user '%r' %p
 ```
 
-- `User` is fixed to `ubuntu`.
-- `Port` is the first port of the config file's `SshdPorts` (default 22) and becomes the
-  `%p` of `ProxyCommand` ([topics/sshd-ports.md](sshd-ports.md)).
+- `User` is written as `ubuntu` only when the block has none; after that the user edits
+  it (for an imported instance that is not Ubuntu, for example). Rewriting it every
+  time would leave the user no way to change it, since temt's `Include` is at the top of
+  `~/.ssh/config`, and `ssh`, `deploy`, and `app remove` could not connect to other OSes.
+- `Port` is written as `22` only when the block has none, so that a `Port` of a later
+  `Host *` in `~/.ssh/config` or of `/etc/ssh/ssh_config` does not apply (ssh takes the
+  first value it finds, and temt's `Include` comes first). After that `set-port` and the
+  user rewrite it ([sshd-ports.md](sshd-ports.md)). It becomes the `%p` of
+  `ProxyCommand`.
 - `IdentityFile` is written only when the block has none, with the default login key
   `~/.ssh/temt/keys/temt` (under `TEMT_SSH_DIR`; its rules keep out the characters ssh
   would split or expand). After that, the lines in the block are kept as written, so
   the user can point it at another key, or list several. `proxy` sends the key that
   ssh will use ([login-key.md](login-key.md)).
-  `IdentitiesOnly yes` makes ssh use only these keys and not try the other keys in
-  ssh-agent.
+- `IdentitiesOnly` is neither written nor touched; an existing line stays (the
+  requester). Without it ssh also tries the keys in ssh-agent, which matters only with
+  many keys (`Too many authentication failures`, an error that tells). `proxy` does not
+  rely on it.
 - `UserKnownHostsFile` points to the fixed name `current`, because ssh_config has no
   token that expands to the instance ID.
 - `ProxyCommand` calls `temt` by name, not by path, and passes
@@ -94,16 +103,18 @@ Host temt-dev-main
   it is off by default.
 
 The user may add their own settings for the service (`LocalForward` etc.) to this block.
-If the 5 managed keys are edited by hand, the next `apply` puts temt's values back;
-`IdentityFile` is left as the user wrote it.
+If the 2 managed keys are edited by hand, the next `apply` puts temt's values back;
+`User`, `Port`, and `IdentityFile` are left as the user wrote them.
 
 - `apply` regenerates the managed lines in one fixed form without reading the written
   values, and writes only when the file content would change. A line ssh reads as the
   same value (e.g. quoted by hand) is still put back into temt's form.
-- A managed line already in the block is rewritten in place. Missing managed keys are
-  inserted right after the `Host` line, in the order above.
+- A managed line already in the block is rewritten in place. Missing keys (managed, or
+  written only when absent) are inserted right after the `Host` line, in the order
+  above.
 - If a managed key appears more than once in the block, only the first line is kept.
-  Every `IdentityFile` line is kept: ssh tries them in order.
+  Lines of `User`, `Port`, and `IdentityFile` are kept as they are: ssh tries every
+  `IdentityFile` in order.
 
 ### Services across conf directories
 

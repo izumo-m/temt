@@ -37,12 +37,20 @@ If it stops during the update phase, whatever was already written stays.
    ([topics/ssh.md](../topics/ssh.md#services-across-conf-directories)).
 2. Read the config file over the defaults file ([config.md](../config.md#defaults-file));
    if it does not exist, start from the defaults file and the built-in defaults. Detect keys
-   that are missing or have a different value, deciding each value as it goes.
-   Missing `ImageId` and `SubnetId` are chosen from AWS here. If there is no
-   `[[role.policy.ec2]]`, plan to add the default and check that it can be added
+   that are missing or have a different value, deciding each value as it goes: `AwsRegion`
+   ([config.md](../config.md#region)) and the items of [Filled when
+   missing](../topics/launch-template.md#filled-when-missing). Missing `ImageId` and
+   `SubnetId` are chosen from AWS here. When the file does not exist, also plan to write
+   `IamInstanceProfile = { Name = "${temt:name}" }`. A file the user made before the
+   first `apply` gets none: the user writes the line there
+   ([docs/conf.md](../../docs/conf.md#apply-が書くこと)). Decided with the requester over
+   writing it at the first `apply` without a launch template, which would also write it
+   into an imported service whose source has no instance profile. If `IamInstanceProfile` points at
+   `<name>` ([resources.md](../resources.md#instance-profile-and-instance-role)) and there
+   is no `[[role.policy.ec2]]`, plan to add the default and check that it can be added
    ([docs/conf.md](../../docs/conf.md#role)). Later steps use the detected values as if
    they had been written. On update, write the keys starting with `AwsProfile` from
-   `--profile`, then in the order of the table in docs/conf.md, then add the default
+   `--profile`, then in the order of the tables in docs/conf.md, then add the default
    `[[role.policy.ec2]]`. When the file was newly created, append the usage example as
    comments at the end. If the update stops before that, later runs do not add the
    example, since the file then exists.
@@ -52,39 +60,52 @@ If it stops during the update phase, whatever was already written stays.
    dangling symlink counts as present. When writing it on update, create
    `~/.local/bin` if missing. Whether `temt` is on PATH is not checked: if it is not,
    the user notices when running ssh.
-4. Check that the `SubnetId` subnet exists and has an IPv4 CIDR, and get its VPC and
-   whether it has an IPv6 CIDR. If the subnet does not exist, add that for another
-   account the `SubnetId` and `ImageId` lines should be removed. Then check that the
-   AMI that `ImageId` points to is usable, and if it is given by name, look up its ID
-   ([topics/ami.md](../topics/ami.md#referring-by-name)). If it is missing or unusable,
-   add that the `ImageId` line should be removed so it is picked again.
-   - If `VolumeSize` is set, compare it with the size of the AMI's root volume (the
-     entry of `BlockDeviceMappings` whose `DeviceName` is `RootDeviceName`). If
-     `VolumeSize` is smaller, stop, naming both sizes, because AWS accepts the smaller
-     value in the launch template and refuses it only at launch. If the AMI has no EBS
-     root volume (its size is unknown), stop and tell the user to remove the
-     `VolumeSize` line.
+4. Check that the `SubnetId` subnet (of the `NetworkInterfaces` element with
+   `DeviceIndex = 0`) exists and has an IPv4 CIDR, and get its VPC and whether it has an
+   IPv6 CIDR. If the subnet does not exist, add that for another account the lines that
+   point into the account should be removed ([config.md](../config.md#account)). Then
+   check that the AMI that `ImageId` points to is usable, and if it is given by name,
+   look up its ID ([topics/ami.md](../topics/ami.md#referring-by-name)). If it is
+   missing or unusable, add that the `ImageId` line should be removed so it is picked
+   again. Fill in the omitted `DeviceName`, resolve security group names in `Groups`,
+   and substitute the variables ([topics/launch-template.md](../topics/launch-template.md#extensions-to-awss-form)).
+   - If the root volume element has `Ebs.VolumeSize`, compare it with the size of the
+     AMI's root volume (the entry of the AMI's `BlockDeviceMappings` whose
+     `DeviceName` is `RootDeviceName`). If it is smaller, stop, naming both sizes,
+     because AWS accepts the smaller value in the launch template and refuses it only at
+     launch. If the AMI has no EBS root volume (its size is unknown), stop and tell the
+     user to remove `Ebs.VolumeSize`.
+   - If `IamInstanceProfile` does not point at `<name>` (not written included) and
+     `[role]` has anything, stop, naming the file of each item
+     ([resources.md](../resources.md#instance-profile-and-instance-role)).
+   - If there are ingress rules and none of the security groups of the template
+     (`Groups` of any `NetworkInterfaces` element, or the top-level `SecurityGroupIds`
+     or `SecurityGroups`, after resolving) is temt's `<name>`, stop, naming the file of
+     the rules and telling the user to add `${temt:name}` to `Groups`
+     ([topics/security-group.md](../topics/security-group.md#when-it-is-created)).
    - For each `[[role.policy.<policy name>]]`, fill in `Effect`, substitute the
      variables to build the content of `temt-<policy name>`, and pass it to IAM Access
      Analyzer `validate-policy`. If there are `ERROR` findings, list all of them
      ([docs/conf.md](../../docs/conf.md#role)).
-5. Detect the differences of the IAM role, its inline policies `temt-<policy name>`,
-   the instance profile, the security group, the launch template, and the association,
-   in this order; the update reconciles them in the same order.
+5. Detect the differences of the IAM role, its inline and managed policies, the
+   instance profile, the security group, and the launch template, in this order; the
+   update reconciles them in the same order.
+   - The role, its policies, and the instance profile only when `IamInstanceProfile`
+     points at `<name>` ([resources.md](../resources.md#instance-profile-and-instance-role)).
    - Inline policies deleted are those starting with `temt-` that are not in the
-     config file.
+     config file. Managed policies not in `ManagedPolicyArns` are detached.
    - If the instance profile holds another role, remove it and add the role `<name>`.
-   - If the security group does not exist yet, the launch template difference is
-     detected with its ID as `(new)`, and the update puts in the ID of the security
-     group it created.
-   - The association is found by name. Ask for it to run only when it was created or
-     its content was updated ([topics/sshd-ports.md](../topics/sshd-ports.md)).
+   - The security group is created only when `Groups` is filled by temt or names it,
+     and its ingress rules are reconciled whenever it is among the template's security
+     groups ([topics/security-group.md](../topics/security-group.md#when-it-is-created)).
+     If it does not exist yet, the launch template difference is detected with its ID
+     as `(new)`, and the update puts in the ID of the security group it created.
    - Right after creating the instance profile, wait for IAM to propagate it with the
      boto3 waiter `instance-profile-exists` (a mechanism that polls until the state
      changes). Even so, EC2 may not see it yet right after; `start` then says to wait
      a minute ([instance.md](instance.md#right-after-apply)).
 6. Detect adding or updating the `Host <name>` block in the ssh directory's `config`
-   to match the config file. If the block, after this, uses the default login key and
+   ([topics/ssh.md](../topics/ssh.md#the-ssh-directorys-config)). If the block, after this, uses the default login key and
    the key does not exist, detect creating it; it is created before the block is
    written ([topics/login-key.md](../topics/login-key.md#the-default-key)). Detect making the line after the marker in
    `~/.ssh/config` an `Include` that points to that `config`. When replacing the
@@ -122,11 +143,11 @@ with the same error. It prints:
 | 3 | `command` | The service command | Writing |
 | 5 | `role` | `<name>` | Creating; tags to add |
 | 5 | `role-policy` | `temt-<policy name>` | Adding, rewriting, deleting; the content difference |
+| 5 | `managed-policy` | The policy ARN | Attaching, detaching |
 | 5 | `instance-profile` | `<name>` | Creating; tags to add; the role to put in (swapping out another role if one is there) |
 | 5 | `security-group` | `<name>` | Creating; tags to add |
 | 5 | `ingress` | `PORT` | Rules to add, rules whose description is fixed, rules to delete |
 | 5 | `launch-template` | `<name>-template` | Creating; per-item differences; tags to add; non-default versions to delete |
-| 5 | `association` | `<name>-sshd` | Creating; differences in document, targets, `SshdPorts`, script; tags to add |
 | 6 | `key` | The default login key | Creating it (`ssh-keygen -t ed25519`) |
 | 6 | `ssh-host` | `<name>` | Adding or rewriting the Host block; the content difference |
 | 6 | `ssh-include` | `~/.ssh/config` | Adding or replacing the `Include` line (creating `~/.ssh` if missing) |
@@ -139,23 +160,39 @@ Line format:
   `tags: <key>=<value>`.
 - Ingress rules have `PORT` as the name and the source and description as the
   difference, in the same format as [`sg diff`](sg.md#sg-diff).
-- The launch template prints one line per differing temt-managed item. Among them, the
-  ID of a security group not created yet is written `(new)`. `BlockDeviceMappings` is
-  shown by the config key name `VolumeSize`, size only, and `-` when absent
-  (`VolumeSize: - -> 30`). When expanding per item shows no difference, it prints
-  `new version`. When no new version is created but non-default versions remain, it
-  prints deleting them as `delete other versions: <number>, ...`.
-- The content of inline policies (JSON with sorted keys, indented), the association
-  script, and the Host block are shown as differences in unified diff form (with
-  context lines, `-` on removed lines, `+` on added lines), indented on the following
-  lines.
+- The launch template prints one line per differing leaf item, items to be removed
+  included ([topics/launch-template.md](../topics/launch-template.md#comparing)). The
+  same key positions are used by the `conf` lines.
+  - Tables are joined with `.`. An array element is written by its matching key as
+    `[<key>=<value>]`, never by its index, since the order differs between the config
+    file and the template.
+  - The absent side is `-`; a removed item also gets the mark `~`.
+  - A table added or removed whole is split into one line per leaf key.
+  - An array without a matching key is joined with `,` if it holds strings
+    (`Groups: sg-a,sg-b -> sg-a`); an element of an array of tables is written as
+    one-line JSON.
+  - `UserData` is decoded from base64 and shown as a unified diff, as inline policies
+    are; if it is not text, only its byte count.
+  - The ID of a security group not created yet is written `(new)`. When expanding per
+    item shows no difference, it prints `new version`. When no new version is created
+    but non-default versions remain, it prints deleting them as `delete other versions:
+    <number>, ...`.
+
+  ```
+  ~   launch-template   temt-web-template   NetworkInterfaces[DeviceIndex=0].SubnetId: subnet-aaa -> subnet-bbb
+  ~   launch-template   temt-web-template   BlockDeviceMappings[DeviceName=/dev/sda1].Ebs.VolumeSize: - -> 30
+  ~   launch-template   temt-web-template   KeyName: mykey -> -
+  ~   launch-template   temt-web-template   TagSpecifications[ResourceType=instance].Tags[Key=Env]: - -> demo
+  ```
+- The content of inline policies (JSON with sorted keys, indented), `UserData`, and the
+  Host block are shown as differences in unified diff form (with context lines, `-` on
+  removed lines, `+` on added lines), indented on the following lines.
 - If replacing the `Include` makes some Hosts invisible to ssh, they are listed on the
   following lines.
 
 Lines are ordered by the steps of `apply`; ingress rules are in the same order as
 `sg diff`. With no differences, nothing is written to stdout and that is reported on
-stderr. The exit code is 0 whether or not there are differences. The request to run the
-association is not printed, since it is not a change to the definition. Example:
+stderr. The exit code is 0 whether or not there are differences. Example:
 
 ```
 ~   role-policy       temt-app
@@ -171,13 +208,6 @@ association is not printed, since it is not a change to the definition. Example:
            "Resource": "arn:aws:s3:::web-data/*"
 +   ingress           443/tcp             0.0.0.0/0   https
 ~   launch-template   temt-web-template   InstanceType: t3.micro -> t3.small
-~   association       temt-web-sshd       SshdPorts: 22 -> 22,2222
-    @@ -1,4 +1,4 @@
-     set -u
-    -want="22"
-    +want="22 2222"
-     svc="web"
-     conf=/etc/ssh/sshd_config.d/temt-sshd-ports.conf
 ```
 
 ## `destroy`
@@ -192,27 +222,31 @@ AMIs are kept, and the next `apply` uses them as they are. There is no
 1. Take the lock and find instances under the same conditions as
    [`start`](instance.md#start), including those shutting down.
 2. List the IDs and states of the instances found and the names of the resources to
-   delete (including the association), and ask for confirmation. The role is listed
-   with the names of its inline policies.
+   delete, and ask for confirmation. The role is listed with the names of its inline
+   and managed policies.
 3. If there are instances, do step 4 of [`terminate`](instance.md#terminate) and wait
    until all of them are `terminated`.
-4. Delete the launch template, the association, the SSM parameters, the security
-   group, the instance profile, and the IAM role, in this order. Report each as
-   deleted or already absent.
-   - Associations: delete every one named `<name>-sshd`.
+4. Delete the launch template, the SSM parameters, the security group, the instance
+   profile, and the IAM role, in this order. Report each as deleted or already absent.
    - SSM parameters: delete everything under the `/<name>` hierarchy, found by path,
      not by tag.
    - Security groups: delete every one named `<name>`, in any VPC
      ([topics/security-group.md](../topics/security-group.md#deleting)).
+   - The instance profile and the role: only those named `<name>` with the tag
+     `temt:service=<svc>`, whether or not the config file points at them
+     ([resources.md](../resources.md#instance-profile-and-instance-role)). Untagged
+     ones, or ones tagged for another service, are left alone; so are instance profiles of
+     other names (the source's, after `ami import`).
    - From the instance profile, remove only the role `<name>`. If it holds another
      role, stop without deleting it: `the instance profile <name> holds another role:
-     <role>; remove it by hand and run destroy again`. From the role, delete all inline
-     policies, whoever owns them.
-   - If the role has a managed policy or another instance profile attached, stop
-     without deleting even the inline policies, because deleting them first would lose
-     only the hand-attached policies while the role remains.
+     <role>; remove it by hand and run destroy again`. From the role, detach all
+     managed policies (the policies themselves stay; temt did not make them) and
+     delete all inline policies, whoever owns them; IAM's `DeleteRole` refuses with
+     `DeleteConflict` while either remains.
+   - If the role is in another instance profile, stop without detaching or deleting
+     anything.
    - Deleting the instance profile or the role can still fail with `DeleteConflict`:
-     right after the role was removed from the profile, IAM may not show it yet, and
+     right after the role was removed from the instance profile, IAM may not show it yet, and
      something may have been attached after the check. AWS's text does not tell which,
      so the error quotes it and gives both remedies (run destroy again; if it persists,
      or something is attached, remove or detach it by hand).
@@ -256,12 +290,13 @@ symlink) stops the command before listing, naming the defaults file.
 | `REGION` | yes | `AwsRegion` |
 | `IMAGE` | yes | `ImageId` |
 | `TYPE` | yes | `InstanceType` |
-| `SUBNET` | | `SubnetId` |
+| `SUBNET` | | `SubnetId` of the `NetworkInterfaces` element with `DeviceIndex = 0` |
 | `INGRESS` | | Number of `[[security-group.ingress]]` |
-| `SSHDPORTS` | | `SshdPorts` joined with `,` |
-| `VOLUMESIZE` | | `VolumeSize` |
 
-Values are the effective values when the config file is read over the defaults file:
+Values are the effective values when the config file is read over the defaults file
+(not with `Defaults = false`):
 keys with a default show the default when not written. Keys with no value (unwritten
-`AwsProfile` and `VolumeSize`; `ImageId` and `SubnetId` before `apply`) show `-`. `ImageId` is shown as
-written and not resolved to an AMI ID.
+`AwsProfile`; `ImageId` and `SubnetId` before `apply`) show `-`. `ImageId` is shown as
+written and not resolved to an AMI ID. There is no column for the root volume size:
+`service list` does not call AWS, so it cannot tell which `BlockDeviceMappings` element
+is the root volume when `DeviceName` is written.

@@ -15,7 +15,8 @@ Where this and the code disagree, decide which is right before changing either.
 
 temt builds the cycle of preparing a service, launching its instance, logging in
 with ssh, installing apps (`deploy`), turning the instance into an AMI (`bake`),
-terminating it, and cleaning up. Once the bundled app `idle-shutdown` is deployed and
+terminating it, and cleaning up. An existing stopped instance can be imported as a
+service (`ami import`). Once the bundled app `idle-shutdown` is deployed and
 baked, an unused instance terminates itself
 ([apps/idle-shutdown.md](apps/idle-shutdown.md)).
 
@@ -33,17 +34,18 @@ baked, an unused instance terminates itself
 | [commands/service.md](commands/service.md) | `apply`, `diff`, `destroy`, `service list` |
 | [commands/instance.md](commands/instance.md) | `start`, `stop`, `terminate`, `reboot`, `status`, `instance list` |
 | [commands/template.md](commands/template.md) | `template show` |
-| [commands/ami.md](commands/ami.md) | `bake`, `ami list`, `ami prune`, `ami delete` |
+| [commands/ami.md](commands/ami.md) | `bake`, `ami import`, `ami list`, `ami prune`, `ami delete` |
+| [commands/role.md](commands/role.md) | `role import`, `role delete` |
 | [commands/sg.md](commands/sg.md) | `sg list`, `sg add`, `sg remove`, `sg diff`, `sg show` |
 | [commands/app.md](commands/app.md) | The deploy record, `app` commands, `deploy`, app options, `app remove`, bundled apps |
-| [commands/ssh.md](commands/ssh.md) | `proxy` and the login routes (`TEMT_LOGIN`) |
+| [commands/ssh.md](commands/ssh.md) | `proxy` and the login routes (`TEMT_LOGIN`), `set-port` |
 | [topics/ami.md](topics/ami.md) | Creating, selecting, and naming AMIs |
 | [topics/instance.md](topics/instance.md) | Finding instances, intermediate states, terminating, waiting, locks |
 | [topics/login-key.md](topics/login-key.md) | The login key that `proxy` sends with EC2 Instance Connect |
 | [topics/launch-template.md](topics/launch-template.md) | Launch template contents and versions |
 | [topics/security-group.md](topics/security-group.md) | Security group, ingress rules, global IP address |
 | [topics/ssh.md](topics/ssh.md) | known_hosts, the ssh config, the `Include` in `~/.ssh/config` |
-| [topics/sshd-ports.md](topics/sshd-ports.md) | sshd listening ports through a State Manager association |
+| [topics/sshd-ports.md](topics/sshd-ports.md) | sshd listening ports and the script `set-port` runs |
 | [apps/idle-shutdown.md](apps/idle-shutdown.md) | Bundled app `idle-shutdown`: in-use checks, limit, reporting, login message |
 | [apps/swapfile.md](apps/swapfile.md) | Bundled app `swapfile` |
 | [apps/timezone-tokyo.md](apps/timezone-tokyo.md) | Bundled app `timezone-tokyo` |
