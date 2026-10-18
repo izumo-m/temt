@@ -78,7 +78,7 @@ waiting for `.config.lock` is not a stage here and has none either; see
 | A public IPv4 address is assigned (`proxy` with `direct`) | 10 minutes |
 | After launch, login becomes possible (the SSM agent reports `Online` later than the launch) | 5 minutes |
 | After launch, sshd accepts connections (`proxy` with `direct`; each connection attempt up to 5 seconds) | 5 minutes |
-| The script of `set-port` finishes through Run Command | Decided at implementation, well above the script's longest run |
+| The script of `set-port` finishes through Run Command | 7 minutes: Run Command gets 1 minute to deliver and 5 to run, and temt waits 1 minute more. The script ends in about 10 seconds |
 | Reading boot_id before the reboot (`reboot`) | 1 minute |
 | From requesting the reboot until boot_id reads as changed (`reboot`) | 10 minutes |
 | From requesting resume until `stopping` is no longer seen (`start`) | 10 minutes |

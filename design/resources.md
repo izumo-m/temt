@@ -63,9 +63,9 @@ role.
 default it includes the SSM Agent permissions temt needs (Session Manager, Run
 Command) and read/write of the SSM parameters under `/<name>`. The State Manager
 permissions the former sshd association needed (`ssm:ListInstanceAssociations`,
-`UpdateInstanceAssociationStatus`, `GetDocument`, `PutComplianceItems`) are dropped. At
-implementation, check on real AWS whether the SSM agent then logs a denial at every
-poll; if it does, ask the requester whether to drop them.
+`UpdateInstanceAssociationStatus`, `GetDocument`, `PutComplianceItems`) are dropped.
+Whether the SSM agent then logs a denial at every poll is not checked on real AWS (the
+requester: the earlier checks on real AWS are enough).
 
 For each `[[role.policy.<policy name>]]`, `apply` adds `Allow` to statements without
 `Effect`, substitutes the variables, compares the result with the current content of

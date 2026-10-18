@@ -155,8 +155,9 @@ are aligned first; otherwise every `apply` would make a new version.
   in the config file (two `DeviceIndex = 0`) is an error, since elements would be
   mistaken for each other. An element without its key is left to AWS's error. Other arrays compare whole
   elements; a difference shows as an element removed and an element added.
-- To check at implementation on real AWS: whether AWS keeps `Ipv6AddressCount = 0`, and
-  whether it fills in other items.
+- Not checked on real AWS (the requester: the earlier checks on real AWS are enough):
+  whether AWS keeps `Ipv6AddressCount = 0`, and whether it fills in other items. Either
+  would show as a difference at every `apply`.
 
 ## Versions
 

@@ -197,7 +197,7 @@ in the rationale):
 | `Placement.AvailabilityZoneId` | Removed | Cannot be given with `AvailabilityZone` (refused on real AWS) |
 | `NetworkInterfaces` `AssociatePublicIpAddress` | The ENI attribute (`describe-network-interface-attribute --attribute associatePublicIpAddress`) | A stopped instance returns `false`, having lost its public IP; the attribute keeps the launch setting |
 | `NetworkInterfaces` `PrivateIpAddresses` | Removed; the number of secondary ones goes to `SecondaryPrivateIpAddressCount` (not written when none) | [Addresses](#addresses) |
-| `NetworkInterfaces` `PrivateIpAddress`, `NetworkInterfaceId` | Removed | Values of the source; whether they come back is checked at implementation |
+| `NetworkInterfaces` `PrivateIpAddress`, `NetworkInterfaceId` | Removed | Values of the source |
 | `NetworkInterfaces` `Ipv4Prefixes`, `Ipv6Prefixes` | Removed; their numbers go to `Ipv4PrefixCount`, `Ipv6PrefixCount` | The source keeps delegated prefixes too |
 | `NetworkInterfaces` `Ipv6Addresses` | Removed; the number goes to `Ipv6AddressCount`, `0` included | Without it, temt fills `1` and a subnet with IPv6 gives an address the source lacked |
 | `NetworkInterfaces` `DeleteOnTermination` | `true` on every element | ENIs attached later return `false`; copied as is, one would be made at every launch and left at every termination, piling up unseen. Every ENI of a template is made anew at launch, so deleting it with the instance is closest to the source. A `false` the user writes later is left alone |
@@ -226,8 +226,9 @@ The config file also gets, at the top level:
 - `WaitForSsm = false` when the source is not registered with SSM
   ([instance.md](instance.md#start)).
 
-Before implementing, check on real AWS that a template copied this way launches (making
-one was checked). `CpuOptions` and the like are copied as well.
+Making a template copied this way was checked on real AWS; launching from it was not
+(the requester: the earlier checks on real AWS are enough). `CpuOptions` and the like
+are copied as well.
 
 ### Addresses
 
