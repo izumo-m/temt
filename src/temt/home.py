@@ -14,7 +14,6 @@ from pathlib import Path
 
 from temt import keys, msg
 from temt.change import ADD, ARROW, UPDATE, Change, lines_diff
-from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import (
     CONF_DIR_ENV,
@@ -35,13 +34,17 @@ from temt.names import (
 )
 from temt.table import printable
 
-# インスタンスに入るときの利用者。AMI が Ubuntu なので固定する
+# インスタンスに入るときの利用者。temt の既定の AMI が Ubuntu なので、無いときだけ書く
 LOGIN_USER = "ubuntu"
-# temt が管理する項目。ブロックに足すときはこの順に並べる
-MANAGED = ("User", "Port", "IdentityFile", "IdentitiesOnly", "UserKnownHostsFile", "ProxyCommand")
-# 管理する項目のうち、無いときだけ書き、あれば書かれたままにするもの。利用者が自分の
-# 鍵に替えられるようにする。ssh は並んだ行をすべて使うので、2 行目以降も残す
-KEPT = ("IdentityFile",)
+# sshd の待ち受けポート。無いときだけ書く。そのあとは set-port と利用者が書き換える
+SSH_PORT = 22
+# temt が書く項目。ブロックに足すときはこの順に並べる
+MANAGED = ("User", "Port", "IdentityFile", "UserKnownHostsFile", "ProxyCommand")
+# 書く項目のうち、無いときだけ書き、あれば書かれたままにするもの。利用者が直せるように
+# する（Ubuntu でない AMI の User、22 でない sshd の Port、自分の鍵の IdentityFile）。ssh は
+# IdentityFile の行をすべて使うので、2 行目以降も残す。ほかの 2 つは temt のファイルの
+# 場所と呼び方で、利用者が持つ値ではないので、毎回書き直す
+KEPT = ("User", "Port", "IdentityFile")
 # ~/.ssh/config に置く目印。この次の行が temt の Include である
 MARK = "# ===== temt ===== do not remove; 'temt apply' owns the next line"
 # ssh は Include のパスを glob として読む。パスそのものに一致させるため \ を付ける文字。
@@ -253,18 +256,18 @@ def _proxy_command(service: Service) -> str:
     return f"env {assigned} {PREFIX} proxy --svc {service.svc} --user '%r' %p"
 
 
-def _managed(service: Service, values: Conf) -> dict[str, str]:
-    """temt が管理する項目の値。ProxyCommand はサービスのコマンドでなく temt を呼ぶ。
+def _managed(service: Service) -> dict[str, str]:
+    """temt が書く項目の値。ProxyCommand はサービスのコマンドでなく temt を呼ぶ。
 
-    Port は SshdPorts の先頭で、ProxyCommand の %p になる。IdentityFile は既定の鍵で、
-    無いときだけ書く。場所は TEMT_SSH_DIR の規則を通っており、ssh が空白で分けたり
-    展開したりする文字を含まないので、そのまま書ける。
+    Port は ProxyCommand の %p になる。後ろの ~/.ssh/config の Host * などの Port が
+    効かないよう、無いときに書いておく。IdentityFile は既定の鍵で、場所は TEMT_SSH_DIR の
+    規則を通っており、ssh が空白で分けたり展開したりする文字を含まないので、そのまま
+    書ける。IdentitiesOnly は書かない（書かれていれば、管理しない項目として残る）。
     """
     return {
         "User": LOGIN_USER,
-        "Port": str(values.SshdPorts[0]),
+        "Port": str(SSH_PORT),
         "IdentityFile": tilde(keys.default_path()),
-        "IdentitiesOnly": "yes",
         "UserKnownHostsFile": tilde(service.known_hosts_current),
         "ProxyCommand": _proxy_command(service),
     }
@@ -434,20 +437,20 @@ def check_owner(service: Service) -> None:
     )
 
 
-def detect_host_block(service: Service, values: Conf) -> Edit:
+def detect_host_block(service: Service) -> Edit:
     """ssh ディレクトリの config の Host <名前> ブロックを足すか、管理する項目を書き換える
     中身を求める。書くのは write_edit である。
 
     管理しない項目、他のブロック、コメントには手を付けない。管理する項目が 2 行
     あれば先頭の行だけを残す。管理する項目の行は、書かれた値を読まずに、いつも temt が
     書く形で作り直し、ファイルの中身どうしを比べる。手で引用符を付けた行など、ssh には
-    同じ値に読める行も、temt が書く形に戻す。ただし KEPT の項目（IdentityFile）は、
-    無いときだけ既定の値で足し、あれば何行でも書かれたまま残す。
+    同じ値に読める行も、temt が書く形に戻す。ただし KEPT の項目（User、Port、
+    IdentityFile）は、無いときだけ既定の値で足し、あれば何行でも書かれたまま残す。
     """
     path = ssh_dir() / "config"
     text = _read(path)
     lines = _lines(text)
-    wanted = _managed(service, values)
+    wanted = _managed(service)
 
     found = _block(lines, service)
     if found is None:
@@ -471,6 +474,32 @@ def detect_host_block(service: Service, values: Conf) -> Edit:
             kept.append(_item(name, wanted[name]))
     missing = [_item(key, wanted[key]) for key in MANAGED if key not in seen]
     return Edit(path, text, _joined(lines[: start + 1] + missing + kept + lines[end:]))
+
+
+def detect_port(service: Service, port: int) -> Edit:
+    """Host <名前> ブロックの Port を port に書き換える中身を求める。set-port が使う。
+
+    ブロックの最初の Port の行を書き換え、無ければ Host の行のすぐ後に足す。ほかの行には
+    触らない。ブロックが無ければ、apply を促して終わる。書くのは write_edit である。
+    """
+    path = ssh_dir() / "config"
+    text = _read(path)
+    lines = _lines(text)
+    found = _block(lines, service)
+    if found is None:
+        raise TemtError(
+            f"no Host {service.name} block in {printable(tilde(path))}; "
+            f"run 'temt apply --svc {service.svc}' first"
+        )
+    start, end = found
+    for index in range(start + 1, end):
+        keyword, _ = _keyword(lines[index])
+        if keyword == "port":
+            lines[index] = _item("Port", str(port))
+            break
+    else:
+        lines.insert(start + 1, _item("Port", str(port)))
+    return Edit(path, text, _joined(lines))
 
 
 def default_key(edit: Edit, service: Service) -> Path | None:

@@ -21,8 +21,9 @@ from types_boto3_ec2.client import EC2Client
 from types_boto3_ec2_instance_connect.client import EC2InstanceConnectClient
 from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
+from types_boto3_sts.client import STSClient
 
-from temt import aws, conf, ingress, lock, msg, names, sshd, wait
+from temt import aws, conf, ingress, lock, msg, names, wait
 from temt.conf import Conf
 from temt.names import Service
 
@@ -40,6 +41,7 @@ def process_state(monkeypatch: pytest.MonkeyPatch) -> None:
     取り除いておき、テストの後に手元の値へ戻させる。
     """
     monkeypatch.setattr(conf, "OPTION_PROFILE", None)
+    monkeypatch.setattr(conf, "OPTION_REGION", None)
     monkeypatch.setattr(conf, "ENV_REGION", None)
     monkeypatch.setattr(msg, "_only_stderr", False)
     for name in conf.REGION_ENV:
@@ -221,6 +223,12 @@ def connect(stub_failures: list[BotoCoreError]) -> EC2InstanceConnectClient:
     return watched(offline().client("ec2-instance-connect"), stub_failures)
 
 
+@pytest.fixture
+def sts(stub_failures: list[BotoCoreError]) -> STSClient:
+    """AWS につながない STS のクライアント。"""
+    return watched(offline().client("sts"), stub_failures)
+
+
 class Clock:
     """待ち合わせの時計と休みの代わり。休んだ分だけ進む。"""
 
@@ -258,6 +266,7 @@ class Session:
         iam: IAMClient,
         analyzer: AccessAnalyzerClient,
         connect: EC2InstanceConnectClient,
+        sts: STSClient,
     ) -> None:
         self.clients: dict[str, Any] = {
             "ec2": ec2,
@@ -265,6 +274,7 @@ class Session:
             "iam": iam,
             "accessanalyzer": analyzer,
             "ec2-instance-connect": connect,
+            "sts": sts,
         }
 
     def client(self, name: str) -> Any:
@@ -280,12 +290,13 @@ class Stubs:
     iam: Stubber
     analyzer: Stubber
     connect: Stubber
+    sts: Stubber
     # aws.session に渡された設定。設定ファイルから決まる
     passed: list[Conf]
 
     def done(self) -> None:
         """積んだ応答がすべて使われたことを確かめる。"""
-        for stub in (self.ec2, self.ssm, self.iam, self.analyzer, self.connect):
+        for stub in (self.ec2, self.ssm, self.iam, self.analyzer, self.connect, self.sts):
             stub.assert_no_pending_responses()
 
 
@@ -297,18 +308,22 @@ def aws_stubs(
     iam: IAMClient,
     analyzer: AccessAnalyzerClient,
     connect: EC2InstanceConnectClient,
+    sts: STSClient,
 ) -> Iterator[Stubs]:
     """コマンドが Session から作るクライアントを、Stubber で包んだものに差し替える。
 
     teardown で、積んだ応答がすべて使われたことを確かめる。
     """
     passed: list[Conf] = []
+    resolve_region = aws.resolve_region
 
     def session(values: Conf) -> Session:
+        # aws.session と同じく、設定ファイルで決まらなかったリージョンを決める
+        resolve_region(values)
         # Conf は後の手順が書き換えるので、渡された時点の姿を控える。テーブルも
         # 書き換わるので、深い複製にする
         passed.append(deepcopy(values))
-        return Session(ec2, ssm, iam, analyzer, connect)
+        return Session(ec2, ssm, iam, analyzer, connect, sts)
 
     monkeypatch.setattr(aws, "session", session)
     with (
@@ -317,36 +332,56 @@ def aws_stubs(
         Stubber(iam) as iam_stub,
         Stubber(analyzer) as analyzer_stub,
         Stubber(connect) as connect_stub,
+        Stubber(sts) as sts_stub,
     ):
-        stubs = Stubs(ec2_stub, ssm_stub, iam_stub, analyzer_stub, connect_stub, passed)
+        stubs = Stubs(ec2_stub, ssm_stub, iam_stub, analyzer_stub, connect_stub, sts_stub, passed)
         yield stubs
         stubs.done()
+
+
+# apply が新しく書く設定ファイルの、例のコメントを除いた中身に当たる
+CONFIGURED = f"""\
+AwsRegion = "{REGION}"
+
+[launch-template]
+ImageId = "ami-0123456789abcdef0"
+InstanceType = "t3.micro"
+InstanceInitiatedShutdownBehavior = "terminate"
+IamInstanceProfile = {{ Name = "${{temt:name}}" }}
+
+[[launch-template.NetworkInterfaces]]
+DeviceIndex = 0
+SubnetId = "subnet-0123456789abcdef0"
+AssociatePublicIpAddress = true
+
+[launch-template.MetadataOptions]
+HttpTokens = "required"
+InstanceMetadataTags = "enabled"
+
+[launch-template.CreditSpecification]
+CpuCredits = "unlimited"
+"""
 
 
 @pytest.fixture
 def configured(service: Service) -> Service:
     """設定ファイルのあるサービス。apply が書いたものに当たる。"""
     service.conf_path.parent.mkdir(parents=True, exist_ok=True)
-    service.conf_path.write_text(
-        f'AwsRegion = "{REGION}"\n'
-        "\n"
-        "[launch-template]\n"
-        'ImageId = "ami-0123456789abcdef0"\n'
-        'InstanceType = "t3.micro"\n'
-        'SubnetId = "subnet-0123456789abcdef0"\n',
-        encoding="utf-8",
-    )
+    service.conf_path.write_text(CONFIGURED, encoding="utf-8")
     return service
 
 
 def an_instance(
     instance_id: str, state: str, *, address: str = "", kept: tuple[str, ...] = ()
 ) -> dict[str, Any]:
-    """describe-instances の応答の 1 台分。kept は終了しても消えないボリューム。"""
+    """describe-instances の応答の 1 台分。kept は終了しても消えないボリュームのデバイス名で、
+    最初のものをルートボリュームとする。
+    """
     item: dict[str, Any] = {"InstanceId": instance_id, "State": {"Name": state}}
     if address:
         item["PublicIpAddress"] = address
     if kept:
+        item["RootDeviceName"] = kept[0]
         item["BlockDeviceMappings"] = [
             {"DeviceName": device, "Ebs": {"DeleteOnTermination": False}} for device in kept
         ]
@@ -356,91 +391,6 @@ def an_instance(
 def reservations(*items: dict[str, Any]) -> dict[str, Any]:
     """describe-instances の応答。1 台ずつ別の予約に入れる。"""
     return {"Reservations": [{"Instances": [item]} for item in items]}
-
-
-# サービス dev-main の関連付け <名前>-sshd と、その ID
-SSHD = "temt-dev-main-sshd"
-ASSOCIATION = "11111111-2222-3333-4444-555555555555"
-# 関連付けの今の版と、その前の版
-VERSION = "2"
-OLD_VERSION = "1"
-# 関連付けに付ける temt のタグ
-ASSOCIATION_MARK = [{"Key": aws.TAG_SERVICE, "Value": "dev-main"}]
-
-
-def listed_associations(stub: Stubber, *ids: str, version: str = VERSION) -> None:
-    """list-associations の応答を積む。
-
-    名前が <名前>-sshd の関連付けが ids だけあり、どれも今の版は version である。
-    """
-    stub.add_response(
-        "list_associations",
-        {
-            "Associations": [
-                {"AssociationId": one, "AssociationName": SSHD, "AssociationVersion": version}
-                for one in ids
-            ]
-        },
-        {"AssociationFilterList": [{"key": "AssociationName", "value": SSHD}]},
-    )
-
-
-def association_ran(
-    status: str, version: str = VERSION, association_id: str = ASSOCIATION
-) -> dict[str, Any]:
-    """describe-instance-associations-status が返す、<名前>-sshd の 1 つの版の状態。"""
-    return {
-        "AssociationId": association_id,
-        "AssociationName": SSHD,
-        "AssociationVersion": version,
-        "Status": status,
-    }
-
-
-def association_content(ports: list[int]) -> dict[str, Any]:
-    """関連付けの中身。ports は SshdPorts。"""
-    return {
-        "Name": sshd.DOCUMENT,
-        "Targets": [{"Key": "tag:Name", "Values": ["temt-dev-main"]}],
-        "Parameters": {sshd.COMMANDS: sshd.commands(ports, "dev-main")},
-    }
-
-
-def described_association(stub: Stubber, ports: list[int] | None = None) -> None:
-    """名前で見つけた関連付け（ASSOCIATION）の中身を読む describe-association の応答。
-
-    中身は ports（既定は [22]）に合っている。
-    """
-    stub.add_response(
-        "describe_association",
-        {
-            "AssociationDescription": {
-                "AssociationId": ASSOCIATION,
-                "AssociationName": SSHD,
-                **association_content(ports or [22]),
-            }
-        },
-        {"AssociationId": ASSOCIATION},
-    )
-
-
-def association_in_place(stub: Stubber, ports: list[int] | None = None) -> None:
-    """apply が揃える関連付けが、既にあって ports（既定は [22]）に合っているときの応答。
-
-    中身もタグも揃っていれば、apply は読むだけで、実行も求めない。
-    """
-    listed_associations(stub, ASSOCIATION)
-    described_association(stub, ports)
-    stub.add_response(
-        "list_tags_for_resource",
-        {"TagList": ASSOCIATION_MARK},
-        {"ResourceType": "Association", "ResourceId": ASSOCIATION},
-    )
-
-
-def association_started(stub: Stubber) -> None:
-    """start-associations-once の応答を積む。"""
-    stub.add_response("start_associations_once", {}, {"AssociationIds": [ASSOCIATION]})
 
 
 def taken(service: Service) -> bool:

@@ -12,7 +12,6 @@ import pytest
 
 from temt import home
 from temt.change import Change
-from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, keys_dir, ssh_dir
 
@@ -51,10 +50,14 @@ BLOCK = (
     "    User               ubuntu\n"
     "    Port               22\n"
     "    IdentityFile       ~/.ssh/temt/keys/temt\n"
-    "    IdentitiesOnly     yes\n"
     "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
     f"    ProxyCommand       {PROXY}\n"
 )
+
+# BLOCK のうち、無いときだけ書く項目の行
+USER = "    User               ubuntu\n"
+PORT = "    Port               22\n"
+IDENTITY = "    IdentityFile       ~/.ssh/temt/keys/temt\n"
 
 
 @pytest.fixture
@@ -79,15 +82,15 @@ def write(text: str) -> None:
     config().write_text(text, encoding="utf-8")
 
 
-def detect_block(home_dir: Path, values: Conf | None = None) -> home.Edit:
-    """Host ブロックの書き換えを検出する。values を省けば既定の設定で求める。"""
+def detect_block(home_dir: Path) -> home.Edit:
+    """Host ブロックの書き換えを、既定の設定で検出する。"""
     _ = home_dir
-    return home.detect_host_block(Service("dev-main"), Conf() if values is None else values)
+    return home.detect_host_block(Service("dev-main"))
 
 
-def write_block(home_dir: Path, values: Conf | None = None) -> bool:
+def write_block(home_dir: Path) -> bool:
     """apply と同じく、Host ブロックの書き換えを検出してから書く。"""
-    return home.write_edit(detect_block(home_dir, values))
+    return home.write_edit(detect_block(home_dir))
 
 
 def test_prepare_dirs_makes_them_private(home_dir: Path) -> None:
@@ -207,7 +210,7 @@ def test_detecting_writes_nothing(home_dir: Path) -> None:
     service = Service("dev-main")
     assert home.detect_dirs()
     assert home.command_missing(service)
-    assert home.detect_host_block(service, Conf()).changed
+    assert home.detect_host_block(service).changed
     assert home.detect_include().changed
     assert list(home_dir.rglob("*")) == []
 
@@ -232,35 +235,23 @@ def test_write_host_block_leaves_the_rest_alone(prepared: Path) -> None:
         "\n"
         "Host temt-dev-main\n"
         "    LocalForward 8080 localhost:8080\n"
-        "    User root\n"
         "\n"
         "Host last\n"
         "    User me\n"
     )
     assert write_block(prepared) is True
     assert read() == (
-        "# mine\n"
-        "Host other\n"
-        "    User root\n"
-        "\n"
-        "Host temt-dev-main\n"
-        "    Port               22\n"
-        "    IdentityFile       ~/.ssh/temt/keys/temt\n"
-        "    IdentitiesOnly     yes\n"
-        "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
-        f"    ProxyCommand       {PROXY}\n"
-        "    LocalForward 8080 localhost:8080\n"
-        "    User               ubuntu\n"
-        "\n"
-        "Host last\n"
-        "    User me\n"
+        "# mine\nHost other\n    User root\n\n"
+        + BLOCK
+        + "    LocalForward 8080 localhost:8080\n\nHost last\n    User me\n"
     )
 
 
 def test_write_host_block_keeps_the_first_of_duplicates(prepared: Path) -> None:
-    write("Host temt-dev-main\n    User root\n    User me\n")
+    """毎回書き直す項目が 2 行あれば、先頭の行だけを書き直して残す。"""
+    write("Host temt-dev-main\n    ProxyCommand nc %h %p\n    ProxyCommand nc -v %h %p\n")
     write_block(prepared)
-    assert read().count("    User ") == 1
+    assert read() == BLOCK
 
 
 def test_write_host_block_takes_a_host_line_with_other_names(
@@ -302,27 +293,31 @@ def test_host_block_changes_shows_only_the_new_block(prepared: Path, service: Se
             "ssh-host",
             "temt-dev-main",
             "~/.ssh/temt/config",
-            ("@@ -0,0 +1,7 @@", *(f"+{line}" for line in BLOCK.splitlines())),
+            ("@@ -0,0 +1,6 @@", *(f"+{line}" for line in BLOCK.splitlines())),
         )
     ]
 
 
 def test_host_block_changes_shows_the_changed_lines(prepared: Path, service: Service) -> None:
-    assert write_block(prepared) is True
-    assert home.host_block_changes(service, detect_block(prepared, Conf(SshdPorts=[2222]))) == [
+    write(
+        BLOCK.replace(
+            "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n",
+            "    UserKnownHostsFile ~/.ssh/known_hosts\n",
+        )
+    )
+    assert home.host_block_changes(service, detect_block(prepared)) == [
         Change(
             "~",
             "ssh-host",
             "temt-dev-main",
             "~/.ssh/temt/config",
             (
-                "@@ -1,5 +1,5 @@",
-                " Host temt-dev-main",
-                "     User               ubuntu",
-                "-    Port               22",
-                "+    Port               2222",
+                "@@ -3,4 +3,4 @@",
+                "     Port               22",
                 "     IdentityFile       ~/.ssh/temt/keys/temt",
-                "     IdentitiesOnly     yes",
+                "-    UserKnownHostsFile ~/.ssh/known_hosts",
+                "+    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current",
+                f"     ProxyCommand       {PROXY}",
             ),
         )
     ]
@@ -629,7 +624,6 @@ def test_write_host_block_carries_the_directories_in_the_proxy_command(
         "    User               ubuntu\n"
         "    Port               22\n"
         "    IdentityFile       ~/elsewhere/ssh/keys/temt\n"
-        "    IdentitiesOnly     yes\n"
         "    UserKnownHostsFile ~/elsewhere/ssh/known_hosts.d/temt-dev-main/current\n"
         f"    ProxyCommand       env {CONF_DIR_ENV}='~/elsewhere/conf' "
         f"{SSH_DIR_ENV}='~/elsewhere/ssh' "
@@ -648,7 +642,7 @@ def test_the_proxy_command_wins_over_the_shell(home_dir: Path) -> None:
     """シェルに別の場所があっても、proxy には apply のときの場所が届く。"""
     home.prepare_dirs()
     bin_path = show_places(home_dir)
-    assert home.write_edit(home.detect_host_block(Service("dev-main"), Conf())) is True
+    assert home.write_edit(home.detect_host_block(Service("dev-main"))) is True
     line = next(one for one in read().splitlines() if "ProxyCommand" in one)
     command = line.split(maxsplit=1)[1]
     environment = {
@@ -675,7 +669,7 @@ def test_the_proxy_command_hands_the_directories_to_the_shell(
     monkeypatch.setenv(SSH_DIR_ENV, str(home_dir / "elsewhere" / "ssh"))
     home.prepare_dirs()
     bin_path = show_places(home_dir)
-    assert home.write_edit(home.detect_host_block(Service("dev-main"), Conf())) is True
+    assert home.write_edit(home.detect_host_block(Service("dev-main"))) is True
     line = next(one for one in read().splitlines() if "ProxyCommand" in one)
     command = line.split(maxsplit=1)[1]
     # シェルに場所を変える環境変数が無くても届くことを見るので、環境からは外して渡す
@@ -693,66 +687,84 @@ def test_the_proxy_command_hands_the_directories_to_the_shell(
     assert shown.stdout == f"{home_dir}/elsewhere/conf\n{home_dir}/elsewhere/ssh\n"
 
 
-def test_write_host_block_adds_the_default_key_to_a_block_without_one(prepared: Path) -> None:
-    """IdentityFile の無いブロックには、既定の鍵の行を、管理する項目の並びの位置に足す。"""
+def test_write_host_block_adds_only_the_missing_defaults(prepared: Path) -> None:
+    """User、Port、IdentityFile は、無い項目だけを既定の値で Host の行のすぐ後に足す。
+
+    書かれている項目の行は、元の位置に書かれたまま残す。
+    """
     write("Host temt-dev-main\n    User root\n")
     assert write_block(prepared) is True
     assert read() == (
         "Host temt-dev-main\n"
         "    Port               22\n"
         "    IdentityFile       ~/.ssh/temt/keys/temt\n"
-        "    IdentitiesOnly     yes\n"
         "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
         f"    ProxyCommand       {PROXY}\n"
-        "    User               ubuntu\n"
+        "    User root\n"
     )
 
 
 @pytest.mark.parametrize(
-    "lines",
+    ("line", "lines"),
     [
-        pytest.param(["    IdentityFile ~/.ssh/id_ed25519"], id="another key"),
-        pytest.param(['    IdentityFile       "~/my keys/temt"'], id="quoted"),
-        pytest.param(["    IdentityFile       %d/keys/50%%off"], id="tokens"),
+        pytest.param(USER, ["    User ec2-user"], id="another user"),
+        pytest.param(USER, ['    User       "ec2-user"', "    user=root"], id="two users"),
+        pytest.param(PORT, ["    Port 2222"], id="another port"),
+        pytest.param(PORT, ["    port=2200", "    Port 2201"], id="two ports"),
+        pytest.param(IDENTITY, ["    IdentityFile ~/.ssh/id_ed25519"], id="another key"),
+        pytest.param(IDENTITY, ['    IdentityFile       "~/my keys/temt"'], id="quoted"),
+        pytest.param(IDENTITY, ["    IdentityFile       %d/keys/50%%off"], id="tokens"),
         pytest.param(
+            IDENTITY,
             ["    IdentityFile ~/.ssh/id_ed25519", "    identityfile=/srv/keys/work"],
-            id="two lines",
+            id="two keys",
         ),
         pytest.param(
+            IDENTITY,
             ["    IdentityFile       ~/.ssh/temt/keys/temt", "    IdentityFile ~/.ssh/id_rsa"],
             id="the default and another",
         ),
     ],
 )
-def test_write_host_block_keeps_the_identity_files_as_written(
-    prepared: Path, lines: list[str]
+def test_write_host_block_keeps_what_it_writes_only_when_missing(
+    prepared: Path, line: str, lines: list[str]
 ) -> None:
-    """IdentityFile は利用者が鍵を替えられるよう、書かれていれば何行でも書かれたまま残す。
+    """User、Port、IdentityFile は利用者が直せるよう、書かれていれば何行でも書かれたまま残す。
 
-    ほかの管理する項目が揃っていれば、ファイルは書き換えない。
+    ほかの項目が揃っていれば、ファイルは書き換えない。
     """
-    text = BLOCK.replace(
-        "    IdentityFile       ~/.ssh/temt/keys/temt\n", "".join(f"{line}\n" for line in lines)
-    )
+    text = BLOCK.replace(line, "".join(f"{one}\n" for one in lines))
     write(text)
     assert write_block(prepared) is False
     assert read() == text
 
 
 def test_write_host_block_rewrites_the_rest_around_the_identity_files(prepared: Path) -> None:
-    """ほかの管理する項目は書き直すが、IdentityFile の行は元の位置にそのまま残す。"""
-    write("Host temt-dev-main\n    IdentityFile ~/a\n    User root\n    IdentityFile ~/b\n")
+    """毎回書き直す項目は元の位置で書き直し、IdentityFile の行は元の位置にそのまま残す。"""
+    write(
+        "Host temt-dev-main\n"
+        "    IdentityFile ~/a\n"
+        "    UserKnownHostsFile ~/.ssh/known_hosts\n"
+        "    IdentityFile ~/b\n"
+    )
     assert write_block(prepared) is True
     assert read() == (
         "Host temt-dev-main\n"
+        "    User               ubuntu\n"
         "    Port               22\n"
-        "    IdentitiesOnly     yes\n"
-        "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
         f"    ProxyCommand       {PROXY}\n"
         "    IdentityFile ~/a\n"
-        "    User               ubuntu\n"
+        "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
         "    IdentityFile ~/b\n"
     )
+
+
+def test_write_host_block_leaves_identities_only_alone(prepared: Path) -> None:
+    """IdentitiesOnly は書かない。書かれていれば、管理しない項目としてそのまま残す。"""
+    text = BLOCK.replace(IDENTITY, f"{IDENTITY}    IdentitiesOnly     yes\n")
+    write(text)
+    assert write_block(prepared) is False
+    assert read() == text
 
 
 def test_default_key_of_a_new_block(prepared: Path) -> None:
@@ -779,12 +791,7 @@ def test_default_key_of_a_block_in_place(prepared: Path) -> None:
 
 def test_default_key_takes_only_the_first_identity_file(prepared: Path) -> None:
     """ssh は並んだ順に試す。最初の行が既定の鍵なら、後に別の鍵があっても既定の鍵を使う。"""
-    write(
-        BLOCK.replace(
-            "    IdentityFile       ~/.ssh/temt/keys/temt\n",
-            "    IdentityFile       ~/.ssh/temt/keys/temt\n    IdentityFile ~/.ssh/id_rsa\n",
-        )
-    )
+    write(BLOCK.replace(IDENTITY, f"{IDENTITY}    IdentityFile ~/.ssh/id_rsa\n"))
     assert home.default_key(detect_block(prepared), Service("dev-main")) == keys_dir() / "temt"
 
 
@@ -802,7 +809,7 @@ def test_default_key_takes_only_the_first_identity_file(prepared: Path) -> None:
 )
 def test_default_key_is_none_for_a_key_the_user_chose(prepared: Path, lines: str) -> None:
     """利用者が別の鍵に替えていれば、apply はその鍵を作らない。"""
-    write(BLOCK.replace("    IdentityFile       ~/.ssh/temt/keys/temt\n", lines))
+    write(BLOCK.replace(IDENTITY, lines))
     assert home.default_key(detect_block(prepared), Service("dev-main")) is None
 
 
@@ -822,55 +829,93 @@ def test_default_key_is_none_without_an_identity_file_in_the_block(
     assert home.default_key(edit, Service("dev-main")) is None
 
 
-def test_write_host_block_writes_the_first_sshd_port(prepared: Path) -> None:
-    """Port は SshdPorts の先頭。2 つ目以降は ssh -p で指す。"""
-    assert write_block(prepared, Conf(SshdPorts=[2222, 443])) is True
-    assert read() == BLOCK.replace("Port               22\n", "Port               2222\n")
-
-
-def test_write_host_block_changes_the_port_of_an_existing_block(prepared: Path) -> None:
-    """手で書いた Port も、次の apply で SshdPorts の先頭に戻る。"""
-    write("Host temt-dev-main\n    port=2200\n    Port 2201\n")
-    assert write_block(prepared, Conf(SshdPorts=[443])) is True
-    # = で書いた行も含めて、手で書いた 2 行は 1 行の Port 443 になる
-    assert read() == BLOCK.replace("    Port               22\n", "") + (
-        "    Port               443\n"
-    )
-
-
 def test_write_host_block_stops_at_a_match_block(prepared: Path) -> None:
-    write("Host temt-dev-main\n    User root\nMatch host other\n    ForwardAgent yes\n")
+    write("Host temt-dev-main\nMatch host other\n    User root\n")
     write_block(prepared)
-    assert read().endswith(
-        "    User               ubuntu\nMatch host other\n    ForwardAgent yes\n"
-    )
+    assert read() == BLOCK + "Match host other\n    User root\n"
 
 
 def test_write_host_block_reads_equals_and_case(prepared: Path) -> None:
-    """= で書いた行も、大文字小文字の違う行も、その項目として読む。IdentityFile は残す。"""
-    write("HOST=temt-dev-main\n    identityfile=~/.ssh/other\n    PORT=2200\n")
+    """= で書いた行も、大文字小文字の違う行も、その項目として読む。"""
+    write(
+        "HOST=temt-dev-main\n"
+        "    identityfile=~/.ssh/other\n"
+        "    PORT=2200\n"
+        "    proxycommand=nc %h %p\n"
+    )
     assert write_block(prepared) is True
     assert read() == (
         "HOST=temt-dev-main\n"
         "    User               ubuntu\n"
-        "    IdentitiesOnly     yes\n"
         "    UserKnownHostsFile ~/.ssh/temt/known_hosts.d/temt-dev-main/current\n"
-        f"    ProxyCommand       {PROXY}\n"
         "    identityfile=~/.ssh/other\n"
-        "    Port               22\n"
+        "    PORT=2200\n"
+        f"    ProxyCommand       {PROXY}\n"
     )
 
 
 def test_write_host_block_takes_a_file_without_a_last_newline(prepared: Path) -> None:
-    write("Host temt-dev-main\n    User root")
+    write("Host temt-dev-main\n    ProxyCommand nc %h %p")
     write_block(prepared)
-    assert read().endswith("    User               ubuntu\n")
+    assert read() == BLOCK
 
 
 def test_write_host_block_keeps_comments_and_blank_lines(prepared: Path) -> None:
-    write("Host temt-dev-main\n    # note\n\n    User root\n")
+    write("Host temt-dev-main\n    # note\n\n    ProxyCommand nc %h %p\n")
     write_block(prepared)
-    assert read().endswith("    # note\n\n    User               ubuntu\n")
+    assert read().endswith(f"    # note\n\n    ProxyCommand       {PROXY}\n")
+
+
+def test_detect_port_rewrites_the_port_of_the_block(prepared: Path, service: Service) -> None:
+    assert write_block(prepared) is True
+    assert home.write_edit(home.detect_port(service, 2222)) is True
+    assert read() == BLOCK.replace(PORT, "    Port               2222\n")
+
+
+def test_detect_port_rewrites_only_the_first_port(prepared: Path, service: Service) -> None:
+    """= で書いた行も Port として読む。2 行目以降の Port と、ほかの行には触らない。"""
+    _ = prepared
+    write("Host temt-dev-main\n    User root\n    port=2200\n    Port 2201\n")
+    assert home.write_edit(home.detect_port(service, 2222)) is True
+    assert read() == (
+        "Host temt-dev-main\n    User root\n    Port               2222\n    Port 2201\n"
+    )
+
+
+def test_detect_port_adds_a_port_after_the_host_line(prepared: Path, service: Service) -> None:
+    """Port の無いブロックには、Host の行のすぐ後に足す。ほかの項目は足さない。"""
+    _ = prepared
+    write("Host temt-dev-main\n    User root\n")
+    assert home.write_edit(home.detect_port(service, 2222)) is True
+    assert read() == "Host temt-dev-main\n    Port               2222\n    User root\n"
+
+
+def test_detect_port_looks_only_in_the_block(prepared: Path, service: Service) -> None:
+    """ほかのブロックの Port と、Match の後ろの Port には触らない。"""
+    _ = prepared
+    text = "Host other\n    Port 2200\n\nHost temt-dev-main\nMatch host other\n    Port 2201\n"
+    write(text)
+    assert home.write_edit(home.detect_port(service, 2222)) is True
+    assert read() == text.replace(
+        "Host temt-dev-main\n", "Host temt-dev-main\n    Port               2222\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [pytest.param(None, id="no file"), pytest.param("Host other\n    Port 2200\n", id="no block")],
+)
+def test_detect_port_asks_for_apply_without_a_block(
+    prepared: Path, service: Service, text: str | None
+) -> None:
+    _ = prepared
+    if text is not None:
+        write(text)
+    with pytest.raises(TemtError) as caught:
+        home.detect_port(service, 2222)
+    assert str(caught.value) == (
+        "no Host temt-dev-main block in ~/.ssh/temt/config; run 'temt apply --svc dev-main' first"
+    )
 
 
 def test_write_edit_keeps_the_mode_of_an_existing_file(prepared: Path) -> None:

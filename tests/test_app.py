@@ -33,7 +33,7 @@ INSTANCE = "i-0123456789abcdef0"
 GONE = "i-0fedcba9876543210"
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],

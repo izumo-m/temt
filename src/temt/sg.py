@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from temt import aws, conf, msg, resources, table
+from temt import aws, conf, ltdata, msg, resources, table
 from temt.aws import field
 from temt.change import ADD, REMOVE, UPDATE
 from temt.names import tilde
@@ -29,21 +29,22 @@ if TYPE_CHECKING:
 
 
 def _vpc(ec2: EC2Client, service: Service, values: Conf, *, quiet: bool = False) -> str | None:
-    """SubnetId が属する VPC。SubnetId が書かれていなければ None。
+    """NetworkInterfaces の DeviceIndex が 0 の要素の SubnetId が属する VPC。SubnetId が
+    書かれていなければ None。
 
     quiet でなければ、書かれていないことを知らせる。sg show は自分の表に書くので知らせない。
     """
-    subnet_id = values.launch_template.SubnetId
-    if subnet_id is conf.UNSET:
+    first = ltdata.element(values.launch_template.get("NetworkInterfaces") or [], "DeviceIndex", 0)
+    subnet_id = None if first is None else first.get("SubnetId")
+    key = conf.primary_key("SubnetId")
+    if not isinstance(subnet_id, str):
         if not quiet:
             msg.info(
-                f"no {conf.launch_template_key('SubnetId')} in "
-                f"{table.printable(tilde(service.conf_path))}; the next apply picks a subnet"
+                f"no {key} in {table.printable(tilde(service.conf_path))}; "
+                f"the next apply picks a subnet"
             )
         return None
-    return aws.subnet(
-        ec2, subnet_id, conf.source(service, conf.launch_template_key("SubnetId"))
-    ).vpc_id
+    return aws.subnet(ec2, subnet_id, conf.source(service, key)).vpc_id
 
 
 def _split(

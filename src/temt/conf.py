@@ -1,8 +1,9 @@
 """サービスの設定ファイル <conf ディレクトリ>/<svc>.toml。
 
 形式は TOML 1.0.0。リソースをまたぐ項目は最上位のキーに、リソースごとの項目はその
-リソースのテーブルに置く。値は文字列を原則とし、SshdPorts が整数の配列、VolumeSize が
-整数、受信規則の Port が整数か整数の配列である。
+リソースのテーブルに置く。値は文字列を原則とし、Defaults と WaitForSsm が真偽値、
+受信規則の Port が整数か整数の配列である。[launch-template] は起動テンプレートの中身を
+そのままの形で持ち、項目と型は botocore の RequestLaunchTemplateData で決める（ltdata）。
 [[role.policy.<ポリシー名>]] は例外で、IAM のポリシーの Statement をテーブルのまま持つ。
 値が空文字列の項目と、配列を書ける項目の空の配列は、書かれていないものとして扱う。
 項目は「書かれている」か「無い」かのどちらかとする。
@@ -40,10 +41,10 @@ from typing import Any, Final, get_args, get_origin
 
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
-from tomlkit.items import AoT, Comment, Null, Table, Whitespace
+from tomlkit.items import AoT, Comment, InlineTable, Null, Table, Whitespace
 
-from temt import policy
-from temt.msg import TemtError
+from temt import ltdata, policy
+from temt.msg import TemtError, UsageError
 from temt.names import (
     LABEL_RULE,
     Service,
@@ -82,11 +83,64 @@ HEADER = "# Written by temt apply. Edit and run apply again to update.\n"
 LAUNCH_TEMPLATE = "launch-template"
 # 位置の区切り。"launch-template.InstanceType" のように書く
 SEPARATOR = "."
+# 配列の要素を、その対応づけのキーで指す位置の書き方。
+# "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId" のように書く
+SELECTOR_RE = re.compile(r"([^.\[\]]+)(?:\[([^=\]]+)=([^\]]*)\])?")
+# [launch-template] の中の、temt が値を決めて書く要素。NetworkInterfaces のうち
+# DeviceIndex が 0 のもの
+PRIMARY = "NetworkInterfaces[DeviceIndex=0]"
 
 
 def launch_template_key(name: str) -> str:
-    """[launch-template] の項目 name の位置。update に渡し、メッセージにも書く。"""
+    """[launch-template] の項目 name の位置。update に渡し、メッセージにも書く。
+
+    name は NetworkInterfaces[DeviceIndex=0].SubnetId のように、テーブルの中や配列の
+    要素の中を指してもよい。
+    """
     return f"{LAUNCH_TEMPLATE}{SEPARATOR}{name}"
+
+
+def primary_key(name: str) -> str:
+    """NetworkInterfaces の DeviceIndex が 0 の要素の、項目 name の位置。"""
+    return launch_template_key(f"{PRIMARY}{SEPARATOR}{name}")
+
+
+# 位置の 1 つの段。名前と、配列の要素を指すときは（キー、値）
+SEGMENT = tuple[str, tuple[str, Any] | None]
+
+
+def segments(key: str) -> list[SEGMENT]:
+    """位置を段に分ける。要素を指す値は、数字だけなら整数とする。"""
+    found: list[SEGMENT] = []
+    for part in _split_key(key):
+        matched = SELECTOR_RE.fullmatch(part)
+        if matched is None:
+            raise ValueError(f"not a key position: {key}")
+        name, inner, value = matched.groups()
+        selector = None
+        if inner is not None:
+            selector = (inner, int(value) if value.isdigit() and value.isascii() else value)
+        found.append((name, selector))
+    return found
+
+
+def _split_key(key: str) -> list[str]:
+    """位置を . で分ける。[] の中の . では分けない。"""
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for char in key:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        if char == SEPARATOR and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += char
+    parts.append(current)
+    return parts
 
 
 # ポートの範囲の型。項目の型から、整数か整数の配列として読むことを決める
@@ -94,12 +148,12 @@ PORT = tuple[int, int]
 # [[security-group.ingress]] の Port の型。icmp の規則ではポートが無く、None になる
 RULE_PORT = PORT | None
 PORT_MAX = 65535
-# SshdPorts の型と既定。インスタンスの sshd が待ち受けるポートの並び
-PORTS = list[int]
-SSHD_PORT = 22
-# VolumeSize の型。ルートボリュームの GiB。書かれていなければ None で、AMI の大きさの
-# まま起動する
-VOLUME_SIZE = int | None
+# InstanceType の既定。書かれていなければ apply が書く。service list も既定として出す
+INSTANCE_TYPE = "t3.micro"
+# [launch-template] の型。起動テンプレートの中身を、TOML のままの辞書で持つ（ltdata）
+LAUNCH_TEMPLATE_DATA = dict[str, Any]
+# 文字列の並びの型。[role] の ManagedPolicyArns
+STRINGS = list[str]
 
 # 受信規則のプロトコル。名前は aws-cli の --protocol に合わせる
 TCP = "tcp"
@@ -114,8 +168,8 @@ POLICIES = dict[str, STATEMENTS]
 # アプリに結びつかない、インスタンスそのものの権限のポリシー名。apply が、無ければ
 # 既定 EC2_DEFAULT を設定ファイルに書く
 EC2 = "ec2"
-# [[role.policy.ec2]] の既定。SSM エージェントの最小権限（Session Manager、Run Command、
-# State Manager）と、自分の階層の SSM パラメータの読み書き。docs/conf.md の [role]
+# [[role.policy.ec2]] の既定。SSM エージェントの最小権限（Session Manager、Run Command）と、
+# 自分の階層の SSM パラメータの読み書き。docs/conf.md の [role]
 EC2_DEFAULT = """
 # Permissions of the instance role that are not tied to one app. temt needs
 # the first two statements (SSM Agent; the parameters of this service). Keep
@@ -128,10 +182,6 @@ Action = [
     "ssmmessages:CreateDataChannel",
     "ssmmessages:OpenControlChannel",
     "ssmmessages:OpenDataChannel",
-    "ssm:ListInstanceAssociations",
-    "ssm:UpdateInstanceAssociationStatus",
-    "ssm:GetDocument",
-    "ssm:PutComplianceItems",
 ]
 Resource = "*"
 
@@ -175,20 +225,16 @@ EXAMPLE = """
 REGION_ENV = ("AWS_REGION", "AWS_DEFAULT_REGION")
 # --profile で指定されたプロファイル。cli が入れる。設定ファイルの AwsProfile より優先する
 OPTION_PROFILE: str | None = None
-# 取り除く前の環境変数が指していたリージョン。--svc の無いコマンドだけが使う
+# --region で指定されたリージョン。cli が入れる。設定ファイルに AwsRegion が無いときだけ
+# 使い、あれば同じ値でなければならない
+OPTION_REGION: str | None = None
+# 取り除く前の環境変数が指していたリージョン。AwsRegion も --region も共通ファイルの
+# AwsRegion も無いときに使う
 ENV_REGION: str | None = None
-
-
-@dataclass
-class LaunchTemplate:
-    """[launch-template]。起動テンプレートの項目。"""
-
-    # apply が temt:service=<svc> の最新 AMI から選ぶ
-    ImageId: str = UNSET
-    InstanceType: str = "t3.micro"
-    # apply が既定の VPC のパブリックなサブネットから選ぶ
-    SubnetId: str = UNSET
-    VolumeSize: VOLUME_SIZE = None
+# どれでもリージョンが決まらないときのリージョン。--svc を付けたコマンドだけが使う
+REGION_DEFAULT = "ap-northeast-1"
+# 最上位の項目で、共通ファイルを読むかどうか。共通ファイルには書けない
+DEFAULTS = "Defaults"
 
 
 def cidr(value: str) -> str:
@@ -322,14 +368,20 @@ class SecurityGroup:
 
 @dataclass
 class Role:
-    """[role]。IAM ロールの項目。
+    """[role]。temt が作るインスタンスロール <名前> の項目。
 
     policy は、<ポリシー名> から、インラインポリシー temt-<ポリシー名> の Statement の並びへの
     対応。[[role.policy.<ポリシー名>]] の 1 つが Statement 1 つ。テーブルの中身は IAM の
-    書式のまま持ち、Effect を補うのも確かめるのも apply に任せる。
+    書式のまま持ち、Effect を補うのも確かめるのも apply に任せる。ManagedPolicyArns は、
+    付ける管理ポリシーの ARN の並び。
     """
 
     policy: POLICIES = field(default_factory=dict)
+    ManagedPolicyArns: STRINGS = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        """何か書かれているか。"""
+        return bool(self.policy or self.ManagedPolicyArns)
 
 
 @dataclass
@@ -343,10 +395,16 @@ class Conf:
     # 使うプロファイル。書かれていなければ None とし、そのときはプロファイルを渡さず、
     # 資格情報は AWS の既定の規則で決まる
     AwsProfile: str | None = None
-    AwsRegion: str = "ap-northeast-1"
-    # インスタンスの sshd が待ち受けるポート。先頭が ssh の Host ブロックの Port になる
-    SshdPorts: PORTS = field(default_factory=lambda: [SSHD_PORT])
-    launch_template: LaunchTemplate = field(default_factory=LaunchTemplate)
+    # 書かれていなければ、--region か共通ファイルの値（load が入れる）、無ければ UNSET の
+    # ままで、aws.session が環境変数、AWS のプロファイル、REGION_DEFAULT の順に決める
+    AwsRegion: str = UNSET
+    # false なら共通ファイルを読まない
+    Defaults: bool = True
+    # false なら start は SSM エージェントを待たない
+    WaitForSsm: bool = True
+    # 起動テンプレートの中身。書かれていない項目は、apply が値を決めて書くもの（ImageId、
+    # InstanceType など）も無い。何を決めるかは apply と resources が持つ
+    launch_template: LAUNCH_TEMPLATE_DATA = field(default_factory=dict)
     security_group: SecurityGroup = field(default_factory=SecurityGroup)
     role: Role = field(default_factory=Role)
 
@@ -354,11 +412,11 @@ class Conf:
 def take_region_env() -> None:
     """リージョンを指す環境変数を、環境から取り除く。
 
-    --svc を付けたコマンドは、どのリージョンを使うかを設定ファイルだけで決める。環境に
+    どのリージョンを使うかは temt が決めて、boto3 と aws-cli に明示的に渡す。環境に
     残っていると、boto3 と aws-cli がそれぞれ解決してしまう。boto3 は
     AWS_DEFAULT_REGION だけを読み、aws-cli は AWS_REGION を先に読むので、片方だけを
-    設定していると食い違う。--svc の無いコマンドは環境変数も使うので、取り除く前に
-    aws-cli と同じ順で読んだ値を ENV_REGION に控える。
+    設定していると食い違う。決める順の中で環境変数も使うので、取り除く前に aws-cli と
+    同じ順で読んだ値を ENV_REGION に控える。
     """
     global ENV_REGION
     ENV_REGION = next((os.environ[name] for name in REGION_ENV if os.environ.get(name)), None)
@@ -397,7 +455,11 @@ def _keys(cls: type) -> dict[str, Any]:
     """
     keys: dict[str, Any] = {}
     for one in fields(cls):
-        is_table = _table_class(one.type) is not None or _element(one.type) is not None
+        is_table = (
+            _table_class(one.type) is not None
+            or _element(one.type) is not None
+            or one.type == LAUNCH_TEMPLATE_DATA
+        )
         keys[_table_key(one.name) if is_table else one.name] = one.type
     return keys
 
@@ -416,39 +478,6 @@ def _port(value: Any) -> PORT:
     if not 0 <= low <= high <= PORT_MAX:
         raise ValueError(f"must be a port range within 0-{PORT_MAX}")
     return low, high
-
-
-def _ports(value: Any) -> PORTS:
-    """SshdPorts の並び。1 から PORT_MAX までの整数の配列で、同じポートを重ねない。
-
-    空の配列は、呼ぶ側が書かれていないものとして扱うので、ここには来ない。真偽値は
-    Python では整数の仲間だが、ポートではないので受けない。
-    """
-    if not isinstance(value, list) or not all(
-        isinstance(one, int) and not isinstance(one, bool) for one in value
-    ):
-        raise ValueError("must be an array of integers")
-    seen: set[int] = set()
-    for one in value:
-        if not 1 <= one <= PORT_MAX:
-            raise ValueError(f"must hold ports within 1-{PORT_MAX}: {one}")
-        if one in seen:
-            raise ValueError(f"repeats the port {one}")
-        seen.add(one)
-    return list(value)
-
-
-def _volume_size(value: Any) -> int:
-    """VolumeSize。1 以上の整数。
-
-    上限はボリュームの種類で違うので確かめず、超えれば start で AWS が断る。真偽値は
-    Python では整数の仲間だが、大きさではないので受けない。
-    """
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError("must be an integer")
-    if value < 1:
-        raise ValueError(f"must be 1 or more: {value}")
-    return value
 
 
 def _json(value: Any) -> bool:
@@ -561,14 +590,21 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
         if kind == POLICIES:
             values[key] = _policies(value, path, where)
             continue
-        if kind in (PORTS, RULE_PORT) and value == []:
-            # 配列を書ける項目の空の配列は、書かれていないものとする
+        if kind == LAUNCH_TEMPLATE_DATA:
+            values[_attribute(key)] = _launch_template(value, path)
             continue
-        if kind == PORTS:
-            try:
-                values[key] = _ports(value)
-            except ValueError as error:
-                raise TemtError(f"{printable(str(path))}: {where} {error}") from None
+        if kind == STRINGS:
+            if not isinstance(value, list) or not all(
+                isinstance(one, str) and one for one in value
+            ):
+                raise TemtError(
+                    f"{printable(str(path))}: {where} must be an array of non-empty strings"
+                )
+            if value:
+                values[key] = list(value)
+            continue
+        if kind == RULE_PORT and value == []:
+            # 配列を書ける項目の空の配列は、書かれていないものとする
             continue
         if kind == RULE_PORT:
             try:
@@ -576,11 +612,10 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
             except ValueError as error:
                 raise TemtError(f"{printable(str(path))}: {where} {error}") from None
             continue
-        if kind == VOLUME_SIZE:
-            try:
-                values[key] = _volume_size(value)
-            except ValueError as error:
-                raise TemtError(f"{printable(str(path))}: {where} {error}") from None
+        if kind is bool:
+            if not isinstance(value, bool):
+                raise TemtError(f"{printable(str(path))}: {where} must be true or false")
+            values[key] = value
             continue
         if not isinstance(value, str):
             raise TemtError(f"{printable(str(path))}: {where} must be a string")
@@ -588,6 +623,28 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
             continue
         values[key] = value
     return values
+
+
+def _launch_template(value: Any, path: Path) -> dict[str, Any]:
+    """[launch-template] の中身。botocore の RequestLaunchTemplateData の形で確かめ、空の値を
+    落とす（ltdata.check）。対応づけのキーが重なっていないことも確かめる。
+
+    AWS を呼ばないコマンドは boto3 が無くても動くので、botocore が読み込めなければ、
+    テーブルであることだけを確かめ、空の値を落とす。
+    """
+    if not isinstance(value, dict):
+        raise TemtError(f"{printable(str(path))}: {LAUNCH_TEMPLATE} must be a table")
+    try:
+        checked = ltdata.check(value, LAUNCH_TEMPLATE)
+    except ImportError:
+        return ltdata.without_blanks(value)
+    except ValueError as error:
+        raise TemtError(f"{printable(str(path))}: {error}") from None
+    try:
+        ltdata.check_keys(checked, LAUNCH_TEMPLATE)
+    except ValueError as error:
+        raise TemtError(f"{printable(str(path))}: {error}") from None
+    return checked
 
 
 def _document(text: str, path: Path) -> dict[str, Any]:
@@ -631,6 +688,9 @@ def _common() -> tuple[dict[str, Any], Conf] | None:
             raise TemtError(f"{printable(str(path))}: broken symlink")
         return None
     document = _document(text, path)
+    if DEFAULTS in document:
+        # 共通ファイルを読むかどうかは、サービスごとに設定ファイルで決める
+        raise TemtError(f"{printable(str(path))}: {DEFAULTS} cannot be written in this file")
     return document, _built(document, path)
 
 
@@ -670,6 +730,10 @@ def _merge(cls: type, base: dict[str, Any], over: dict[str, Any]) -> dict[str, A
         table_class = _table_class(kind)
         if table_class is not None:
             merged[key] = _merge(table_class, base.get(key, {}), value)
+        elif kind == LAUNCH_TEMPLATE_DATA:
+            merged[key] = ltdata.merge(
+                ltdata.without_blanks(base.get(key, {})), ltdata.without_blanks(value)
+            )
         elif _element(kind) is not None:
             merged[key] = [*base.get(key, []), *value]
         elif kind == POLICIES:
@@ -684,8 +748,11 @@ def _combined(document: dict[str, Any], path: Path) -> Conf:
 
     どちらのファイルも、まず単独で確かめる。誤りをそれぞれのファイル名で知らせるためで
     ある。共通ファイルと同じ受信規則を書いていれば、重ねると 2 つになるので誤りにする。
+    設定ファイルが Defaults = false なら、共通ファイルを読まない。
     """
     own = _built(document, path)
+    if not own.Defaults:
+        return own
     common = _common()
     if common is None:
         return own
@@ -706,7 +773,29 @@ def _conf_in(text: str, path: Path, *, common: bool = True) -> Conf:
     読めなければ TemtError。
     """
     document = _document(text, path)
-    return _combined(document, path) if common else _built(document, path)
+    values = _combined(document, path) if common else _built(document, path)
+    _option_region(values, document, path)
+    return values
+
+
+def _option_region(values: Conf, document: dict[str, Any], path: Path) -> None:
+    """--region を values に映す。
+
+    設定ファイルに AwsRegion が書かれていれば、その値だけを使い、違う --region は引数の
+    誤りにする。書かれていなければ、--region を共通ファイルの AwsRegion より先にする。
+    最初の apply と ami import が、決まった値を AwsRegion に書く。
+    """
+    if OPTION_REGION is None:
+        return
+    written = document.get("AwsRegion")
+    if isinstance(written, str) and written:
+        if written != OPTION_REGION:
+            raise UsageError(
+                f"{path.stem} is in {printable(written)}; --region {printable(OPTION_REGION)} "
+                f"differs"
+            )
+        return
+    values.AwsRegion = OPTION_REGION
 
 
 def write_example(service: Service) -> None:
@@ -741,7 +830,8 @@ def with_ec2_default(service: Service, values: Conf) -> tuple[str, Conf]:
     if (
         done is None
         or done.role.policy != {**values.role.policy, EC2: ec2_default()}
-        or replace(done, role=values.role) != values
+        # AwsRegion は、書かれていなければ aws.session が決めて values に入れている
+        or replace(done, role=values.role, AwsRegion=values.AwsRegion) != values
     ):
         raise TemtError(
             f"cannot add the default [[role.policy.{EC2}]] to {printable(tilde(path))}; "
@@ -792,23 +882,35 @@ def written(service: Service, key: str) -> Any:
 
 def _lookup(document: dict[str, Any], key: str) -> Any:
     """TOML のままの辞書 document の、位置 key の値。無ければ None。"""
-    *parents, name = key.split(SEPARATOR)
-    table: Any = document
-    for parent in parents:
-        table = table.get(parent)
-        if not isinstance(table, dict):
+    holder: Any = document
+    for name, selector in segments(key):
+        if not isinstance(holder, dict):
             return None
-    return table.get(name)
+        holder = holder.get(name)
+        if selector is not None:
+            holder = _element_of(holder, selector)
+    return holder
+
+
+def _element_of(items: Any, selector: tuple[str, Any]) -> Any:
+    """配列 items の中で、キーと値が selector の要素。無ければ None。"""
+    if not isinstance(items, list):
+        return None
+    inner, value = selector
+    return next((one for one in items if isinstance(one, dict) and one.get(inner) == value), None)
 
 
 def source(service: Service, key: str) -> Path:
     """項目 key の値を書いたファイル。直すよう告げるときに名前を出す。
 
     設定ファイルに無く（空の値を含む）、共通ファイルにあれば、共通ファイルとする。
-    どちらにも無ければ、設定ファイルとする。
+    どちらにも無ければ、設定ファイルとする。Defaults = false のサービスは、共通ファイルを
+    読まないので、設定ファイルとする。
     """
     value = written(service, key)
     if value is not None and not _blank(value):
+        return service.conf_path
+    if written(service, DEFAULTS) is False:
         return service.conf_path
     common = _common()
     if common is not None:
@@ -818,27 +920,225 @@ def source(service: Service, key: str) -> Path:
     return service.conf_path
 
 
-def assign(values: Conf, key: str, value: str) -> None:
-    """Conf の項目を value にする。設定ファイルには書かない。key は update と同じ。"""
-    *parents, name = key.split(SEPARATOR)
+def replace_table(document: Any, name: str, table: Any | None) -> None:
+    """最上位のテーブル name の中身を table に置き換える。table が None なら消す。
+
+    書いてあった場所に置き、最後の要素の後ろにあったコメントと空行（次の見出しの説明で
+    あることが多い）は残す。消すときは、前のテーブルの後ろに戻す。role import が [role] を
+    丸ごと置き換えるのに使う。
+    """
+    if name not in document:
+        if table is not None:
+            document[name] = table
+        return
+    old = document[name]
+    moved = _trailing(_last_table(old))
+    if table is None:
+        before = _previous_table(document, name)
+        del document[name]
+        if before is not None:
+            for item in moved:
+                before.value.append(None, item)
+        return
+    for key in list(old.keys()):
+        del old[key]
+    for key, item in table.items():
+        old[key] = item
+    last = _last_table(old)
+    for item in moved:
+        last.value.append(None, item)
+
+
+def lookup_data(data: dict[str, Any], key: str) -> Any:
+    """TOML のままの辞書 data の、位置 key の値。無ければ None。"""
+    return _lookup(data, key)
+
+
+def lookup(values: Conf, key: str) -> Any:
+    """Conf の、位置 key の値。無ければ None（最上位の項目では UNSET のこともある）。"""
     holder: Any = values
-    for parent in parents:
-        holder = getattr(holder, _attribute(parent))
-    setattr(holder, name, value)
+    for name, selector in segments(key):
+        if is_dataclass(holder):
+            holder = getattr(holder, name if hasattr(holder, name) else _attribute(name), None)
+        elif isinstance(holder, dict):
+            holder = holder.get(name)
+        else:
+            return None
+        if selector is not None:
+            holder = _element_of(holder, selector)
+    return holder
 
 
-def update(service: Service, values: Conf, key: str, value: str) -> bool:
+def assign(values: Conf, key: str, value: Any) -> None:
+    """Conf の項目を value にする。設定ファイルには書かない。key は update と同じ。
+
+    配列の要素を指す段は、要素が無ければ、そのキーと値だけを持つ要素を足す。
+    """
+    parts = segments(key)
+    holder: Any = values
+    for index, (name, selector) in enumerate(parts):
+        last = index == len(parts) - 1
+        if is_dataclass(holder):
+            if last:
+                setattr(holder, name if hasattr(holder, name) else _attribute(name), value)
+                return
+            holder = getattr(holder, _attribute(name))
+            continue
+        if last and selector is None:
+            holder[name] = value
+            return
+        if selector is None:
+            holder = holder.setdefault(name, {})
+            continue
+        items = holder.setdefault(name, [])
+        found = _element_of(items, selector)
+        if found is None:
+            found = {selector[0]: selector[1]}
+            items.append(found)
+        holder = found
+
+
+class _Inline(Exception):
+    """書く先がインラインテーブルか配列の中にある。tomlkit では形を保って書き足せない。"""
+
+
+def _item(value: Any) -> Any:
+    """設定ファイルに書く値。テーブルはインラインテーブルにする（IamInstanceProfile）。"""
+    if isinstance(value, dict):
+        return ltdata.inline(value)
+    return value
+
+
+def _new_table(parent: Any, name: str, table: Any) -> None:
+    """テーブル parent に、テーブル（かテーブルの配列）name を足す。
+
+    parent の中で最後に書かれたテーブルの後ろにあるコメントと空行は、次の見出しの説明で
+    あることが多いので、足したものの後ろに移す。前のテーブルとの間には空行を置く。
+    """
+    moved = _trailing(_last_table(parent))
+    head = table[0] if isinstance(table, AoT) else table
+    # 中身の無いテーブルの見出しの後ろには、空行を足さない
+    head.trivia.indent = "\n" if len(parent) else ""
+    parent.append(name, table)
+    body = table[-1] if isinstance(table, AoT) else table
+    for item in moved:
+        body.value.append(None, item)
+
+
+def _write_into(document: Any, key: str, value: Any) -> bool:
+    """tomlkit の文書 document の位置 key に value を書く。書き換えたら True。
+
+    無いテーブルとテーブルの配列の要素は足す。書く先がインラインテーブルかインラインの
+    配列の中なら _Inline を上げる。ただし、既に同じ値が書かれていれば、どこにあっても
+    書き換えない（利用者が手で書いたあとは止めない）。
+    """
+    if _lookup(document.unwrap(), key) == value:
+        return False
+    parts = segments(key)
+    table: Any = document
+    for index, (name, selector) in enumerate(parts):
+        last = index == len(parts) - 1
+        if isinstance(table, InlineTable):
+            raise _Inline
+        if last and selector is None:
+            if table.get(name) == value:
+                return False
+            _put(table, name, _item(value))
+            return True
+        if selector is None:
+            if name not in table:
+                if isinstance(table, Table):
+                    _new_table(table, name, tomlkit.table())
+                else:
+                    table[name] = tomlkit.table()
+            table = table[name]
+            continue
+        inner, wanted = selector
+        items = table.get(name)
+        if items is None:
+            element = tomlkit.table()
+            element[inner] = wanted
+            aot = tomlkit.aot()
+            aot.append(element)
+            if isinstance(table, Table):
+                _new_table(table, name, aot)
+            else:
+                table.append(name, aot)
+            table = table[name][-1]
+            continue
+        if not isinstance(items, AoT):
+            raise _Inline
+        found = next((one for one in items if one.get(inner) == wanted), None)
+        if found is None:
+            moved = _trailing(_last_table(items[-1]))
+            found = tomlkit.table()
+            found[inner] = wanted
+            found.trivia.indent = "\n"
+            items.append(found)
+            found = items[-1]
+            for item in moved:
+                found.value.append(None, item)
+        table = found
+    return False
+
+
+def toml_value(value: Any) -> str:
+    """値の TOML の書き方。テーブルはインラインテーブルにする。"""
+    return tomlkit.dumps({"x": _item(value)}).removeprefix("x = ").strip()
+
+
+def _cannot_write(key: str, value: Any, path: Path, command: str = "apply") -> TemtError:
+    """インラインテーブルの中などに書けないときの誤り。手で書くよう告げる。"""
+    shown = toml_value(value)
+    return TemtError(
+        f"cannot write {key} in {printable(tilde(path))}, as it would go into an inline table "
+        f"or array; write {key} = {printable(shown)} there by hand and run {command} again"
+    )
+
+
+def write_document(document: Any, key: str, value: Any, path: Path, command: str) -> bool:
+    """tomlkit の文書 document（設定ファイル path の中身）の位置 key に value を書く。
+    書き換えたら True。
+
+    書く先がインラインテーブルの中などで書けなければ、手で書いてから command をやり直す
+    よう告げて止める。role import が、設定ファイルを書き換える前に中身を作るのに使う。
+    """
+    try:
+        return _write_into(document, key, value)
+    except _Inline:
+        raise _cannot_write(key, value, path, command) from None
+
+
+def parse_text(text: str, path: Path) -> Conf:
+    """設定ファイル path の中身 text を、共通ファイルの上に重ねて読む。読めなければ止める。"""
+    return _conf_in(text, path)
+
+
+def check_writable(service: Service, key: str, value: Any) -> None:
+    """位置 key に書けることを、書かずに確かめる。apply が確認の前に呼ぶ。"""
+    path = service.conf_path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    try:
+        _ = _write_into(tomlkit.parse(text), key, value)
+    except _Inline:
+        raise _cannot_write(key, value, path) from None
+
+
+def update(service: Service, values: Conf, key: str, value: Any) -> bool:
     """Conf と設定ファイルの項目を更新する。ファイルを書き換えたら True を返す。
 
     key は項目の位置で、最上位なら "AwsRegion"、テーブルの中なら
-    "launch-template.InstanceType" のようにテーブル名と区切りを前に置く。
-    書かれている値が既に同じなら、ファイルには触らない。書き換えるときも、既に書かれて
-    いる項目の順序と、項目に付いたコメントは変えない。最上位の項目は最初のテーブルの
-    前に置く。テーブルに足す項目は、その最後の項目の次に置く（_put）。ファイルが無ければ
-    見出しのコメントを付けて作り、テーブルが無ければ足す。
+    "launch-template.InstanceType" のようにテーブル名と区切りを前に置く。配列の要素の中は
+    "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId" のように、要素を対応づけの
+    キーで指す。書かれている値が既に同じなら、ファイルには触らない。書き換えるときも、
+    既に書かれている項目の順序と、項目に付いたコメントは変えない。最上位の項目は最初の
+    テーブルの前に置く。テーブルに足す項目は、その最後の項目の次に置く（_put）。ファイルが
+    無ければ見出しのコメントを付けて作り、テーブルや要素が無ければ足す。書く先が
+    インラインテーブルの中なら、手で書くよう告げて止める。
     """
-    assign(values, key, value)
-    *parents, name = key.split(SEPARATOR)
     path = service.conf_path
     try:
         text = path.read_text(encoding="utf-8")
@@ -846,16 +1146,15 @@ def update(service: Service, values: Conf, key: str, value: str) -> bool:
         make_dir(path.parent)
         text = HEADER
     document = tomlkit.parse(text)
-    table: Any = document
-    for parent in parents:
-        if parent not in table:
-            table[parent] = tomlkit.table()
-        table = table[parent]
-    if table.get(name) == value:
-        return False
-    _put(table, name, value)
-    replace_text(path, tomlkit.dumps(document))
-    return True
+    try:
+        changed = _write_into(document, key, value)
+    except _Inline:
+        raise _cannot_write(key, value, path) from None
+    if changed:
+        replace_text(path, tomlkit.dumps(document))
+    # 書けてから Conf に映す。書けずに止まったときは、Conf も元のまま
+    assign(values, key, value)
+    return changed
 
 
 # テーブルの中で、項目の間に置かれるコメントと空行
@@ -1047,11 +1346,28 @@ def _leaf(item: Any) -> Any:
     return _leaf(inner[-1]) if inner else None
 
 
-def _previous_table(document: Any) -> Any:
-    """ファイルの中で [security-group] の直前に書かれたテーブル。無ければ None。"""
+def _last_table(table: Any) -> Any:
+    """table の中で最後に書かれたテーブル。中のテーブルとテーブルの配列の要素もたどる。
+
+    中にテーブルが無ければ table そのもの。その後ろにあるコメントと空行は、次の見出しの
+    前に置かれたものである。
+    """
+    inner = [item for key, item in table.value.body if isinstance(item, (Table, AoT))]
+    if not inner:
+        return table
+    last = inner[-1]
+    if isinstance(last, AoT):
+        return _last_table(last[-1]) if len(last) else table
+    return _last_table(last)
+
+
+def _previous_table(document: Any, name: str = SECURITY_GROUP) -> Any:
+    """ファイルの中で、テーブル name（既定は [security-group]）の直前に書かれたテーブル。
+    無ければ None。
+    """
     before = None
     for key, item in document.body:
-        if key is not None and key.key == SECURITY_GROUP:
+        if key is not None and key.key == name:
             return before
         leaf = _leaf(item) if key is not None else None
         # 中身の無いテーブルは偽になるので、None と比べる

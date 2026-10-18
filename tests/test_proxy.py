@@ -18,14 +18,9 @@ from typing import Any
 import pytest
 from conftest import (
     API_CALL,
-    ASSOCIATION,
-    OLD_VERSION,
-    SSHD,
     Clock,
     Stubs,
     an_instance,
-    association_ran,
-    listed_associations,
     reservations,
     taken,
 )
@@ -38,15 +33,13 @@ from temt.names import Service
 NAME = "temt-dev-main"
 INSTANCE = "i-0123456789abcdef0"
 OTHER = "i-0fedcba9876543210"
-# 名前が同じ、別の関連付け <名前>-sshd の ID
-OTHER_ASSOCIATION = "99999999-8888-7777-6666-555555555555"
 ADDRESS = "203.0.113.10"
 REGION = "ap-northeast-1"
 
 # インスタンスの探索。探す状態の一覧は設計のとおりに固定する
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
@@ -121,21 +114,6 @@ def agent(stubs: Stubs, status: str, pinged: datetime | None = None) -> None:
     stubs.ssm.add_response(
         "describe_instance_information", {"InstanceInformationList": listed}, AGENT
     )
-
-
-def sshd_ran(stubs: Stubs, *runs: dict[str, Any]) -> None:
-    """describe-instance-associations-status の応答を積む。runs が無ければ一覧に無い。"""
-    stubs.ssm.add_response(
-        "describe_instance_associations_status",
-        {"InstanceAssociationStatusInfos": list(runs)},
-        {"InstanceId": INSTANCE},
-    )
-
-
-def sshd_applied(stubs: Stubs) -> None:
-    """関連付け <名前>-sshd があり、今の版がそのインスタンスで Success だった応答を積む。"""
-    listed_associations(stubs.ssm, ASSOCIATION)
-    sshd_ran(stubs, association_ran("Success"))
 
 
 def key_sent(stubs: Stubs, params: dict[str, Any] = SEND) -> None:
@@ -762,7 +740,6 @@ def test_it_waits_for_a_pending_instance(
     )
     if value == "ssm":
         agent(aws_stubs, "Online")
-        sshd_applied(aws_stubs)
     key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
@@ -800,7 +777,6 @@ def test_main_writes_the_notices_only_to_stderr(
         "describe_instances", reservations(an_instance(INSTANCE, "running", address=ADDRESS)), BY_ID
     )
     agent(aws_stubs, "Online")
-    sshd_applied(aws_stubs)
     key_sent(aws_stubs)
     assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
     assert execs.calls[0][1] == SSM_ARGV
@@ -858,7 +834,6 @@ def test_it_waits_for_the_agent_to_come_online(
     agent(aws_stubs, "")
     agent(aws_stubs, "ConnectionLost")
     agent(aws_stubs, "Online")
-    sshd_applied(aws_stubs)
     key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
@@ -881,190 +856,10 @@ def test_it_does_not_count_a_ping_from_before_the_launch(
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
     agent(aws_stubs, "Online", datetime.now(UTC) - timedelta(minutes=1))
     agent(aws_stubs, "Online")
-    sshd_applied(aws_stubs)
     key_sent(aws_stubs)
     proxy.run(configured, 22)
     aws_stubs.done()
     assert clock.slept == [5]
-    assert execs.calls[0][1] == SSM_ARGV
-
-
-def test_it_waits_for_the_sshd_ports_after_the_agent(
-    aws_stubs: Stubs,
-    configured: Service,
-    execs: Exec,
-    required: list[str],
-    clock: Clock,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """起動して間もなければ、ssm の経路では関連付けの今の版が実行し終わるまで待つ。
-
-    今の版は 1 度だけ読む。一覧に無い状態と、前の版の状態は、まだ実行されていない
-    ものとみなす。
-    """
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs)
-    sshd_ran(aws_stubs, association_ran("Success", OLD_VERSION))
-    sshd_ran(aws_stubs, association_ran("Success", OLD_VERSION), association_ran("Queued"))
-    sshd_ran(aws_stubs, association_ran("InProgress"))
-    sshd_ran(aws_stubs, association_ran("Pending"))
-    sshd_ran(aws_stubs, association_ran("Success"))
-    key_sent(aws_stubs)
-    proxy.run(configured, 22)
-    aws_stubs.done()
-    assert clock.slept == [5] * 5
-    assert execs.calls[0][1] == SSM_ARGV
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert told(captured.err) == [f"waiting for {SSHD} to set the sshd ports on {INSTANCE}"]
-
-
-def test_a_failed_run_of_the_previous_version_is_not_the_end(
-    aws_stubs: Stubs,
-    configured: Service,
-    execs: Exec,
-    required: list[str],
-    clock: Clock,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """update-association の直後に残る前の版の Failed では、警告せずに待つ。"""
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, association_ran("Failed", OLD_VERSION))
-    sshd_ran(aws_stubs, association_ran("Success"))
-    key_sent(aws_stubs)
-    proxy.run(configured, 22)
-    aws_stubs.done()
-    assert clock.slept == [5]
-    assert execs.calls[0][1] == SSM_ARGV
-    assert "warning" not in capsys.readouterr().err
-
-
-def test_it_does_not_count_the_runs_of_another_association(
-    aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str], clock: Clock
-) -> None:
-    """名前で見つけた関連付けと ID の違うものの状態は、名前が同じでも数えない。
-
-    見つけた関連付けの今の版が終わるまで待つ。
-    """
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(
-        aws_stubs,
-        association_ran("Pending"),
-        association_ran("Success", association_id=OTHER_ASSOCIATION),
-    )
-    sshd_ran(aws_stubs, association_ran("Failed", association_id=OTHER_ASSOCIATION))
-    sshd_ran(aws_stubs, association_ran("Success"))
-    key_sent(aws_stubs)
-    proxy.run(configured, 22)
-    aws_stubs.done()
-    assert clock.slept == [5, 5]
-    assert execs.calls[0][1] == SSM_ARGV
-
-
-@pytest.mark.parametrize("state", ["Failed", "TimedOut", "Skipped"])
-def test_it_connects_with_a_warning_when_the_sshd_ports_did_not_succeed(
-    aws_stubs: Stubs,
-    configured: Service,
-    execs: Exec,
-    required: list[str],
-    clock: Clock,
-    capsys: pytest.CaptureFixture[str],
-    state: str,
-) -> None:
-    """実行を待つ状態でも Success でもなければ、終わったものとみなして警告する。
-
-    前のポートのままなので、ssh -p で入って直せるようにそのままつなぐ。
-    """
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, association_ran(state))
-    key_sent(aws_stubs)
-    proxy.run(configured, 2222)
-    aws_stubs.done()
-    assert clock.slept == []
-    assert execs.calls[0][1][-3] == "portNumber=2222"
-    assert capsys.readouterr().err == (
-        f"temt: warning: {SSHD} ended with {state} on {INSTANCE}; "
-        "sshd stays on its previous ports; see 'temt status --svc dev-main'\n"
-    )
-
-
-def test_it_connects_with_a_warning_when_there_is_no_association(
-    aws_stubs: Stubs,
-    configured: Service,
-    execs: Exec,
-    required: list[str],
-    clock: Clock,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """関連付けそのものが無ければ、待っても実行されないので、apply を促してつなぐ。
-
-    インスタンスでの状態は読まない。積んでいないので、読めば失敗する。
-    """
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm)
-    key_sent(aws_stubs)
-    proxy.run(configured, 22)
-    aws_stubs.done()
-    assert clock.slept == []
-    assert execs.calls[0][1] == SSM_ARGV
-    assert capsys.readouterr().err == (
-        f"temt: warning: no association {SSHD}; sshd listens on the ports in the AMI; "
-        "run 'temt apply --svc dev-main'\n"
-    )
-
-
-def test_it_gives_up_on_the_sshd_ports_after_five_minutes(
-    aws_stubs: Stubs,
-    configured: Service,
-    execs: Exec,
-    required: list[str],
-    clock: Clock,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """締め切りを過ぎたら、status を見るよう添えて終了する。"""
-    _ = required
-    monkeypatch.setattr(wait, "INTERVAL", 60)
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    agent(aws_stubs, "Online")
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    for _ in range(6):
-        sshd_ran(aws_stubs, association_ran("Success", OLD_VERSION), association_ran("Pending"))
-    with pytest.raises(TemtError) as caught:
-        proxy.run(configured, 22)
-    aws_stubs.done()
-    assert str(caught.value) == (
-        f"timed out after 5 minutes waiting for association {SSHD} to finish on {INSTANCE}; "
-        "see 'temt status --svc dev-main'"
-    )
-    assert clock.slept == [60] * 5
-    assert not execs.calls
-    assert not configured.known_hosts_dir.exists()
-
-
-def test_it_does_not_look_at_the_sshd_ports_of_an_old_instance(
-    aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str]
-) -> None:
-    """起動から時間がたっていれば、関連付けは読まない。積んでいないので、読めば失敗する。"""
-    _ = required
-    found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), LONG_AGO))
-    agent(aws_stubs, "Online")
-    key_sent(aws_stubs)
-    proxy.run(configured, 22)
-    aws_stubs.done()
     assert execs.calls[0][1] == SSM_ARGV
 
 
@@ -1222,21 +1017,22 @@ def test_it_leaves_the_known_hosts_alone_when_the_port_stays_closed(
 ) -> None:
     """待っても受け付けなければ、最後につながらなかった理由に合う手がかりを添えて終わる。
 
-    known_hosts を用意するのは、つなげるようになった後である。
+    Host ブロックの Port がインスタンスの sshd のポートと違うこともあるので、ssh -p で
+    ほかのポートを試すことも添える。known_hosts を用意するのは、つなげるようになった
+    後である。
     """
     _ = required
     login(monkeypatch, "direct")
     monkeypatch.setattr(wait, "INTERVAL", 60)
     ports.answers = [REFUSED] * 5 + [last]
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), JUST_NOW))
-    with pytest.raises(
-        TemtError,
-        match=(
-            f"timed out after 5 minutes waiting for {re.escape(ADDRESS)} to accept connections "
-            f"on port 22; {re.escape(hint)}$"
-        ),
-    ):
+    with pytest.raises(TemtError) as caught:
         proxy.run(configured, 22)
+    assert str(caught.value) == (
+        f"timed out after 5 minutes waiting for {ADDRESS} to accept connections on port 22; "
+        f"{hint}; the Port of the Host block may differ from the ports sshd listens on; "
+        "try ssh -p"
+    )
     assert clock.slept == [60] * 5
     assert not relays.calls
     assert not configured.known_hosts_dir.exists()

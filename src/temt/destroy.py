@@ -41,20 +41,24 @@ def _values(service: Service) -> Conf:
     return conf.load(service)
 
 
-def _listed(service: Service, found: list[Instance], inline: list[str]) -> str:
+def _listed(service: Service, found: list[Instance], inline: list[str], managed: list[str]) -> str:
     """手順 2 で挙げる、これから消そうとするもの。
 
     inline はロールに付いたインラインポリシーの名前で、ロールと一緒に消す。手で
-    付けたものも消えるので、名前を挙げる。あるかどうかは消すときに確かめるので、
-    ここに並ぶものが今あるとは限らない。
+    付けたものも消えるので、名前を挙げる。managed は付いた管理ポリシーの ARN で、外す。
+    あるかどうかと、temt のタグが付いているかは消すときに確かめるので、ここに並ぶものが
+    今あるとは限らない。
     """
     role = f"role {service.name}"
-    if inline:
-        role += f" (inline policies: {', '.join(inline)})"
+    held = [
+        *([f"inline policies: {', '.join(inline)}"] if inline else []),
+        *([f"managed policies: {', '.join(managed)}"] if managed else []),
+    ]
+    if held:
+        role += f" ({'; '.join(held)})"
     lines = [
         "instances: " + (", ".join(f"{one.id} ({one.state})" for one in found) or "none"),
         f"launch template {service.launch_template}",
-        f"association {service.sshd_association}",
         f"parameters under {service.parameter_path}/",
         f"security group {service.name}",
         f"instance profile {service.name}",
@@ -113,7 +117,14 @@ def run(service: Service, *, yes: bool) -> None:
         # 手順 1
         found = instances.find(ec2, service)
         # 手順 2。インスタンスが無くても、リソースを消すので確認する
-        msg.tell(_listed(service, found, resources.inline_policies(iam, service)))
+        msg.tell(
+            _listed(
+                service,
+                found,
+                resources.inline_policies(iam, service),
+                resources.attached_policies(iam, service),
+            )
+        )
         msg.confirm(f"destroy {service.name}?", yes=yes)
         # 手順 3
         if found:

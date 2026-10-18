@@ -6,9 +6,10 @@ AWS は呼ばない。docker の image ls が手元のイメージを挙げる�
 """
 
 from pathlib import Path
+from typing import Any
 
-from temt import conf, msg, table
-from temt.conf import UNSET, Conf
+from temt import conf, ltdata, msg, table
+from temt.conf import INSTANCE_TYPE, UNSET, Conf
 from temt.msg import TemtError
 from temt.names import Service, conf_dir, defaults_path, exists
 
@@ -19,28 +20,29 @@ HIDDEN = "."
 
 COLUMNS = table.Columns(
     defaults=("SERVICE", "PROFILE", "REGION", "IMAGE", "TYPE"),
-    extras=("SUBNET", "INGRESS", "SSHDPORTS", "VOLUMESIZE"),
+    extras=("SUBNET", "INGRESS"),
 )
 
 
-def _value(value: str | None) -> str:
+def _value(value: Any) -> str:
     """設定ファイルの値の表示。値が無ければ空にし、table が EMPTY と出す。"""
-    return "" if value is None or value is UNSET else value
+    return "" if value is None or value is UNSET else str(value)
 
 
 def _row(service: Service, values: Conf) -> dict[str, str]:
-    """サービス 1 つの行。値は読んだときに効くもので、既定のある項目は既定を出す。"""
+    """サービス 1 つの行。値は読んだときに効くもので、InstanceType は書かれていなければ
+    既定を出す。
+    """
     template = values.launch_template
+    first = ltdata.element(template.get("NetworkInterfaces") or [], "DeviceIndex", 0) or {}
     return {
         "SERVICE": service.svc,
         "PROFILE": _value(values.AwsProfile),
-        "REGION": values.AwsRegion,
-        "IMAGE": _value(template.ImageId),
-        "TYPE": _value(template.InstanceType),
-        "SUBNET": _value(template.SubnetId),
+        "REGION": _value(values.AwsRegion),
+        "IMAGE": _value(template.get("ImageId")),
+        "TYPE": _value(template.get("InstanceType") or INSTANCE_TYPE),
+        "SUBNET": _value(first.get("SubnetId")),
         "INGRESS": str(len(values.security_group.ingress)),
-        "SSHDPORTS": ",".join(str(port) for port in values.SshdPorts),
-        "VOLUMESIZE": "" if template.VolumeSize is None else str(template.VolumeSize),
     }
 
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from temt import aws, conf, home, instances, keys, msg, proc, relay, sshd, table
+from temt import aws, conf, home, instances, keys, msg, proc, relay, table
 from temt.msg import TemtError
 
 if TYPE_CHECKING:
@@ -46,6 +46,9 @@ SSH_DOCUMENT = "AWS-StartSSHSession"
 # sshd が受け付けていない。他の理由なら、途中で落とされている
 SSHD_HINT = "sshd is not accepting"
 RULES_HINT = "check the security group ingress rules in the config file"
+# 起動して間もないインスタンスにつながらないまま締め切りを過ぎたときに添える。Host
+# ブロックの Port と、インスタンスの sshd のポートが違うことがある
+PORT_HINT = "the Port of the Host block may differ from the ports sshd listens on; try ssh -p"
 
 # プロセスを置き換える。テストから差し替える
 execvpe = os.execvpe
@@ -132,9 +135,8 @@ def _running(ec2: EC2Client, service: Service) -> tuple[Instance, bool]:
 def _ssm_ready(ssm: SSMClient, service: Service, one: Instance, *, fresh: bool) -> None:
     """SSM エージェントが Online になるのを確かめる。起動して間もなければ待つ。
 
-    起動して間もなければ、起動した時刻より後の Online の報告を待ち（停止してすぐ
-    再開したときに、止まる前の報告を数えない）、続けて sshd の待ち受けポートが揃う
-    のを待つ。
+    起動して間もなければ、起動した時刻より後の Online の報告を待つ（停止してすぐ
+    再開したときに、止まる前の報告を数えない）。
     """
     instance_id = one.id
     hint = instances.login_hint(service)
@@ -146,39 +148,8 @@ def _ssm_ready(ssm: SSMClient, service: Service, one: Instance, *, fresh: bool) 
             since=one.launched,
             hint=hint,
         )
-        _sshd_ready(ssm, service, instance_id)
     elif not instances.is_online(ssm, instance_id):
         raise TemtError(f"the SSM agent on {instance_id} is not online; {hint}")
-
-
-def _sshd_ready(ssm: SSMClient, service: Service, instance_id: str) -> None:
-    """関連付け <名前>-sshd の今の版が、起動したインスタンスで実行し終わるのを待つ。
-
-    それまでは sshd が AMI のポートで待ち受けているので、SshdPorts のポートへは
-    つながらない。今の版は 1 度だけ読む。関連付けそのものが無いときと、終わった状態が
-    Success でないときは、警告してそのままつなぐ。Success でないときはスクリプトが前の
-    ポートに戻しているので、ssh -p でそのポートを指せば入って直せる。
-    """
-    name = service.sshd_association
-    current = sshd.find(ssm, service)
-    if current is None:
-        msg.warn(
-            f"no association {name}; sshd listens on the ports in the AMI; "
-            f"run 'temt apply --svc {service.svc}'"
-        )
-        return
-    state = instances.wait_sshd_ports(
-        ssm,
-        service,
-        instance_id,
-        current,
-        f"waiting for {name} to set the sshd ports on {instance_id}",
-    )
-    if state != sshd.SUCCESS:
-        msg.warn(
-            f"{name} ended with {state} on {instance_id}; sshd stays on its previous ports; "
-            f"see 'temt status --svc {service.svc}'"
-        )
 
 
 def _send_key(session: boto3.Session, one: Instance, user: str, public_key: str) -> None:
@@ -212,7 +183,7 @@ def _direct_ready(ec2: EC2Client, one: Instance, port: int, *, fresh: bool) -> s
                 address, port, f"waiting for {address} to accept connections on port {port}"
             )
         except instances.NotAccepting as e:
-            raise TemtError(f"{e}; {_hint(e.reason)}") from None
+            raise TemtError(f"{e}; {_hint(e.reason)}; {PORT_HINT}") from None
     try:
         return instances.connect(address, port)
     except ConnectionRefusedError:
@@ -228,9 +199,8 @@ def run(service: Service, port: int, user: str | None = None) -> None:
     から戻る。
 
     インスタンスが起動して間もなければ、その経路でつなげるようになるまで待つ。ssm
-    なら SSM エージェントが Online になり、sshd の待ち受けポートを揃える関連付けが
-    実行し終わるまで、direct ならパブリック IPv4 アドレスが付き、そのポートに TCP で
-    つながるまでである。起動から時間がたっていれば待たず、
+    なら SSM エージェントが Online になるまで、direct ならパブリック IPv4 アドレスが
+    付き、そのポートに TCP でつながるまでである。起動から時間がたっていれば待たず、
     つなげなければ手がかりを添えて終了する。送る鍵は、AWS を呼ぶ前に決める。
 
     user は ssh がログインするユーザー（ProxyCommand の %r）。ssh -G には ssh の

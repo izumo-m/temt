@@ -58,7 +58,8 @@ Each adds to AWS's form only; written as AWS's form, it behaves as AWS does.
 - `Groups` of a `NetworkInterfaces` element may hold security group names as well as
   IDs. AWS does not let a group name start with `sg-`, so a value starting with `sg-`
   is an ID and anything else a name. `apply` resolves names in the VPC of the
-  element's `SubnetId` (a name is unique within a VPC). A name not in that VPC is an
+  `SubnetId` of the element with `DeviceIndex = 0` (a name is unique within a VPC, and
+  the interfaces of an instance are in one VPC). A name not in that VPC is an
   error, except temt's security group (`<name>`, or `${temt:name}`), which `apply`
   creates when missing ([security-group.md](security-group.md#when-it-is-created)).
   `diff` compares after resolving.
@@ -114,7 +115,9 @@ and when the line is deleted later (deleting `CreditSpecification` on a T type w
   subnet of that time, and stay when those change later. The launch errors this can cause are in [The config file is
   the whole content](#the-config-file-is-the-whole-content).
 - If there is no `NetworkInterfaces` element with `DeviceIndex = 0`, it is added with
-  the values. If that element has `NetworkInterfaceId` (attaching an existing ENI),
+  the values. So the top-level `SecurityGroupIds` and `SecurityGroups`, which AWS does not
+  take together with `NetworkInterfaces`, end in AWS's error; security groups go in
+  `Groups`. If that element has `NetworkInterfaceId` (attaching an existing ENI),
   `SubnetId`, `Groups`, `AssociatePublicIpAddress`, and `Ipv6AddressCount` are not
   added. If the top level has `SecurityGroupIds` or `SecurityGroups`, `Groups` is not
   added. AWS refuses these combinations.
@@ -139,14 +142,18 @@ with the config file's, after filling and resolving. Forms that AWS changes on r
 are aligned first; otherwise every `apply` would make a new version.
 
 - A blank value (empty array, empty table, empty string) counts as not written, on
-  both sides. AWS drops empty arrays on reading (checked on real AWS).
+  both sides. AWS drops empty arrays on reading (checked on real AWS). `NoDevice` is
+  the exception: its only value is the empty string, which leaves out a device of the
+  AMI, so it is kept.
+- A double written as an integer is read as a decimal, as AWS returns it.
 - `IamInstanceProfile` compares `Name` and `Arn` as the same instance profile; AWS may return
   the ARN.
 - The four read-only items are ignored.
 - Arrays are not compared by order, since AWS does not keep it. Elements are matched
   by a key: `NetworkInterfaces` by `DeviceIndex`, `BlockDeviceMappings` by `DeviceName`
   (after filling), `TagSpecifications` by `ResourceType`, tags by `Key`. A key repeated
-  in the config file (two `DeviceIndex = 0`) is an error. Other arrays compare whole
+  in the config file (two `DeviceIndex = 0`) is an error, since elements would be
+  mistaken for each other. An element without its key is left to AWS's error. Other arrays compare whole
   elements; a difference shows as an element removed and an element added.
 - To check at implementation on real AWS: whether AWS keeps `Ipv6AddressCount = 0`, and
   whether it fills in other items.

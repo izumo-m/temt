@@ -6,7 +6,8 @@ ImageId、起動テンプレート、deploy の記録を新しい AMI に向け�
 今の状態を知らせて終了する。
 
 app deploy と app remove の --bake も、同じロックを持ったまま、手順 3 の check、
-手順 4 の確認に並べる plan、手順 5〜9 の make を使う。
+手順 4 の確認に並べる plan、手順 5〜9 の make を使う。ssh set-port も、同じロックを
+持ったまま、手順 3 の check_template と check_size、手順 5〜9 の make を使う。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -20,15 +21,17 @@ from typing import TYPE_CHECKING
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from temt import app, aws, conf, instances, lock, msg, resources, terminate, wait
+from temt import app, aws, conf, instances, lock, ltbuild, ltdata, msg, resources, terminate, wait
 from temt.aws import error_code, field
 from temt.msg import TemtError
 from temt.names import PREFIX, tilde
 from temt.table import aws_error, printable
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from types_boto3_ec2.client import EC2Client
-    from types_boto3_ec2.type_defs import TagTypeDef
+    from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef, TagTypeDef
     from types_boto3_ssm.client import SSMClient
 
     from temt.conf import Conf
@@ -69,51 +72,79 @@ def _one(service: Service, found: list[Instance]) -> Instance:
     return one
 
 
-def check(ec2: EC2Client, service: Service, values: Conf, one: Instance) -> None:
-    """手順 3。テンプレートが設定ファイルと揃っていることを確かめる。
+def check(
+    ec2: EC2Client, service: Service, values: Conf, one: Instance, *, command: str = "bake"
+) -> None:
+    """手順 3。テンプレートが設定ファイルと揃っていることを確かめる（check_template）。
+    続けて、焼くインスタンス one のルートボリュームが、ルートボリュームの要素の
+    Ebs.VolumeSize より大きくないことを確かめる（check_size）。command は、直したあとに
+    やり直すよう告げるコマンド。
+    """
+    built = check_template(ec2, service, values)
+    check_size(ec2, service, built, one, command=command)
 
-    ImageId が指す AMI が見つからないか使えなければ、揃っていないものとして apply を
-    促す。apply が行を消すよう案内する。VolumeSize は書かないのが既定なので、書かれて
-    いないことを揃っていないとはしない。続けて、焼くインスタンス one のルート
-    ボリュームが VolumeSize より大きくないことを確かめる（_check_size）。
+
+def check_template(ec2: EC2Client, service: Service, values: Conf) -> ltbuild.Built:
+    """手順 3 のうち、テンプレートが設定ファイルと揃っていることを確かめ、設定ファイルから
+    組み立てた中身を返す。
+
+    diff と同じく、設定ファイルから組み立てた中身（ltbuild.build）と既定バージョンの中身の
+    全体を比べる。apply がまだ書いていない項目や、まだ無い temt のセキュリティグループが
+    あれば揃っていない。ImageId が無いか、指す AMI が使えなければ、ImageId が揃って
+    いないとして apply を促す（apply が行を消すよう案内する）。set-port も、sshd を変える
+    前に呼ぶ。
     """
     current = resources.default_version(resources.versions(ec2, service), service)
-    data = resources.projection(current.get("LaunchTemplateData") or {})
-    image_id = resources.configured_image(ec2, values)
-    differ = [
-        label
-        for label, wanted, found in resources.config_pairs(values, data, image_id)
-        if wanted is conf.UNSET or wanted != found
-    ]
-    if differ:
+    data = current.get("LaunchTemplateData") or {}
+    built = None
+    try:
+        built = ltbuild.build(ec2, service, values)
+    except ltbuild.UnusableImage:
+        differ = ["ImageId"]
+    else:
+        # apply がまだ書いていない項目があれば、次の apply が書いて中身も変えうる
+        differ = [
+            *ltbuild.unfilled(values, ipv6=built.ipv6),
+            *resources.template_differ(data, built.data),
+        ]
+        differ = list(dict.fromkeys(differ))
+        if not differ and not ltdata.same(ltdata.normalize(data), ltdata.normalize(built.data)):
+            # 位置に開くと違いが見えない（同じ ResourceType の要素が 2 つあるなど）
+            differ = ["the content"]
+    if differ or built is None:
         raise TemtError(
             f"the launch template {service.launch_template} does not match "
             f"{printable(tilde(service.conf_path))} in {', '.join(differ)}; "
             f"run 'temt apply --svc {service.svc}' first"
         )
-    _check_size(ec2, service, values, one)
+    return built
 
 
-def _check_size(ec2: EC2Client, service: Service, values: Conf, one: Instance) -> None:
-    """手順 3 の続き。インスタンスのルートボリュームが VolumeSize より大きければ止める。
+def check_size(
+    ec2: EC2Client, service: Service, built: ltbuild.Built, one: Instance, *, command: str = "bake"
+) -> None:
+    """手順 3 の続き。インスタンスのルートボリュームが、ルートボリュームの要素の
+    Ebs.VolumeSize より大きければ止める。
 
     焼いた AMI はインスタンスのルートボリュームの大きさになり、それより小さい
-    VolumeSize のテンプレートからは、AWS が起動を断るからである。ルートボリュームが
-    応答に無ければ、比べられないので止めない。
+    Ebs.VolumeSize のテンプレートからは、AWS が起動を断るからである。ルートボリュームの
+    要素は、組み立てた中身（built）の、DeviceName が AMI の RootDeviceName のもの。
+    ルートボリュームが応答に無ければ、比べられないので止めない。
     """
-    wanted = values.launch_template.VolumeSize
-    if wanted is None or not one.root_volume:
+    wanted = None if built.root is None else (built.root.get("Ebs") or {}).get("VolumeSize")
+    if not isinstance(wanted, int) or not one.root_volume:
         return
     volumes = ec2.describe_volumes(VolumeIds=[one.root_volume]).get("Volumes") or []
     size = volumes[0].get("Size") if volumes else None
     if not isinstance(size, int) or size <= wanted:
         return
-    key = conf.launch_template_key("VolumeSize")
+    device = built.root.get("DeviceName") if built.root is not None else None
+    key = conf.launch_template_key(f"{ltbuild.BLOCK_DEVICES}[DeviceName={device}].Ebs.VolumeSize")
+    where = conf.source(service, conf.launch_template_key(ltbuild.BLOCK_DEVICES))
     raise TemtError(
         f"the root volume of {one.id} is {size} GiB, larger than {key} {wanted}; "
-        f"raise it to {size} or more or remove it in "
-        f"{printable(tilde(conf.source(service, key)))}, "
-        f"then run 'temt apply --svc {service.svc}' and bake again"
+        f"raise it to {size} or more or remove it in {printable(tilde(where))}, "
+        f"then run 'temt apply --svc {service.svc}' and {command} again"
     )
 
 
@@ -143,14 +174,34 @@ def _tags(service: Service, name: str) -> list[TagTypeDef]:
     ]
 
 
-def _create(ec2: EC2Client, service: Service, instance_id: str) -> tuple[str, str]:
-    """手順 6。停止したインスタンスから AMI を作り、その ID と名前を返す。"""
-    name = image_name(service.svc)
+def create(
+    ec2: EC2Client,
+    service: Service,
+    instance_id: str,
+    others: Sequence[str],
+    mappings: Sequence[BlockDeviceMappingTypeDef] = (),
+    name: str | None = None,
+    command: str | None = None,
+) -> tuple[str, str]:
+    """手順 6。停止したインスタンスから AMI を作り、その ID と名前を返す。
+
+    ルートボリューム以外の EBS（デバイス名 others）は NoDevice にして、AMI に入れない。
+    create-image は、既定では付いているすべての EBS をスナップショットにして入れる。
+    mappings は足す指定で、ami import がルートボリュームの DeleteOnTermination に使う。
+    name は AMI の名前で、省けば今の時刻で決める。ami import は確認に出した名前を渡す。
+    command は、同じ名前の AMI があるときにやり直すよう告げるコマンドで、省けば bake。
+    """
+    name = name or image_name(service.svc)
+    again = command or "bake"
     tags = _tags(service, name)
     try:
         made = ec2.create_image(
             InstanceId=instance_id,
             Name=name,
+            BlockDeviceMappings=[
+                *({"DeviceName": device, "NoDevice": ""} for device in others),
+                *mappings,
+            ],
             TagSpecifications=[
                 {"ResourceType": "image", "Tags": tags},
                 {"ResourceType": "snapshot", "Tags": tags},
@@ -160,7 +211,7 @@ def _create(ec2: EC2Client, service: Service, instance_id: str) -> tuple[str, st
         if error_code(e) != DUPLICATE_NAME:
             raise
         raise TemtError(
-            f"an AMI named {name} already exists; wait a minute and run bake again"
+            f"an AMI named {name} already exists; wait a minute and run {again} again"
         ) from None
     image_id = field(made, "ImageId")
     msg.info(f"creating the AMI {image_id} ({name}) from {instance_id}")
@@ -189,7 +240,7 @@ def _state(ec2: EC2Client, image_id: str, unseen_until: float) -> str | None:
     return f"the AMI {image_id} is {state}" + (f": {printable(reason)}" if reason else "")
 
 
-def _wait(ec2: EC2Client, image_id: str) -> str | None:
+def wait_available(ec2: EC2Client, image_id: str) -> str | None:
     """手順 7。AMI が available になるまで待つ。作れなければ、その理由を返す。
 
     締め切りは置かない。AMI の大きさによっては長くかかり、待ち切れずに止めても、
@@ -230,11 +281,11 @@ def _point(ec2: EC2Client, service: Service, name: str, image_id: str) -> None:
     バージョンを消す。
     """
     values = conf.load(service)
-    was = values.launch_template.ImageId
+    was = values.launch_template.get("ImageId")
     key = conf.launch_template_key("ImageId")
     if conf.update(service, values, key, name):
         # 待つあいだに行が消されていれば、元の値は無い
-        note = "" if was is conf.UNSET else f" (was {printable(str(was))})"
+        note = "" if was is None else f" (was {printable(str(was))})"
         msg.info(f"wrote {key} = {name} in {printable(str(service.conf_path))}{note}")
     resources.point_image(ec2, service, image_id)
 
@@ -265,10 +316,10 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
             instances.stop(ec2, one.id)
         instances.wait_stopped(ec2, one.id)
     # 手順 6
-    image_id, name = _create(ec2, service, one.id)
+    image_id, name = create(ec2, service, one.id, one.other_devices)
     # 手順 7。ここで止まれば、設定ファイルもテンプレートも記録も元のまま
     try:
-        why = _wait(ec2, image_id)
+        why = wait_available(ec2, image_id)
     except (ClientError, BotoCoreError):
         _left(service, one)
         msg.tell(f"the AMI {image_id} is not {AVAILABLE} yet\n", side=True)

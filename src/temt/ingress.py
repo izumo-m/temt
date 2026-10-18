@@ -161,12 +161,15 @@ def _own(service: Service) -> Conf:
     return conf.load(service, common=False)
 
 
-def _shared() -> dict[tuple[str, RULE_PORT, str], Ingress]:
+def _shared(service: Service) -> dict[tuple[str, RULE_PORT, str], Ingress]:
     """共通ファイルの受信規則を、見分ける組から引けるようにしたもの。
 
     sg add と sg remove は、サービスの設定ファイルだけを書き換える。共通ファイルの規則は
-    全サービスに効くので、そちらを直すよう告げる。
+    全サービスに効くので、そちらを直すよう告げる。Defaults = false のサービスには効かない
+    ので、無いものとする。
     """
+    if conf.written(service, conf.DEFAULTS) is False:
+        return {}
     return {conf.rule_key(one): one for one in conf.common_rules()}
 
 
@@ -197,7 +200,7 @@ def add(
     values = _own(service)
     path = table.printable(tilde(service.conf_path))
     positions = _positions(values)
-    shared = _shared()
+    shared = _shared(service)
     rules = values.security_group.ingress
     added: list[Ingress] = []
     described: dict[int, str] = {}
@@ -235,7 +238,7 @@ def remove(service: Service, protocol: str, port: RULE_PORT, cidr: str | None) -
     values = _own(service)
     path = table.printable(tilde(service.conf_path))
     positions = _positions(values)
-    shared = _shared()
+    shared = _shared(service)
     removed: list[int] = []
     missing: list[str] = []
     for rule in _rules(protocol, port, cidr, ""):

@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ProfileNotFound
 
 from temt import conf, msg
 from temt.conf import Conf
@@ -86,10 +86,30 @@ def session(values: Conf) -> boto3.Session:
     """プロファイルとリージョンを渡して Session を作る。
 
     boto3 は profile_name が None のとき何も設定しない（Session.__init__ の
-    `if profile_name is not None`）。リージョンは設定ファイルの値が必ず決まっている
-    ので、そのまま渡す。
+    `if profile_name is not None`）。リージョンは、設定ファイルの AwsRegion、--region、
+    共通ファイルの AwsRegion の順に conf.load が決めている。どれも無ければ、ここで
+    環境変数、AWS のプロファイルの region、conf.REGION_DEFAULT の順に決め、values にも
+    入れる。最初の apply と ami import が、それを AwsRegion に書く。環境変数は main が
+    取り除く前に conf.ENV_REGION に控えてある。
     """
+    resolve_region(values)
     return boto3.Session(profile_name=profile(values), region_name=values.AwsRegion)
+
+
+def resolve_region(values: Conf) -> None:
+    """設定ファイルからリージョンが決まらなかったとき（AwsRegion が UNSET）、環境変数、
+    AWS のプロファイルの region、conf.REGION_DEFAULT の順に決めて values に入れる。
+    """
+    if values.AwsRegion is not conf.UNSET:
+        return
+    region = conf.ENV_REGION
+    if not region:
+        try:
+            region = boto3.Session(profile_name=profile(values)).region_name
+        except ProfileNotFound:
+            # 無いプロファイルは、続けて作る Session がその誤りで止める
+            region = None
+    values.AwsRegion = region or conf.REGION_DEFAULT
 
 
 def _env_profile(common: Mapping[str, Any]) -> str | None:
@@ -194,8 +214,7 @@ def error_code(e: ClientError) -> str:
 def _write_subnet(conf_path: Path) -> str:
     """既定のサブネットが決まらないときに伝えること。"""
     return (
-        f"write {conf.launch_template_key('SubnetId')} in {printable(str(conf_path))} "
-        f"and run apply again"
+        f"write {conf.primary_key('SubnetId')} in {printable(str(conf_path))} and run apply again"
     )
 
 
@@ -259,8 +278,9 @@ def subnet(ec2: EC2Client, subnet_id: str, conf_path: Path) -> Subnet:
     if not subnets:
         raise TemtError(
             f"no such subnet: {subnet_id}; for another account, remove "
-            f"{conf.launch_template_key('SubnetId')} and {conf.launch_template_key('ImageId')} "
-            f"from {printable(str(conf_path))} and run apply again"
+            f"{conf.primary_key('SubnetId')} and {conf.launch_template_key('ImageId')}, and "
+            f"the other items that point into this account (Groups, IamInstanceProfile, "
+            f"KeyName, ...), from {printable(str(conf_path))} and run apply again"
         )
     item = subnets[0]
     if not item.get("CidrBlock"):

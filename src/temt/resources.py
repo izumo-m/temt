@@ -6,15 +6,14 @@ bake が既定バージョンを読むための関数と、bake がそれを設�
 使う。
 
 detect は、IAM ロール、そのインラインポリシー temt-<ポリシー名>、インスタンス
-プロファイル、セキュリティグループ、起動テンプレート、関連付け <名前>-sshd の差分を、
-この順に検出する。update は、検出した差分で、同じ順に、無ければ作り、あれば設定
-ファイルに合わせる。インラインポリシー以外のどれにも temt のタグを付け、無いか値が
-違えば書く。設定ファイルに無い temt- で始まるインラインポリシーは消す。作ったもの、
-更新したもの、消したものを、それぞれ知らせる。関連付けは、作ったか中身を更新した
-ときだけ実行を求める。リソースごとには、detect_<リソース> が AWS を読んで差分を検出し、
+プロファイル、セキュリティグループ、起動テンプレートの差分を、この順に検出する。
+update は、検出した差分で、同じ順に、無ければ作り、あれば設定ファイルに合わせる。
+インラインポリシー以外のどれにも temt のタグを付け、無いか値が違えば書く。設定
+ファイルに無い temt- で始まるインラインポリシーは消す。作ったもの、更新したもの、
+消したものを、それぞれ知らせる。リソースごとには、detect_<リソース> が AWS を読んで差分を検出し、
 リソースの名前の関数（role、role_policies など）が検出した差分で揃える。
 
-remove は、起動テンプレート、関連付け、/<名前> の下の SSM パラメータ、セキュリティ
+remove は、起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティ
 グループ、インスタンスプロファイル、IAM ロールを、この順に消す。ロールは、付いた
 インラインポリシーをすべて消してから消す。消したもの、既に無かったものを、それぞれ
 知らせる。
@@ -32,14 +31,13 @@ botocore の例外は、そのリソースが無いことを表す誤りだけ�
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from ipaddress import ip_network
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
-from temt import aws, change, conf, msg, policy, sshd, table
+from temt import aws, change, conf, ltbuild, ltdata, msg, policy, table
 from temt.aws import error_code, field
 from temt.change import ADD, ARROW, REMOVE, UPDATE, Change
 from temt.msg import TemtError
@@ -48,11 +46,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
     from types_boto3_ec2.client import EC2Client
-    from types_boto3_ec2.literals import InstanceTypeType
     from types_boto3_ec2.type_defs import (
         IpPermissionTypeDef,
-        LaunchTemplateInstanceNetworkInterfaceSpecificationRequestTypeDef,
-        RequestLaunchTemplateDataTypeDef,
         SecurityGroupTypeDef,
         TagTypeDef,
     )
@@ -66,7 +61,6 @@ if TYPE_CHECKING:
 NO_SUCH_ENTITY = "NoSuchEntity"
 NO_SUCH_TEMPLATE = "InvalidLaunchTemplateName.NotFoundException"
 NO_SUCH_GROUP = "InvalidGroup.NotFound"
-NO_SUCH_ASSOCIATION = "AssociationDoesNotExist"
 # まだ何かが付いていて消せないときに IAM が返す誤りの名前
 DELETE_CONFLICT = "DeleteConflict"
 # セキュリティグループにまだネットワークインターフェースが付いているか、他から参照されて
@@ -107,15 +101,10 @@ ANY_TYPE = -1
 # 送信元が読めない規則の表示
 UNKNOWN_SOURCE = "?"
 
-SHUTDOWN_BEHAVIOR = "terminate"
-CPU_CREDITS = "unlimited"
-# CPU クレジットを持つ T 系のインスタンスの型（t3.micro、t4g.small など）。旧世代の
-# t1 は CPU クレジットを持たない
-BURSTABLE = re.compile(r"t[2-9]")
+# CPU クレジットを持つ T 系のインスタンスの型。ltbuild が持つ
+BURSTABLE = ltbuild.BURSTABLE
 # サブネットに IPv6 の CIDR が結び付いているときに付ける IPv6 アドレスの数
 IPV6_ADDRESSES = 1
-HTTP_TOKENS = "required"
-METADATA_TAGS = "enabled"
 DEFAULT_VERSION = "$Default"
 # delete-parameters が 1 回に受け付ける名前の数
 PARAMETER_BATCH = 10
@@ -129,13 +118,13 @@ ABSENT = "absent"
 # 差分の種類。change.Change の kind
 ROLE = "role"
 ROLE_POLICY = "role-policy"
+MANAGED_POLICY = "managed-policy"
 INSTANCE_PROFILE = "instance-profile"
 SECURITY_GROUP = "security-group"
 INGRESS = "ingress"
 LAUNCH_TEMPLATE = "launch-template"
-ASSOCIATION = "association"
 # まだ作っていないセキュリティグループの ID の表示。diff が起動テンプレートの差分に書く
-NEW_GROUP = "(new)"
+NEW_GROUP = ltbuild.NEW_GROUP
 
 
 def _mark(service: Service) -> list[tuple[str, str]]:
@@ -183,24 +172,35 @@ class RoleDiff:
         return []
 
 
+def _owned(what: str, tags: Sequence[Mapping[str, Any]] | None, service: Service) -> None:
+    """temt:service のタグが別のサービスのものなら止める。無ければ、足して使う。"""
+    other = aws.tag({"Tags": tags or []}, aws.TAG_SERVICE)
+    if other and other != service.svc:
+        raise TemtError(
+            f"the {what} {service.name} has {aws.TAG_SERVICE}={table.printable(other)}, so it "
+            f"belongs to another service; fix the tag or delete it by hand"
+        )
+
+
 def detect_role(iam: IAMClient, service: Service) -> RoleDiff:
-    """IAM ロールの差分を検出する。"""
+    """インスタンスロール <名前> の差分を検出する。別のサービスのタグが付いていれば止める。"""
     try:
         found = iam.get_role(RoleName=service.name)["Role"]
     except ClientError as e:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
         return RoleDiff(service.name, exists=False)
+    _owned("role", found.get("Tags"), service)
     return RoleDiff(
         service.name, exists=True, tags=tuple(_missing(found.get("Tags"), _mark(service)))
     )
 
 
 def role(iam: IAMClient, service: Service, found: RoleDiff) -> None:
-    """IAM ロールを揃える。無ければ作り、タグが無ければ付ける。
+    """インスタンスロールを揃える。無ければ作り、タグが無ければ付ける。
 
-    権限はすべてインラインポリシー temt-<ポリシー名>（role_policies）で付け、管理
-    ポリシーは付けない。
+    権限は、インラインポリシー temt-<ポリシー名>（role_policies）と、管理ポリシー
+    （managed_policies）で付ける。
     """
     if not found.exists:
         _ = iam.create_role(
@@ -314,6 +314,73 @@ def role_policies(iam: IAMClient, service: Service, found: Sequence[PolicyDiff])
 
 
 @dataclass(frozen=True)
+class ManagedDiff:
+    """インスタンスロールに付ける管理ポリシーの差分。attach は付けるもの、detach は外すもの。"""
+
+    attach: tuple[str, ...] = ()
+    detach: tuple[str, ...] = ()
+
+    def changes(self) -> list[Change]:
+        """diff に出す形にする。付けるもの、外すものの順。"""
+        return [Change(ADD, MANAGED_POLICY, arn) for arn in self.attach] + [
+            Change(REMOVE, MANAGED_POLICY, arn) for arn in self.detach
+        ]
+
+
+def attached_policies(iam: IAMClient, service: Service) -> list[str]:
+    """インスタンスロール <名前> に付いた管理ポリシーの ARN。ロールが無ければ空。"""
+    return attached_policies_of(iam, service.name)
+
+
+def attached_policies_of(iam: IAMClient, name: str) -> list[str]:
+    """ロール name に付いた管理ポリシーの ARN。ロールが無ければ空。role import も使う。"""
+    try:
+        return [
+            field(one, "PolicyArn")
+            for page in iam.get_paginator("list_attached_role_policies").paginate(RoleName=name)
+            for one in page.get("AttachedPolicies", [])
+        ]
+    except ClientError as e:
+        if error_code(e) != NO_SUCH_ENTITY:
+            raise
+        return []
+
+
+def read_tags(iam: IAMClient, what: str, service: Service) -> list[Mapping[str, Any]] | None:
+    """インスタンスロール（what が role）かインスタンスプロファイル <名前> のタグ。無ければ
+    None。role delete が、消してよいかを確かめるのに使う。
+    """
+    try:
+        if what == "role":
+            return list(iam.get_role(RoleName=service.name)["Role"].get("Tags") or [])
+        found = iam.get_instance_profile(InstanceProfileName=service.name)["InstanceProfile"]
+        return list(found.get("Tags") or [])
+    except ClientError as e:
+        if error_code(e) != NO_SUCH_ENTITY:
+            raise
+        return None
+
+
+def detect_managed_policies(iam: IAMClient, service: Service, wanted: Sequence[str]) -> ManagedDiff:
+    """管理ポリシーの差分を検出する。ManagedPolicyArns に無いものは外す。"""
+    current = attached_policies(iam, service)
+    return ManagedDiff(
+        attach=tuple(arn for arn in dict.fromkeys(wanted) if arn not in current),
+        detach=tuple(arn for arn in current if arn not in wanted),
+    )
+
+
+def managed_policies(iam: IAMClient, service: Service, found: ManagedDiff) -> None:
+    """管理ポリシーを、検出した差分で揃える。付けてから外す。"""
+    for arn in found.attach:
+        _ = iam.attach_role_policy(RoleName=service.name, PolicyArn=arn)
+        msg.info(f"role {service.name}: attached {arn}")
+    for arn in found.detach:
+        _ = iam.detach_role_policy(RoleName=service.name, PolicyArn=arn)
+        msg.info(f"role {service.name}: detached {arn}")
+
+
+@dataclass(frozen=True)
 class ProfileDiff:
     """インスタンスプロファイルの差分。
 
@@ -345,13 +412,16 @@ class ProfileDiff:
 
 
 def detect_instance_profile(iam: IAMClient, service: Service) -> ProfileDiff:
-    """インスタンスプロファイルの差分を検出する。"""
+    """インスタンスプロファイル <名前> の差分を検出する。別のサービスのタグが付いていれば
+    止める。
+    """
     try:
         found = iam.get_instance_profile(InstanceProfileName=service.name)["InstanceProfile"]
     except ClientError as e:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
         return ProfileDiff(service.name, exists=False)
+    _owned("instance profile", found.get("Tags"), service)
     return ProfileDiff(
         service.name,
         exists=True,
@@ -735,60 +805,6 @@ def _tags(service: Service) -> list[TagTypeDef]:
     return [{"Key": key, "Value": value} for key, value in _pairs(service)]
 
 
-def template_data(
-    service: Service,
-    values: Conf,
-    image_id: str,
-    subnet_id: str,
-    group_id: str,
-    *,
-    ipv6: bool,
-    root_device: str | None = None,
-) -> RequestLaunchTemplateDataTypeDef:
-    """起動テンプレートに入れる設定。
-
-    ipv6 は、サブネットに IPv6 の CIDR が結び付いているかどうか。結び付いていれば
-    IPv6 アドレスを 1 つ付け、いなければ項目を入れない。CPU クレジットは T 系の型で
-    しか意味を持たないので、ほかの型では項目を入れない。root_device は AMI の
-    RootDeviceName で、VolumeSize が書かれていれば要る。そのときだけ、ルート
-    ボリュームの大きさを BlockDeviceMappings に入れる。ほかの項目（種類、
-    スナップショットなど）は入れず、AMI のものを使う。
-    """
-    tags = _tags(service)
-    interface: LaunchTemplateInstanceNetworkInterfaceSpecificationRequestTypeDef = {
-        "DeviceIndex": 0,
-        "SubnetId": subnet_id,
-        "Groups": [group_id],
-        "AssociatePublicIpAddress": True,
-    }
-    if ipv6:
-        interface["Ipv6AddressCount"] = IPV6_ADDRESSES
-    instance_type = values.launch_template.InstanceType
-    data: RequestLaunchTemplateDataTypeDef = {
-        "ImageId": image_id,
-        # 設定ファイルには任意の文字列を書けるので、値が正しいかは AWS が判断する
-        "InstanceType": cast("InstanceTypeType", instance_type),
-        "InstanceInitiatedShutdownBehavior": SHUTDOWN_BEHAVIOR,
-        "NetworkInterfaces": [interface],
-        "MetadataOptions": {"HttpTokens": HTTP_TOKENS, "InstanceMetadataTags": METADATA_TAGS},
-        "IamInstanceProfile": {"Name": service.name},
-        "TagSpecifications": [
-            {"ResourceType": "instance", "Tags": tags},
-            {"ResourceType": "volume", "Tags": tags},
-            {"ResourceType": "network-interface", "Tags": tags},
-        ],
-    }
-    if BURSTABLE.match(instance_type):
-        data["CreditSpecification"] = {"CpuCredits": CPU_CREDITS}
-    size = values.launch_template.VolumeSize
-    if size is not None:
-        if root_device is None:
-            # 呼ぶ側の誤り。手順 4 が VolumeSize を確かめたときに必ず決める
-            raise ValueError("root_device is needed when VolumeSize is set")
-        data["BlockDeviceMappings"] = [{"DeviceName": root_device, "Ebs": {"VolumeSize": size}}]
-    return data
-
-
 def _warnings(result: Mapping[str, Any], name: str, *, profile_aligned: bool) -> None:
     """AWS が返した起動テンプレートの警告を伝える。
 
@@ -812,70 +828,6 @@ def _version(number: int | None, name: str) -> int:
     if number is None:
         raise TemtError(f"AWS did not return the version number of the launch template {name}")
     return number
-
-
-def _profile_name(profile: Mapping[str, Any]) -> str | None:
-    """インスタンスプロファイルの名前。AWS は ARN で返すことがある。"""
-    name = profile.get("Name")
-    if isinstance(name, str) and name:
-        return name
-    arn = profile.get("Arn")
-    return arn.rpartition("/")[2] if isinstance(arn, str) and arn else None
-
-
-def projection(data: Mapping[str, Any]) -> dict[str, Any]:
-    """temt が決める項目だけを取り出す。AWS が補った項目は見ない。
-
-    AWS は応答の並び順を保証しないので、並べ替えてから比べる。比べるのは template
-    で、show はこれを表示する項目の元にする。
-    """
-    metadata: Mapping[str, Any] = data.get("MetadataOptions") or {}
-    credit: Mapping[str, Any] = data.get("CreditSpecification") or {}
-    interfaces: list[Mapping[str, Any]] = data.get("NetworkInterfaces") or []
-    specifications: list[Mapping[str, Any]] = data.get("TagSpecifications") or []
-    mappings: list[Mapping[str, Any]] = data.get("BlockDeviceMappings") or []
-    return {
-        "ImageId": data.get("ImageId"),
-        "InstanceType": data.get("InstanceType"),
-        # temt は入れない。手で入れたものや、前の temt が入れたものがあれば、外す
-        "KeyName": data.get("KeyName"),
-        # デバイス名と大きさの組。temt が入れるのはルートボリュームの 1 つだけである
-        "BlockDeviceMappings": sorted(
-            (
-                (str(one.get("DeviceName") or ""), (one.get("Ebs") or {}).get("VolumeSize"))
-                for one in mappings
-            ),
-            # 同じデバイス名が重なれば大きさで並べる。大きさの無いものは None で、数と
-            # 比べられないので文字列にして並べる
-            key=lambda pair: (pair[0], str(pair[1])),
-        ),
-        "InstanceInitiatedShutdownBehavior": data.get("InstanceInitiatedShutdownBehavior"),
-        "CpuCredits": credit.get("CpuCredits"),
-        "NetworkInterfaces": [
-            {
-                "DeviceIndex": one.get("DeviceIndex"),
-                "SubnetId": one.get("SubnetId"),
-                "Groups": sorted(one.get("Groups") or []),
-                "AssociatePublicIpAddress": one.get("AssociatePublicIpAddress"),
-                # 項目が無いときと 0 は、どちらも IPv6 アドレスを付けないことを表す
-                "Ipv6AddressCount": one.get("Ipv6AddressCount") or None,
-            }
-            for one in interfaces
-        ],
-        "HttpTokens": metadata.get("HttpTokens"),
-        "InstanceMetadataTags": metadata.get("InstanceMetadataTags"),
-        "IamInstanceProfile": _profile_name(data.get("IamInstanceProfile") or {}),
-        "TagSpecifications": sorted(
-            (
-                str(one.get("ResourceType") or ""),
-                sorted(
-                    (str(tag.get("Key") or ""), str(tag.get("Value") or ""))
-                    for tag in one.get("Tags") or []
-                ),
-            )
-            for one in specifications
-        ),
-    }
 
 
 def _delete_versions(ec2: EC2Client, name: str, numbers: list[str]) -> None:
@@ -1017,68 +969,6 @@ def default_image(ec2: EC2Client, service: Service) -> str:
     return str(data.get("ImageId") or "")
 
 
-class _NoUsableImage:
-    """設定ファイルの ImageId が指す、使える AMI が無いことを表す印。"""
-
-    def __repr__(self) -> str:
-        return "NO_USABLE_IMAGE"
-
-
-# config_pairs が ImageId の組に入れる印。テンプレートのどの値とも一致しない
-NO_USABLE_IMAGE: Final[Any] = _NoUsableImage()
-
-
-def configured_image(ec2: EC2Client, values: Conf) -> str | None:
-    """設定ファイルの ImageId が指す、使える AMI の ID（aws.image_id）。
-
-    ImageId が書かれていないときも None になる。config_pairs に渡す。
-    """
-    value = values.launch_template.ImageId
-    return None if value is conf.UNSET else aws.image_id(ec2, value)
-
-
-def volume_size(data: Mapping[str, Any]) -> Any:
-    """projection の BlockDeviceMappings を、VolumeSize の値として見せる形にする。
-
-    無ければ None、大きさの入った 1 つならその大きさ。temt が入れるのはその形だけで、
-    手で足されたものなど、ほかの形は大きさを , でつなぎ（大きさが無ければ
-    change.shown と同じく -）、設定ファイルのどの値とも一致しない文字列にする。
-    """
-    mappings: Sequence[tuple[str, Any]] = data["BlockDeviceMappings"]
-    if not mappings:
-        return None
-    if len(mappings) == 1 and isinstance(mappings[0][1], int):
-        return mappings[0][1]
-    return ",".join(change.shown(size) for _, size in mappings)
-
-
-def config_pairs(
-    values: Conf, data: Mapping[str, Any], image_id: str | None
-) -> list[tuple[str, Any, Any]]:
-    """設定ファイルから来る 4 つの項目の、設定ファイルの値とテンプレートの値の組。
-
-    data は projection で取り出した既定バージョンの内容。ImageId と SubnetId は、
-    設定ファイルに書かれていなければ UNSET になる。InstanceType は、書かれていなければ
-    既定の値になる。VolumeSize は、書かれていなければ None で、
-    テンプレートにも入っていないことと比べる。image_id は configured_image の値。ImageId の
-    組には、テンプレートと比べられるよう、名前ではなくこの ID を入れる。書かれて
-    いるのに使える AMI が見つからなければ、どの値とも一致しない NO_USABLE_IMAGE を
-    入れる。ID で書かれていて、テンプレートと同じ値でも、揃っていないものとする。
-    """
-    interfaces: Sequence[Mapping[str, Any]] = data["NetworkInterfaces"]
-    interface: Mapping[str, Any] = interfaces[0] if interfaces else {}
-    template = values.launch_template
-    wanted_image = image_id
-    if image_id is None:
-        wanted_image = conf.UNSET if template.ImageId is conf.UNSET else NO_USABLE_IMAGE
-    return [
-        ("ImageId", wanted_image, data["ImageId"]),
-        ("InstanceType", template.InstanceType, data["InstanceType"]),
-        ("SubnetId", template.SubnetId, interface.get("SubnetId")),
-        ("VolumeSize", template.VolumeSize, volume_size(data)),
-    ]
-
-
 def point_image(ec2: EC2Client, service: Service, image_id: str) -> None:
     """起動テンプレートの既定バージョンの ImageId だけを替える。
 
@@ -1102,43 +992,17 @@ def point_image(ec2: EC2Client, service: Service, image_id: str) -> None:
     _delete_versions(ec2, name, others)
 
 
-def _items(data: Mapping[str, Any]) -> dict[str, Any]:
-    """projection を、項目の位置から値への対応に開く。
-
-    ネットワークインターフェースは 1 つずつ NetworkInterfaces.<番号>.<項目> に、
-    TagSpecifications は種類ごとに TagSpecifications.<種類> に開き、タグを
-    <キー>=<値> の , 区切りにする。BlockDeviceMappings は、設定ファイルの項目名
-    VolumeSize で大きさだけを出す。デバイス名は AMI が決めるもので、それだけが
-    違えば、開いても違いは見えない。
-    """
-    items: dict[str, Any] = {}
-    shown = projection(data)
-    for key, value in shown.items():
-        if key == "BlockDeviceMappings":
-            items["VolumeSize"] = volume_size(shown)
-        elif key == "NetworkInterfaces":
-            for number, interface in enumerate(value):
-                for name, one in interface.items():
-                    items[f"{key}.{number}.{name}"] = one
-        elif key == "TagSpecifications":
-            for resource_type, pairs in value:
-                items[f"{key}.{resource_type}"] = ",".join(f"{k}={v}" for k, v in pairs)
-        else:
-            items[key] = value
-    return items
-
-
 @dataclass(frozen=True)
 class TemplateDiff:
     """起動テンプレートの差分。
 
-    wanted は揃える中身。current は既定バージョンの中身で、テンプレートが無ければ
-    None で、作る。number は既定バージョンの番号、versions は今あるバージョンの番号。
-    tags は、テンプレート自身に足すタグで、template_id はそのテンプレートの ID。
+    wanted は揃える中身（ltbuild.build）。current は既定バージョンの中身で、テンプレートが
+    無ければ None で、作る。number は既定バージョンの番号、versions は今あるバージョンの
+    番号。tags は、テンプレート自身に足すタグで、template_id はそのテンプレートの ID。
     """
 
     name: str
-    wanted: RequestLaunchTemplateDataTypeDef
+    wanted: Mapping[str, Any]
     current: Mapping[str, Any] | None = None
     number: int | None = None
     versions: tuple[int, ...] = ()
@@ -1147,8 +1011,10 @@ class TemplateDiff:
 
     @property
     def changed(self) -> bool:
-        """新しいバージョンを作るか。"""
-        return self.current is None or projection(self.current) != projection(self.wanted)
+        """新しいバージョンを作るか。中身全体を、AWS が読み出しで変える形を揃えて比べる。"""
+        return self.current is None or not ltdata.same(
+            ltdata.normalize(self.current), ltdata.normalize(self.wanted)
+        )
 
     @property
     def leftovers(self) -> tuple[int, ...]:
@@ -1176,48 +1042,93 @@ class TemplateDiff:
                     Change(UPDATE, LAUNCH_TEMPLATE, self.name, f"delete other versions: {numbers}")
                 )
             return found
-        now, wanted = _items(self.current), _items(self.wanted)
         items = [
-            Change(
-                UPDATE, LAUNCH_TEMPLATE, self.name, f"{key}: {change.moved(now.get(key), value)}"
-            )
-            for key, value in [*wanted.items(), *((k, None) for k in now if k not in wanted)]
-            if now.get(key) != value
+            Change(UPDATE, LAUNCH_TEMPLATE, self.name, detail, body)
+            for detail, body in template_changes(self.current, self.wanted)
         ]
-        # 開いた項目では違いが見えないとき（同じ種類の TagSpecifications が 2 つあるなど）も、
-        # 新しいバージョンを作ることは出す
+        # 開いた項目では違いが見えないときも、新しいバージョンを作ることは出す
         return found + (items or [Change(UPDATE, LAUNCH_TEMPLATE, self.name, "new version")])
 
 
-def detect_template(
-    ec2: EC2Client,
-    service: Service,
-    values: Conf,
-    image_id: str,
-    subnet_id: str,
-    group_id: str | None,
-    *,
-    ipv6: bool,
-    root_device: str | None = None,
-) -> TemplateDiff:
+def template_differ(current: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
+    """2 つの中身で違う項目の位置。bake が、揃っていない項目を挙げるのに使う。"""
+    now = ltdata.leaves(ltdata.normalize(current))
+    then = ltdata.leaves(ltdata.normalize(wanted))
+    return [
+        key
+        for key in [*then, *(key for key in now if key not in then)]
+        if not ltdata.same(now.get(key), then.get(key))
+    ]
+
+
+def _tables(value: Any) -> bool:
+    """値がテーブルの配列か。対応づけのキーの無いもの（LicenseSpecifications など）。"""
+    return isinstance(value, list) and bool(value) and all(isinstance(one, dict) for one in value)
+
+
+def template_changes(
+    current: Mapping[str, Any], wanted: Mapping[str, Any]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """2 つの中身の違いを、項目の位置ごとに、違いの文と続く行の組で返す。
+
+    位置は ltdata.leaves の書き方。UserData は base64 を戻した文書を unified diff で
+    続く行に出し、文字として読めなければバイト数だけを出す。対応づけのキーの無い
+    テーブルの配列は、要素を中身全体で比べ、消える要素と足される要素を 1 つ 1 行で出す。
+    """
+    now = ltdata.leaves(ltdata.normalize(current))
+    then = ltdata.leaves(ltdata.normalize(wanted))
+    found: list[tuple[str, tuple[str, ...]]] = []
+    for key in [*then, *(key for key in now if key not in then)]:
+        before, after = now.get(key), then.get(key)
+        if ltdata.same(before, after):
+            continue
+        if key == ltdata.USER_DATA:
+            found.append(_user_data_change(key, before, after))
+            continue
+        if _tables(before) or _tables(after):
+            old = before if isinstance(before, list) else []
+            new = after if isinstance(after, list) else []
+            found += [
+                (f"{key}: {ltdata.shown(one)}{ARROW}-", ())
+                for one in old
+                if not any(ltdata.same(one, other) for other in new)
+            ]
+            found += [
+                (f"{key}: -{ARROW}{ltdata.shown(one)}", ())
+                for one in new
+                if not any(ltdata.same(one, other) for other in old)
+            ]
+            continue
+        found.append((f"{key}: {ltdata.shown(before)}{ARROW}{ltdata.shown(after)}", ()))
+    return found
+
+
+def _user_data_change(key: str, before: Any, after: Any) -> tuple[str, tuple[str, ...]]:
+    """UserData の違い。両側とも（無い側は空の文書として）文字なら unified diff にする。"""
+    lines = [[] if one is None else ltdata.user_data_lines(one) for one in (before, after)]
+    if lines[0] is not None and lines[1] is not None:
+        body = change.lines_diff(lines[0], lines[1])
+        return f"{key}: {_presence(before)}{ARROW}{_presence(after)}", body
+    sizes = [
+        f"{ltdata.user_data_size(one)} bytes" if one is not None else "-" for one in (before, after)
+    ]
+    return f"{key}: {sizes[0]}{ARROW}{sizes[1]}", ()
+
+
+def _presence(value: Any) -> str:
+    """UserData の有無の表示。中身は続く行に出す。"""
+    return "-" if value is None else "(text)"
+
+
+def detect_template(ec2: EC2Client, service: Service, wanted: Mapping[str, Any]) -> TemplateDiff:
     """起動テンプレートの差分を検出する。
 
-    既定バージョンの中身のうち temt が管理する項目と、テンプレート自身のタグを比べる。
-    group_id が None なら、セキュリティグループはまだ無く、NEW_GROUP で比べる。
-    root_device は template_data に渡す。
-    バージョンの中の TagSpecifications は起動したインスタンスに付くもので、
-    テンプレート自身のタグとは別である。
+    wanted は ltbuild.build が組み立てた中身で、temt のセキュリティグループがまだ無ければ
+    その ID は ltbuild.NEW_GROUP になっている。既定バージョンの中身全体と、テンプレート
+    自身のタグを比べる。バージョンの中の TagSpecifications は起動したインスタンスに
+    付くもので、テンプレート自身のタグとは別である。
     """
     name = service.launch_template
-    wanted = template_data(
-        service,
-        values,
-        image_id,
-        subnet_id,
-        group_id or NEW_GROUP,
-        ipv6=ipv6,
-        root_device=root_device,
-    )
     try:
         versions = [
             one
@@ -1246,27 +1157,19 @@ def detect_template(
     )
 
 
-def _with_group(
-    data: RequestLaunchTemplateDataTypeDef, group_id: str
-) -> RequestLaunchTemplateDataTypeDef:
-    """中身の NEW_GROUP を、作ったセキュリティグループの ID に置き換える。"""
-    interfaces = [
-        {**one, "Groups": [group_id if g == NEW_GROUP else g for g in one.get("Groups", [])]}
-        for one in data.get("NetworkInterfaces", [])
-    ]
-    return cast("RequestLaunchTemplateDataTypeDef", {**data, "NetworkInterfaces": interfaces})
-
-
-def template(ec2: EC2Client, service: Service, found: TemplateDiff, group_id: str) -> None:
+def template(
+    ec2: EC2Client, service: Service, found: TemplateDiff, group_id: str | None, *, managed: bool
+) -> None:
     """起動テンプレートを、検出した差分で揃える。違いがあれば新しいバージョンを作り、
     既定にする。
 
     新しいバージョンを既定にしたら、それ以外のバージョンをすべて消す。作らないときも、
-    既定以外のバージョンが残っていれば消す。group_id はセキュリティグループの ID で、
-    検出したときにまだ無く NEW_GROUP で比べていれば、それをこの ID に置き換えて書く。
+    既定以外のバージョンが残っていれば消す。group_id は揃えた temt のセキュリティ
+    グループの ID で、検出したときにまだ無く NEW_GROUP で比べていれば、それをこの ID に
+    置き換えて書く。managed は、temt のインスタンスプロファイルを直前に揃えたか。
     """
     name = found.name
-    wanted = _with_group(found.wanted, group_id)
+    wanted: Any = ltbuild.with_group(found.wanted, group_id) if group_id else dict(found.wanted)
     if found.current is None:
         made = ec2.create_launch_template(
             LaunchTemplateName=name,
@@ -1280,7 +1183,7 @@ def template(ec2: EC2Client, service: Service, found: TemplateDiff, group_id: st
         )
         number = _version(made["LaunchTemplate"].get("DefaultVersionNumber"), name)
         msg.info(f"launch template {name}: {CREATED} (version {number})")
-        _warnings(made, name, profile_aligned=True)
+        _warnings(made, name, profile_aligned=managed)
         return
     if found.tags:
         _ = ec2.create_tags(
@@ -1297,266 +1200,90 @@ def template(ec2: EC2Client, service: Service, found: TemplateDiff, group_id: st
     number = _version(added.get("LaunchTemplateVersion", {}).get("VersionNumber"), name)
     _ = ec2.modify_launch_template(LaunchTemplateName=name, DefaultVersion=str(number))
     msg.info(f"launch template {name}: {UPDATED} (version {number})")
-    _warnings(added, name, profile_aligned=True)
+    _warnings(added, name, profile_aligned=managed)
     # 消す相手は、検出したときに控えたもの
     _delete_versions(ec2, name, [str(one) for one in found.versions if one != number])
 
 
-def _same_association(found: Mapping[str, Any], wanted: Mapping[str, Any]) -> bool:
-    """関連付けの中身が wanted と同じか。ドキュメント、対象、commands を比べる。
-
-    AWS は対象の値と commands の並びを保つので、並びのまま比べる。
-    """
-    parameters: Mapping[str, Any] = found.get("Parameters") or {}
-    return (
-        found.get("Name") == wanted["Name"]
-        and list(found.get("Targets") or []) == wanted["Targets"]
-        and list(parameters.get(sshd.COMMANDS) or []) == wanted["Parameters"][sshd.COMMANDS]
-    )
-
-
-def _start_association(ssm: SSMClient, name: str, association_id: str) -> None:
-    """関連付けの実行を求める。断られたら警告して続ける。
-
-    作っただけでは、動いているインスタンスで実行されないことがある。求められなくても、
-    次の起動では実行される。
-    """
-    try:
-        _ = ssm.start_associations_once(AssociationIds=[association_id])
-    except ClientError as e:
-        msg.warn(
-            f"association {name}: cannot ask to run it now: {table.aws_error(e)}; "
-            f"it runs when an instance starts next time"
-        )
-
-
 @dataclass(frozen=True)
-class AssociationDiff:
-    """関連付け <名前>-sshd の差分。
-
-    wanted は揃える中身（ドキュメント、対象、commands）。association_id と current は、
-    名前で見つけた関連付けの ID と中身で、無ければ current は None で、作る。tags は、
-    あるときにそれへ足すタグ。
-    """
-
-    name: str
-    ports: tuple[int, ...]
-    wanted: Mapping[str, Any]
-    association_id: str = ""
-    current: Mapping[str, Any] | None = None
-    tags: tuple[tuple[str, str], ...] = ()
-
-    @property
-    def changed(self) -> bool:
-        """ある関連付けの中身を更新するか。"""
-        return self.current is not None and not _same_association(self.current, self.wanted)
-
-    def changes(self) -> list[Change]:
-        """diff に出す形にする。スクリプトの違いを続く行に出す。"""
-        ports = ",".join(str(port) for port in self.ports)
-        if self.current is None:
-            return [Change(ADD, ASSOCIATION, self.name, f"SshdPorts: {ports}")]
-        found: list[Change] = []
-        if self.changed:
-            now, wanted = self.current, self.wanted
-            if now.get("Name") != wanted["Name"]:
-                detail = f"document: {change.moved(now.get('Name'), wanted['Name'])}"
-                found.append(Change(UPDATE, ASSOCIATION, self.name, detail))
-            if list(now.get("Targets") or []) != wanted["Targets"]:
-                detail = (
-                    f"targets: {change.moved(list(now.get('Targets') or []), wanted['Targets'])}"
-                )
-                found.append(Change(UPDATE, ASSOCIATION, self.name, detail))
-            before = list((now.get("Parameters") or {}).get(sshd.COMMANDS) or [])
-            after = wanted["Parameters"][sshd.COMMANDS]
-            if before != after:
-                shown = sshd.ports(before)
-                if shown is not None and shown != list(self.ports):
-                    current = ",".join(str(port) for port in shown)
-                    detail = f"SshdPorts: {current}{ARROW}{ports}"
-                else:
-                    detail = "script"
-                body = change.lines_diff(before, after)
-                found.append(Change(UPDATE, ASSOCIATION, self.name, detail, body))
-        if self.tags:
-            found.append(Change(UPDATE, ASSOCIATION, self.name, change.tags(self.tags)))
-        return found
-
-
-def detect_association(ssm: SSMClient, service: Service, values: Conf) -> AssociationDiff:
-    """関連付け <名前>-sshd と SshdPorts の差分を検出する。
-
-    関連付けは名前 <名前>-sshd で探す。ふつうは 1 つしか無く、2 つ以上あれば最初の
-    1 つを揃える（sshd.find）。あれば、その中身とタグを読む。
-    """
-    name = service.sshd_association
-    wanted = {
-        "Name": sshd.DOCUMENT,
-        "Targets": sshd.targets(service),
-        "Parameters": {sshd.COMMANDS: sshd.commands(values.SshdPorts, service.svc)},
-    }
-    found = AssociationDiff(name, tuple(values.SshdPorts), wanted)
-    one = sshd.find(ssm, service)
-    if one is None:
-        return found
-    association_id = one.association_id
-    current = (
-        ssm.describe_association(AssociationId=association_id).get("AssociationDescription") or {}
-    )
-    listed = ssm.list_tags_for_resource(ResourceType="Association", ResourceId=association_id)
-    return replace(
-        found,
-        association_id=association_id,
-        current=current,
-        tags=tuple(_missing(listed.get("TagList"), _mark(service))),
-    )
-
-
-def association(
-    ssm: SSMClient,
-    service: Service,
-    values: Conf,
-    found: AssociationDiff,
-) -> None:
-    """関連付け <名前>-sshd を、検出した差分で揃える。
-
-    作ったときと中身を更新したときだけ、実行を求める。中身を更新したときと、[22] 以外の
-    ポートで作ったときは、いつ効くかを 1 行添える。既定の [22] で作ったときと、タグだけを
-    直したときは添えない。
-    """
-    name = found.name
-    wanted = found.wanted
-    if found.current is None:
-        made = ssm.create_association(
-            Name=wanted["Name"],
-            AssociationName=name,
-            Targets=wanted["Targets"],
-            Parameters=wanted["Parameters"],
-            Tags=[{"Key": key, "Value": value} for key, value in _mark(service)],
-        )
-        association_id = field(made.get("AssociationDescription") or {}, "AssociationId")
-        state = CREATED
-        # 既定の [22] で作ったときは、ポートは変わらず、焼く必要も無い
-        noted = values.SshdPorts != [conf.SSHD_PORT]
-        run = True
-    else:
-        association_id = found.association_id
-        if found.changed:
-            # update-association は、渡さない任意の項目を既定に戻すので、temt が決める
-            # 項目をすべて渡す。新しい版ができ、対象のインスタンスで実行される
-            _ = ssm.update_association(
-                AssociationId=association_id,
-                Name=wanted["Name"],
-                AssociationName=name,
-                Targets=wanted["Targets"],
-                Parameters=wanted["Parameters"],
-            )
-        if found.tags:
-            _ = ssm.add_tags_to_resource(
-                ResourceType="Association",
-                ResourceId=association_id,
-                Tags=[{"Key": key, "Value": value} for key, value in found.tags],
-            )
-        state = UPDATED if found.changed or found.tags else UNCHANGED
-        noted = run = found.changed
-    _report(f"association {name}", state)
-    if noted:
-        ports = ",".join(str(port) for port in values.SshdPorts)
-        msg.info(
-            f"sshd ports {ports} take effect on a running instance shortly; "
-            f"run 'temt bake --svc {service.svc}' to keep them in the AMI"
-        )
-    if run:
-        _start_association(ssm, name, association_id)
-
-
-@dataclass(frozen=True)
-class Found:
-    """手順 5 の 5 つのリソースとインラインポリシー temt-<ポリシー名> の差分。"""
+class IamDiff:
+    """temt が管理するインスタンスロールとインスタンスプロファイル <名前> の差分。"""
 
     role: RoleDiff
     policies: tuple[PolicyDiff, ...]
+    managed: ManagedDiff
     profile: ProfileDiff
-    group: GroupDiff
-    template: TemplateDiff
-    association: AssociationDiff
 
     def changes(self) -> list[Change]:
         """diff に出す形にする。揃える順に並べる。"""
         found = self.role.changes()
         for one in self.policies:
             found += one.changes()
-        return (
-            found
-            + self.profile.changes()
-            + self.group.changes()
-            + self.template.changes()
-            + self.association.changes()
-        )
+        return found + self.managed.changes() + self.profile.changes()
+
+
+@dataclass(frozen=True)
+class Found:
+    """手順 5 のリソースの差分。
+
+    iam は、IamInstanceProfile が temt のものを指すときだけある。group は、起動
+    テンプレートが temt のセキュリティグループを使うときだけある。
+    """
+
+    iam: IamDiff | None
+    group: GroupDiff | None
+    template: TemplateDiff
+
+    def changes(self) -> list[Change]:
+        """diff に出す形にする。揃える順に並べる。"""
+        found = [] if self.iam is None else self.iam.changes()
+        if self.group is not None:
+            found += self.group.changes()
+        return found + self.template.changes()
 
 
 def detect(
     ec2: EC2Client,
     iam: IAMClient,
-    ssm: SSMClient,
     service: Service,
     values: Conf,
-    image_id: str,
-    subnet_id: str,
-    vpc_id: str,
+    built: ltbuild.Built,
     *,
-    ipv6: bool,
-    root_device: str | None = None,
-    policies: Mapping[str, Mapping[str, Any]],
+    policies: Mapping[str, Mapping[str, Any]] | None,
 ) -> Found:
-    """5 つのリソースとインラインポリシー temt-<ポリシー名> の差分を、揃える順に検出する。
+    """リソースの差分を、揃える順に検出する。
 
-    image_id、subnet_id、vpc_id、ipv6、root_device は、手順 4 で設定ファイルから解いた
-    値である。
-    policies は、手順 4 で検査した、インラインポリシーの名前から中身への対応。セキュリティ
-    グループがまだ無ければ、起動テンプレートは NEW_GROUP で比べる。
+    built は手順 4 で組み立てた起動テンプレートの中身。policies は、手順 4 で検査した、
+    インラインポリシーの名前から中身への対応で、temt のインスタンスプロファイルを
+    使わないときは None。そのときインスタンスロールとインスタンスプロファイルは見ない。
+    セキュリティグループは、起動テンプレートがそれを使うときだけ見る。
     """
-    role = detect_role(iam, service)
-    policies_found = tuple(detect_role_policies(iam, service, policies))
-    profile = detect_instance_profile(iam, service)
-    group = detect_security_group(ec2, service, values, vpc_id)
-    return Found(
-        role=role,
-        policies=policies_found,
-        profile=profile,
-        group=group,
-        template=detect_template(
-            ec2,
-            service,
-            values,
-            image_id,
-            subnet_id,
-            group.group_id,
-            ipv6=ipv6,
-            root_device=root_device,
-        ),
-        association=detect_association(ssm, service, values),
-    )
+    iam_found = None
+    if policies is not None:
+        iam_found = IamDiff(
+            detect_role(iam, service),
+            tuple(detect_role_policies(iam, service, policies)),
+            detect_managed_policies(iam, service, values.role.ManagedPolicyArns),
+            detect_instance_profile(iam, service),
+        )
+    group = None
+    if built.uses_group and built.vpc_id is not None:
+        group = detect_security_group(ec2, service, values, built.vpc_id)
+    return Found(iam_found, group, detect_template(ec2, service, built.data))
 
 
-def update(
-    ec2: EC2Client,
-    iam: IAMClient,
-    ssm: SSMClient,
-    service: Service,
-    values: Conf,
-    found: Found,
-) -> None:
-    """detect が検出した差分で、5 つのリソースとインラインポリシーを順に揃える。
+def update(ec2: EC2Client, iam: IAMClient, service: Service, found: Found) -> None:
+    """detect が検出した差分で、リソースを順に揃える。
 
-    起動テンプレートには、揃えたセキュリティグループの ID を入れる。
+    起動テンプレートには、揃えた temt のセキュリティグループの ID を入れる。
     """
-    role(iam, service, found.role)
-    role_policies(iam, service, found.policies)
-    instance_profile(iam, service, found.profile)
-    group_id = security_group(ec2, service, found.group)
-    template(ec2, service, found.template, group_id)
-    association(ssm, service, values, found.association)
+    if found.iam is not None:
+        role(iam, service, found.iam.role)
+        role_policies(iam, service, found.iam.policies)
+        managed_policies(iam, service, found.iam.managed)
+        instance_profile(iam, service, found.iam.profile)
+    group_id = None if found.group is None else security_group(ec2, service, found.group)
+    template(ec2, service, found.template, group_id, managed=found.iam is not None)
 
 
 def delete_template(ec2: EC2Client, service: Service) -> None:
@@ -1570,25 +1297,6 @@ def delete_template(ec2: EC2Client, service: Service) -> None:
         msg.info(f"launch template {name}: {ABSENT}")
         return
     msg.info(f"launch template {name}: {DELETED}")
-
-
-def delete_associations(ssm: SSMClient, service: Service) -> None:
-    """名前が <名前>-sshd の関連付けを、すべて消す。無ければ absent と知らせる。"""
-    name = service.sshd_association
-    found = sshd.named(ssm, service)
-    if not found:
-        msg.info(f"association {name}: {ABSENT}")
-        return
-    for association_id, _ in found:
-        try:
-            _ = ssm.delete_association(AssociationId=association_id)
-        except ClientError as e:
-            # 読んでから消すまでに消えていれば、消えていればよい
-            if error_code(e) != NO_SUCH_ASSOCIATION:
-                raise
-            msg.info(f"association {name} ({association_id}): {ABSENT}")
-            continue
-        msg.info(f"association {name} ({association_id}): {DELETED}")
 
 
 def delete_parameters(ssm: SSMClient, service: Service) -> None:
@@ -1655,10 +1363,33 @@ def delete_security_groups(ec2: EC2Client, service: Service) -> None:
         _delete_group(ec2, service, group_id)
 
 
-def delete_instance_profile(iam: IAMClient, service: Service) -> None:
-    """インスタンスプロファイルを消す。無ければ absent と知らせる。
+# temt のタグが無いか別のサービスのもので、消さなかったときの表示
+LEFT = "left (not tagged temt:service={svc})"
 
-    入れたロール <名前> だけを外す。他のロールが入っていれば、それを挙げて終了する。
+
+def _ours(tags: Sequence[Mapping[str, Any]] | None, service: Service) -> bool:
+    """temt:service=<svc> のタグが付いているか。消してよいのはそれだけである。"""
+    return aws.tag({"Tags": tags or []}, aws.TAG_SERVICE) == service.svc
+
+
+def profile_roles(iam: IAMClient, service: Service) -> list[str]:
+    """インスタンスプロファイル <名前> に入っているロール。無ければ空。"""
+    try:
+        found = iam.get_instance_profile(InstanceProfileName=service.name)
+    except ClientError as e:
+        if error_code(e) != NO_SUCH_ENTITY:
+            raise
+        return []
+    return [field(item, "RoleName") for item in found["InstanceProfile"]["Roles"]]
+
+
+def delete_instance_profile(iam: IAMClient, service: Service, *, command: str = "destroy") -> bool:
+    """インスタンスプロファイル <名前> を消す。無ければ absent と知らせる。
+
+    temt:service=<svc> が付いているものだけを消す。取り込んだ元のインスタンスプロファイル
+    など、ほかの名前のものは、そもそも対象にならない。入れたロール <名前> だけを外す。
+    他のロールが入っていれば、それを挙げて終了する。command はやり直すよう告げる
+    コマンド。消したか、もともと無ければ True、タグが違って残せば False を返す。
     """
     try:
         found = iam.get_instance_profile(InstanceProfileName=service.name)
@@ -1666,13 +1397,16 @@ def delete_instance_profile(iam: IAMClient, service: Service) -> None:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
         msg.info(f"instance profile {service.name}: {ABSENT}")
-        return
+        return True
+    if not _ours(found["InstanceProfile"].get("Tags"), service):
+        msg.info(f"instance profile {service.name}: {LEFT.format(svc=service.svc)}")
+        return False
     roles = [field(item, "RoleName") for item in found["InstanceProfile"]["Roles"]]
     others = [name for name in roles if name != service.name]
     if others:
         raise TemtError(
             f"the instance profile {service.name} holds another role: {others[0]}; "
-            f"remove it by hand and run destroy again"
+            f"remove it by hand and run {command} again"
         )
     if service.name in roles:
         _ = iam.remove_role_from_instance_profile(
@@ -1687,10 +1421,11 @@ def delete_instance_profile(iam: IAMClient, service: Service) -> None:
             raise
         raise TemtError(
             f"cannot delete the instance profile {service.name}: {table.aws_error(e)}; "
-            "IAM may not show the role removed yet, so run destroy again; if this persists, "
+            f"IAM may not show the role removed yet, so run {command} again; if this persists, "
             "remove the role from it by hand"
         ) from None
     msg.info(f"instance profile {service.name}: {DELETED}")
+    return True
 
 
 def inline_policies(iam: IAMClient, service: Service) -> list[str]:
@@ -1707,51 +1442,65 @@ def inline_policies(iam: IAMClient, service: Service) -> list[str]:
         return []
 
 
-def _holding(iam: IAMClient, service: Service) -> list[str]:
-    """ロールを消せなくするもの。管理ポリシーと、ロールを入れた他のインスタンス
-    プロファイル。ロールが無ければ空。
+def other_profiles(iam: IAMClient, service: Service, *, own_gone: bool = True) -> list[str]:
+    """インスタンスロール <名前> を入れた、ほかのインスタンスプロファイル。
 
-    管理ポリシーは temt が付けないので、付いていれば手で付けたものである。
-    インスタンスプロファイル <名前> は、直前の delete_instance_profile が消している。
-    IAM の反映が遅れて一覧に残っても、ここでは数えない。
+    ロールが無ければ空。インスタンスプロファイル <名前> は、own_gone（直前に消したか、
+    もともと無い）なら数えない。IAM の反映が遅れて一覧に残ることがあるからである。
+    タグが違って残したときは数える。ロールを消せないので、何も外さずに止めるためである。
     """
     try:
-        policies = [
-            f"the managed policy {field(one, 'PolicyArn')}"
-            for page in iam.get_paginator("list_attached_role_policies").paginate(
-                RoleName=service.name
-            )
-            for one in page.get("AttachedPolicies", [])
-        ]
-        profiles = [
-            f"the instance profile {field(one, 'InstanceProfileName')}"
+        return [
+            field(one, "InstanceProfileName")
             for page in iam.get_paginator("list_instance_profiles_for_role").paginate(
                 RoleName=service.name
             )
             for one in page["InstanceProfiles"]
-            if one.get("InstanceProfileName") != service.name
+            if not own_gone or one.get("InstanceProfileName") != service.name
         ]
     except ClientError as e:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
         return []
-    return policies + profiles
 
 
-def delete_role(iam: IAMClient, service: Service) -> None:
-    """IAM ロールを消す。無ければ absent と知らせる。
+def delete_role(
+    iam: IAMClient, service: Service, *, command: str = "destroy", own_gone: bool = True
+) -> None:
+    """インスタンスロール <名前> を消す。無ければ absent と知らせる。
 
-    インラインポリシーは、temt-<ポリシー名> か手で付けたものかを問わず、すべて消す。
-    管理ポリシーか他のインスタンスプロファイルが付いていれば、何も消さずに、その旨を
-    告げて終了する。先にインラインポリシーを消すと、ロールが残るのに手で付けた
-    ポリシーだけが失われる。
+    temt:service=<svc> が付いているものだけを消す。別のインスタンスプロファイルにも
+    入っていれば、何も外さず消さずに終了する。管理ポリシーを外し（管理ポリシーそのものは
+    temt が作ったものではないので残る）、インラインポリシーは、temt-<ポリシー名> か手で
+    付けたものかを問わず、すべて消してから消す。IAM の DeleteRole は、どちらかが残って
+    いると DeleteConflict で断る。
     """
-    holding = _holding(iam, service)
-    if holding:
+    try:
+        found = iam.get_role(RoleName=service.name)["Role"]
+    except ClientError as e:
+        if error_code(e) != NO_SUCH_ENTITY:
+            raise
+        msg.info(f"role {service.name}: {ABSENT}")
+        return
+    if not _ours(found.get("Tags"), service):
+        msg.info(f"role {service.name}: {LEFT.format(svc=service.svc)}")
+        return
+    others = other_profiles(iam, service, own_gone=own_gone)
+    if others:
         raise TemtError(
-            f"the role {service.name} is still held by {', '.join(holding)}; "
-            f"detach or remove them by hand and run destroy again"
+            f"the role {service.name} is also in the instance profile {others[0]}; "
+            f"remove it from there by hand and run {command} again"
         )
+    _strip_role(iam, service, command)
+
+
+def _strip_role(iam: IAMClient, service: Service, command: str) -> None:
+    """インスタンスロール <名前> の管理ポリシーを外し、インラインポリシーを消してから、
+    ロールを消す。消してよいことは、呼ぶ側が確かめてある。
+    """
+    for arn in attached_policies(iam, service):
+        _ = iam.detach_role_policy(RoleName=service.name, PolicyArn=arn)
+        msg.info(f"role {service.name}: detached {arn}")
     for name in inline_policies(iam, service):
         try:
             _ = iam.delete_role_policy(RoleName=service.name, PolicyName=name)
@@ -1775,22 +1524,53 @@ def delete_role(iam: IAMClient, service: Service) -> None:
             raise
         raise TemtError(
             f"cannot delete the role {service.name}: {table.aws_error(e)}; if nothing is "
-            "attached to it, IAM may not show the change yet, so run destroy again; "
-            "otherwise detach it by hand and run destroy again"
+            f"attached to it, IAM may not show the change yet, so run {command} again; "
+            f"otherwise detach it by hand and run {command} again"
         ) from None
     msg.info(f"role {service.name}: {DELETED}")
 
 
+def delete_iam(iam: IAMClient, service: Service) -> None:
+    """destroy の、インスタンスプロファイルとインスタンスロール <名前> を消すところ。
+
+    どちらも temt:service=<svc> が付いているものだけを消す。インスタンスロールが
+    ほかのインスタンスプロファイルにも入っていれば、何も外さず消さずに、インスタンス
+    プロファイルも消さずに止める。タグが違って残したインスタンスプロファイル <名前> に
+    入っているときも、ロールに手を付けずに止める。
+    """
+    tags = read_tags(iam, "role", service)
+    ours = tags is not None and _ours(tags, service)
+    profiles = other_profiles(iam, service, own_gone=False) if ours else []
+    others = [name for name in profiles if name != service.name]
+    if others:
+        raise TemtError(
+            f"the role {service.name} is also in the instance profile {others[0]}; "
+            f"remove it from there by hand and run destroy again"
+        )
+    gone = delete_instance_profile(iam, service)
+    if tags is None:
+        msg.info(f"role {service.name}: {ABSENT}")
+        return
+    if not ours:
+        msg.info(f"role {service.name}: {LEFT.format(svc=service.svc)}")
+        return
+    if not gone and service.name in profiles:
+        raise TemtError(
+            f"the role {service.name} is also in the instance profile {service.name}, which "
+            f"is left as it is not tagged {aws.TAG_SERVICE}={service.svc}; remove the role "
+            f"from it by hand and run destroy again"
+        )
+    _strip_role(iam, service, "destroy")
+
+
 def remove(ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service) -> None:
-    """起動テンプレート、関連付け、/<名前> の下の SSM パラメータ、セキュリティグループ、
+    """起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティグループ、
     インスタンスプロファイル、IAM ロールを、この順に消す。
 
     無いものは飛ばして absent と知らせ、エラーにしない。途中で失敗すればそこで止まる
     ので、もう一度実行すれば、消えたものを飛ばして続きから進む。
     """
     delete_template(ec2, service)
-    delete_associations(ssm, service)
     delete_parameters(ssm, service)
     delete_security_groups(ec2, service)
-    delete_instance_profile(iam, service)
-    delete_role(iam, service)
+    delete_iam(iam, service)

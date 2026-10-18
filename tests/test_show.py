@@ -4,14 +4,15 @@
 test_status.py が確かめる。
 """
 
+import base64
+import tomllib
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from conftest import Stubs
 
-from temt import cli, resources, show
-from temt.conf import Conf, LaunchTemplate
+from temt import cli, show
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -46,14 +47,32 @@ SERVICE_IMAGES = {
         {"Name": "state", "Values": ["available"]},
     ],
 }
-
-VALUES = Conf(launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET))
+# temt が付けるタグ
+MARKS = [{"Key": "Name", "Value": NAME}, {"Key": "temt:service", "Value": "dev-main"}]
 
 
 def data(**changes: Any) -> dict[str, Any]:
-    """apply が入れた起動テンプレートの設定。AWS はこの形で返す。"""
+    """apply が入れた起動テンプレートの中身。AWS はこの形で返す。changes で項目を替える。"""
     return {
-        **resources.template_data(Service("dev-main"), VALUES, IMAGE, SUBNET, GROUP, ipv6=True),
+        "ImageId": IMAGE,
+        "InstanceType": "t3.micro",
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "IamInstanceProfile": {"Name": NAME},
+        "NetworkInterfaces": [
+            {
+                "DeviceIndex": 0,
+                "SubnetId": SUBNET,
+                "AssociatePublicIpAddress": True,
+                "Groups": [GROUP],
+                "Ipv6AddressCount": 1,
+            }
+        ],
+        "MetadataOptions": {"HttpTokens": "required", "InstanceMetadataTags": "enabled"},
+        "CreditSpecification": {"CpuCredits": "unlimited"},
+        "TagSpecifications": [
+            {"ResourceType": kind, "Tags": MARKS}
+            for kind in ("instance", "volume", "network-interface")
+        ],
         **changes,
     }
 
@@ -67,6 +86,24 @@ def a_version(number: int = 1, *, default: bool = True, **changes: Any) -> dict[
         "CreateTime": WHEN,
         "LaunchTemplateData": data(**changes),
     }
+
+
+def section(out: str, head: str) -> list[str]:
+    """出力のうち、head で始まる行から、次の節の見出し（字下げの無い行）の前までの行。"""
+    lines = out.splitlines()
+    first = next(index for index, line in enumerate(lines) if line.startswith(head))
+    rest = lines[first + 1 :]
+    last = next(
+        (index for index, line in enumerate(rest) if line and not line.startswith(" ")),
+        len(rest),
+    )
+    return lines[first : first + 1 + last]
+
+
+def content(out: str) -> str:
+    """1 つめの節の、設定ファイルと同じ TOML の行。字下げを外し、つなげる。"""
+    lines = section(out, "launch template ")[2:]
+    return "".join(f"{line.removeprefix('  ')}\n" for line in lines)
 
 
 def versions(stubs: Stubs, *found: dict[str, Any]) -> None:
@@ -137,24 +174,44 @@ def test_it_shows_the_default_version(
     out, err = capsys.readouterr()
     # 表示はすべて標準出力に書く
     assert err == ""
+    tags = (
+        f'Tags = [{{ Key = "Name", Value = "{NAME}" }}, '
+        '{ Key = "temt:service", Value = "dev-main" }]'
+    )
     assert out == (
         f"launch template {TEMPLATE}:\n"
-        "  version:                3 (created 2026-09-20 18:00:00)\n"
-        f"  ImageId:                {IMAGE}\n"
-        "  InstanceType:           t3.micro\n"
-        "  VolumeSize:             (not set)\n"
-        f"  SubnetId:               {SUBNET} ({VPC})\n"
-        f"  security groups:        {GROUP}\n"
-        f"  instance profile:       {NAME}\n"
-        "  shutdown behavior:      terminate\n"
-        "  cpu credits:            unlimited\n"
-        "  public ipv4:            true\n"
-        "  ipv6 addresses:         1\n"
-        "  http tokens:            required\n"
-        "  metadata tags:          enabled\n"
-        f"  instance tags:          Name={NAME} temt:service=dev-main\n"
-        f"  network-interface tags: Name={NAME} temt:service=dev-main\n"
-        f"  volume tags:            Name={NAME} temt:service=dev-main\n"
+        "  version: 3 (created 2026-09-20 18:00:00)\n"
+        "  [launch-template]\n"
+        f'  ImageId = "{IMAGE}"\n'
+        '  InstanceType = "t3.micro"\n'
+        '  InstanceInitiatedShutdownBehavior = "terminate"\n'
+        f'  IamInstanceProfile = {{ Name = "{NAME}" }}\n'
+        "\n"
+        "  [[launch-template.NetworkInterfaces]]\n"
+        "  DeviceIndex = 0\n"
+        f'  SubnetId = "{SUBNET}"  # {VPC}\n'
+        "  AssociatePublicIpAddress = true\n"
+        f'  Groups = ["{GROUP}"]\n'
+        "  Ipv6AddressCount = 1\n"
+        "\n"
+        "  [launch-template.MetadataOptions]\n"
+        '  HttpTokens = "required"\n'
+        '  InstanceMetadataTags = "enabled"\n'
+        "\n"
+        "  [launch-template.CreditSpecification]\n"
+        '  CpuCredits = "unlimited"\n'
+        "\n"
+        "  [[launch-template.TagSpecifications]]\n"
+        '  ResourceType = "instance"\n'
+        f"  {tags}\n"
+        "\n"
+        "  [[launch-template.TagSpecifications]]\n"
+        '  ResourceType = "volume"\n'
+        f"  {tags}\n"
+        "\n"
+        "  [[launch-template.TagSpecifications]]\n"
+        '  ResourceType = "network-interface"\n'
+        f"  {tags}\n"
         f"image {IMAGE}:\n"
         f"  name:        {IMAGE_NAME}\n"
         f"  created:     {MADE_SHOWN}\n"
@@ -170,27 +227,96 @@ def test_it_shows_the_default_version(
     assert configured.conf_path.read_text(encoding="utf-8") == written
 
 
-def test_it_shows_no_ipv6_as_zero(
+def test_it_shows_the_content_in_the_form_of_the_config_file(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """IPv6 アドレスを付けないテンプレートは、0 と出す。"""
-    interface = {**data()["NetworkInterfaces"][0]}
-    del interface["Ipv6AddressCount"]
-    a_template(aws_stubs, a_version(1, NetworkInterfaces=[interface]))
+    """中身は、そのまま設定ファイルに写せる TOML で出す。読み戻せば、テンプレートの中身になる。
+
+    UserData は base64 のまま、ほかの値も型を保って出す。
+    """
+    user_data = base64.b64encode(b"#!/bin/sh\necho hi\n").decode()
+    mappings = [
+        {"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30, "DeleteOnTermination": True}},
+        {"DeviceName": "/dev/sdf", "Ebs": {"VolumeSize": 100, "VolumeType": "gp3"}},
+    ]
+    found = data(UserData=user_data, BlockDeviceMappings=mappings, KeyName="mine")
+    a_template(
+        aws_stubs, a_version(1, UserData=user_data, BlockDeviceMappings=mappings, KeyName="mine")
+    )
     show.template(configured)
     aws_stubs.done()
-    assert "  ipv6 addresses:         0" in capsys.readouterr().out.splitlines()
+    assert tomllib.loads(content(capsys.readouterr().out)) == {"launch-template": found}
 
 
-def test_it_shows_the_volume_size(
+def test_it_leaves_out_what_exists_only_when_read(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """VolumeSize を入れたテンプレートは、その大きさを出す。"""
-    mappings = [{"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}}]
-    a_template(aws_stubs, a_version(1, BlockDeviceMappings=mappings))
+    """読み出したときにだけある項目は、設定ファイルに書けないので出さない。"""
+    interface = {
+        **data()["NetworkInterfaces"][0],
+        "Ipv6Addresses": [{"Ipv6Address": "2001:db8::1", "IsPrimaryIpv6": True}],
+    }
+    a_template(
+        aws_stubs,
+        a_version(
+            1,
+            MetadataOptions={
+                "HttpTokens": "required",
+                "InstanceMetadataTags": "enabled",
+                "State": "applied",
+            },
+            NetworkInterfaces=[interface],
+        ),
+    )
     show.template(configured)
     aws_stubs.done()
-    assert "  VolumeSize:             30" in capsys.readouterr().out.splitlines()
+    shown = tomllib.loads(content(capsys.readouterr().out))["launch-template"]
+    assert shown["MetadataOptions"] == {"HttpTokens": "required", "InstanceMetadataTags": "enabled"}
+    assert shown["NetworkInterfaces"][0]["Ipv6Addresses"] == [{"Ipv6Address": "2001:db8::1"}]
+
+
+def test_it_shows_the_vpc_of_the_primary_interface_only(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """VPC を添えるのは、DeviceIndex が 0 の要素の SubnetId だけ。ほかの要素のサブネットは
+    引かない。"""
+    other = {"DeviceIndex": 1, "SubnetId": "subnet-00000000000000001"}
+    primary = data()["NetworkInterfaces"][0]
+    a_template(aws_stubs, a_version(1, NetworkInterfaces=[other, primary]))
+    show.template(configured)
+    aws_stubs.done()
+    lines = capsys.readouterr().out.splitlines()
+    assert '  SubnetId = "subnet-00000000000000001"' in lines
+    assert f'  SubnetId = "{SUBNET}"  # {VPC}' in lines
+    # 一覧の SubnetId も、DeviceIndex が 0 の要素のもの
+    assert lines[-1] == f"  1 * 2026-09-20 18:00:00 {IMAGE} t3.micro {SUBNET}"
+
+
+def test_it_shows_a_template_without_a_subnet(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SubnetId が無ければ、サブネットを引かない。一覧には (not set) と出す。"""
+    versions(aws_stubs, a_version(1, NetworkInterfaces=[{"DeviceIndex": 0, "Groups": [GROUP]}]))
+    image(aws_stubs)
+    service_images(aws_stubs, (IMAGE, MADE))
+    show.template(configured)
+    aws_stubs.done()
+    out = capsys.readouterr().out
+    assert "SubnetId" not in content(out)
+    assert out.splitlines()[-1] == f"  1 * 2026-09-20 18:00:00 {IMAGE} t3.micro (not set)"
+
+
+def test_it_does_not_look_up_a_subnet_id_of_another_form(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """サブネットの ID の形でない値は、引かずにそのまま出す。絞り込みの値は * を展開する。"""
+    interface = {**data()["NetworkInterfaces"][0], "SubnetId": "subnet-*"}
+    versions(aws_stubs, a_version(1, NetworkInterfaces=[interface]))
+    image(aws_stubs)
+    service_images(aws_stubs, (IMAGE, MADE))
+    show.template(configured)
+    aws_stubs.done()
+    assert '  SubnetId = "subnet-*"' in capsys.readouterr().out.splitlines()
 
 
 def test_it_shows_an_image_without_an_ebs_root_volume(
@@ -217,8 +343,7 @@ def test_it_shows_an_image_that_is_gone(
     service_images(aws_stubs, (NEWEST, LATER))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().out.splitlines()
-    assert lines[17:20] == [
+    assert section(capsys.readouterr().out, "image ") == [
         f"image {IMAGE}:",
         "  state:  (not found; it may have been deregistered)",
         f"  latest: {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) created {LATER_SHOWN}",
@@ -235,8 +360,7 @@ def test_it_marks_a_newer_image(
     service_images(aws_stubs, (IMAGE, MADE), (NEWEST, LATER))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().out.splitlines()
-    assert lines[22] == (
+    assert section(capsys.readouterr().out, "image ")[-1] == (
         f"  latest:      {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) "
         f"created {LATER_SHOWN}, newer"
     )
@@ -251,13 +375,16 @@ def test_it_shows_no_ami_of_the_service(
     service_images(aws_stubs)
     show.template(configured)
     aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[22] == "  latest:      none (temt:service=dev-main)"
+    assert (
+        section(capsys.readouterr().out, "image ")[-1]
+        == "  latest:      none (temt:service=dev-main)"
+    )
 
 
 def test_it_lists_every_version(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """一覧は番号の順に並べ、既定バージョンに印を付ける。"""
+    """一覧は番号の順に並べ、既定バージョンに印を付ける。中身を出すのは既定バージョンだけ。"""
     versions(
         aws_stubs,
         a_version(2),
@@ -268,12 +395,14 @@ def test_it_lists_every_version(
     service_images(aws_stubs, (IMAGE, MADE))
     show.template(configured)
     aws_stubs.done()
-    lines = capsys.readouterr().out.splitlines()
-    assert lines[23:] == [
+    out = capsys.readouterr().out
+    assert section(out, "versions ") == [
         "versions (* is the default):",
         f"  1   2026-09-20 18:00:00 {NEWEST} t3.small {SUBNET}",
         f"  2 * 2026-09-20 18:00:00 {IMAGE} t3.micro {SUBNET}",
     ]
+    assert "  version: 2 (created 2026-09-20 18:00:00)" in out.splitlines()
+    assert NEWEST not in content(out)
 
 
 def test_it_shows_a_subnet_that_is_gone(
@@ -286,10 +415,7 @@ def test_it_shows_a_subnet_that_is_gone(
     service_images(aws_stubs, (IMAGE, MADE))
     show.template(configured)
     aws_stubs.done()
-    assert (
-        capsys.readouterr().out.splitlines()[5]
-        == f"  SubnetId:               {SUBNET} (no such subnet)"
-    )
+    assert f'  SubnetId = "{SUBNET}"  # (no such subnet)' in capsys.readouterr().out.splitlines()
 
 
 def test_it_asks_for_apply_without_the_launch_template(

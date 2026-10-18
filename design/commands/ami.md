@@ -169,8 +169,9 @@ service.
    volume's `DeleteOnTermination` true ([Creating](../topics/ami.md#creating)).
 5. Wait until `available`, with no deadline, as `bake` does. Errors such as an
    unusable KMS key of an encrypted EBS are shown as AWS returned them, as in `bake`.
-6. Create the config file. If one appeared in the meantime, stop without overwriting
-   it: it is written only when new.
+6. Create the config file, headed `# Written by temt ami import. Edit and run apply to
+   update.`. If one appeared in the meantime, stop without overwriting it: it is
+   written only when new.
 7. Tell the user to run `apply`, which creates the launch template.
 
 The AMI's name and tags are those of `bake` (`temt-<svc>-<YYMMDDHHMM>`; `Name` and
@@ -203,7 +204,7 @@ in the rationale):
 | `NetworkInterfaces` `Groups` | Copied as is | [Security groups](#security-groups) |
 | The four items that exist only when read | Removed | Cannot be written |
 | `InstanceInitiatedShutdownBehavior` | `terminate` | [Shutdown](#shutdown) |
-| `TagSpecifications` | Copied as is (the source's `Name` too); temt adds `temt:service`. Keys starting with `aws:` are removed, and the removal is reported | Volume and ENI tags are not returned, so not copied, and their `Name` becomes `<name>`. `aws:` keys are reserved by AWS (whether they come back is unchecked) |
+| `TagSpecifications` | Copied as is (the source's `Name` too); temt adds `temt:service`. Keys starting with `aws:` are removed, and the removal is reported; an element left without tags is removed | Volume and ENI tags are not returned, so not copied, and their `Name` becomes `<name>`. `aws:` keys are reserved by AWS (whether they come back is unchecked) |
 | `IamInstanceProfile` | Copied as is; not written when absent (`get-launch-template-data` then returns none, checked on real AWS) | [Instance profile](#instance-profile) |
 | `UserData` | Copied as is | [User data](#user-data) |
 | `InstanceMarketOptions` | Removed | A stopped Spot instance came from a persistent request (only those can stop); copied, AWS would launch the next one at every termination. It launches on demand; not reported. temt does nothing about an `InstanceMarketOptions` the user writes, persistent included (the requester). Rejected: making it a one-time Spot |

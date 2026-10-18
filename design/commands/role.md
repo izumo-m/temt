@@ -26,6 +26,8 @@ terminated and started again.
    - If there is no policy named `ec2`, the next `apply` writes the default
      `[[role.policy.ec2]]`, which adds the permissions temt's login needs.
 3. Rewrite `IamInstanceProfile` of `[launch-template]` to `{ Name = "${temt:name}" }`.
+   One written as a table or with dotted keys is rewritten in place (`Name` set, `Arn`
+   removed), so the comments after it stay.
 4. Confirm, listing the policies and the change of `IamInstanceProfile`; `--yes` skips
    it.
 5. Write the config file. Then tell the user to fix by hand the resource policies
@@ -50,6 +52,8 @@ Deletes the instance role and instance profile `<name>` (the requester).
      create them again, so tell the user to fix the config file first.
    - An instance uses the instance profile, stopped ones included: it would lose its
      credentials.
-   - The role is also in another instance profile (as `destroy` does).
-3. Confirm with `[y/N]`; `--yes` skips it.
+   - The instance profile holds another role, or the role is also in another instance
+     profile (as `destroy` does).
+3. Confirm with `[y/N]`, listing the instance profile and the role with its inline and
+   managed policies (as `destroy` does); `--yes` skips it.
 4. Delete in the order of [Deleting](../resources.md#deleting).

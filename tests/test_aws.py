@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import boto3
 import pytest
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ProfileNotFound
 from botocore.stub import Stubber
 from conftest import offline, watched
 from types_boto3_ec2.client import EC2Client
@@ -70,7 +70,7 @@ def profile(region: str = "us-east-1") -> None:
 def test_session_passes_nothing_that_is_not_written() -> None:
     made = aws.session(Conf())
     assert made.profile_name == "default"
-    # 書かれていなければ Conf の既定のリージョンになる
+    # どこにもリージョンが無ければ、既定のリージョンになる
     assert made.region_name == REGION
 
 
@@ -90,10 +90,29 @@ def test_session_leaves_the_profile_to_the_environment(monkeypatch: pytest.Monke
     assert made.profile_name == "work"
 
 
-def test_session_ignores_the_region_in_the_profile() -> None:
-    """リージョンは必ず渡すので、プロファイルの設定は使われない。"""
+def test_session_takes_the_region_written_over_the_profile() -> None:
+    """AwsRegion があれば、プロファイルの region は使わない。"""
     profile()
-    assert aws.session(Conf(AwsProfile="work")).region_name == REGION
+    assert aws.session(Conf(AwsProfile="work", AwsRegion="eu-west-1")).region_name == "eu-west-1"
+
+
+def test_session_takes_the_environment_then_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AwsRegion が無ければ、環境変数、プロファイルの region の順に使い、values にも入れる。"""
+    profile()
+    values = Conf(AwsProfile="work")
+    monkeypatch.setattr(conf, "ENV_REGION", "us-west-2")
+    assert aws.session(values).region_name == "us-west-2"
+    assert values.AwsRegion == "us-west-2"
+    monkeypatch.setattr(conf, "ENV_REGION", None)
+    values = Conf(AwsProfile="work")
+    assert aws.session(values).region_name == "us-east-1"
+    assert values.AwsRegion == "us-east-1"
+
+
+def test_session_still_refuses_a_missing_profile() -> None:
+    """プロファイルの region を読めなくても、無いプロファイルは Session を作るときに断る。"""
+    with pytest.raises(ProfileNotFound):
+        aws.session(Conf(AwsProfile="nowhere"))
 
 
 def test_session_takes_the_profile_option(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,8 +251,12 @@ def test_public_subnet_without_a_default_vpc(ec2: EC2Client, service: Service) -
         with pytest.raises(TemtError) as caught:
             aws.public_subnet(ec2, REGION, service.conf_path)
     assert f"no default VPC in {REGION}" in str(caught.value)
-    # SubnetId はテーブルの中なので、位置付きで書くよう促す
-    assert f"write launch-template.SubnetId in {service.conf_path}" in str(caught.value)
+    # SubnetId は NetworkInterfaces の DeviceIndex が 0 の要素の中なので、位置付きで書く
+    # よう促す
+    assert (
+        f"write launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in {service.conf_path}"
+        in str(caught.value)
+    )
 
 
 def test_public_subnet_without_a_public_subnet(ec2: EC2Client, service: Service) -> None:
@@ -301,9 +324,12 @@ def test_subnet_without_the_subnet(ec2: EC2Client, service: Service) -> None:
         )
         with pytest.raises(TemtError, match="no such subnet: subnet-000000a1bcdef01") as caught:
             aws.subnet(ec2, "subnet-000000a1bcdef01", service.conf_path)
-    # 別のアカウントで作るときの選び直し方を添える
-    assert str(caught.value).endswith(
-        "remove launch-template.SubnetId and launch-template.ImageId "
+    # 別のアカウントで作るときの選び直し方を添える。アカウントの中を指すほかの項目も挙げる
+    assert str(caught.value) == (
+        "no such subnet: subnet-000000a1bcdef01; for another account, remove "
+        "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId and "
+        "launch-template.ImageId, and the other items that point into this account "
+        "(Groups, IamInstanceProfile, KeyName, ...), "
         f"from {service.conf_path} and run apply again"
     )
 

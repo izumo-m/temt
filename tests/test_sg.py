@@ -1,12 +1,14 @@
 """sg diff と sg show の本体のテスト。AWS は Stubber で置き換える。"""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 from conftest import Stubs
 
 from temt import sg
-from temt.names import Service
+from temt.msg import TemtError
+from temt.names import Service, defaults_path
 
 NAME = "temt-dev-main"
 SUBNET = "subnet-0123456789abcdef0"
@@ -130,7 +132,74 @@ def test_diff_without_a_subnet(
     aws_stubs.done()
     out, err = capsys.readouterr()
     assert out == "+   22/tcp   198.51.100.7/32   -\n"
-    assert "no launch-template.SubnetId in ~/.config/temt/dev-main.toml;" in err
+    assert (
+        "no launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in "
+        "~/.config/temt/dev-main.toml; the next apply picks a subnet\n"
+    ) in err
+
+
+def test_diff_reads_the_subnet_of_the_primary_interface(
+    service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SubnetId は NetworkInterfaces の DeviceIndex が 0 の要素のものを使う。ほかの要素の
+    SubnetId は見ない。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(
+        "[[launch-template.NetworkInterfaces]]\n"
+        "DeviceIndex = 1\n"
+        'SubnetId = "subnet-00000000000000001"\n'
+        "\n"
+        "[[launch-template.NetworkInterfaces]]\n"
+        "DeviceIndex = 0\n"
+        f'SubnetId = "{SUBNET}"\n'
+    )
+    subnet(aws_stubs)
+    groups(aws_stubs, a_group())
+    rules(aws_stubs)
+    sg.diff(service)
+    aws_stubs.done()
+    assert capsys.readouterr().err.endswith(f"security group {NAME}: no differences\n")
+
+
+def test_diff_without_the_primary_interface(
+    service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DeviceIndex が 0 の要素が無ければ、ほかの要素に SubnetId があっても、無いものとする。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(
+        "[[launch-template.NetworkInterfaces]]\n"
+        "DeviceIndex = 1\n"
+        f'SubnetId = "{SUBNET}"\n'
+        "\n" + INGRESS + 'Port = 22\nCidr = "198.51.100.7/32"\n'
+    )
+    sg.diff(service)
+    aws_stubs.done()
+    out, err = capsys.readouterr()
+    assert out == "+   22/tcp   198.51.100.7/32   -\n"
+    assert "no launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in " in err
+
+
+def test_diff_names_the_file_with_a_missing_subnet(
+    service: Service, home_dir: Path, aws_stubs: Stubs
+) -> None:
+    """無いサブネットは、その SubnetId を書いたファイルの名前を添えて誤りにする。共通ファイル
+    に書いたものなら、共通ファイルを挙げる。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text("")
+    defaults_path().write_text(
+        f'[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\nSubnetId = "{SUBNET}"\n'
+    )
+    aws_stubs.ec2.add_response("describe_subnets", {"Subnets": []}, THE_SUBNET)
+    with pytest.raises(TemtError) as caught:
+        sg.diff(service)
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"no such subnet: {SUBNET}; for another account, remove "
+        "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId and "
+        "launch-template.ImageId, and the other items that point into this account "
+        "(Groups, IamInstanceProfile, KeyName, ...), from "
+        f"{home_dir}/.config/temt/defaults.toml and run apply again"
+    )
 
 
 def test_show_the_group(
@@ -201,6 +270,24 @@ def test_diff_shows_rules_that_temt_cannot_write(
         "~   22/tcp    192.0.2.5/32           home -> -",
         "-   all       sg-00000000000000009   -",
         "-   443/tcp   pl-00000000            -",
+    ]
+
+
+def test_show_reads_the_subnet_of_the_primary_interface(
+    service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """sg show も、DeviceIndex が 0 の要素の SubnetId の VPC で探す。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(
+        f'[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\nSubnetId = "{SUBNET}"\n'
+    )
+    subnet(aws_stubs)
+    groups(aws_stubs)
+    sg.show(service)
+    aws_stubs.done()
+    assert capsys.readouterr().out.splitlines() == [
+        f"security group {NAME}:",
+        f"  state: (not found in {VPC}; the next apply creates it)",
     ]
 
 

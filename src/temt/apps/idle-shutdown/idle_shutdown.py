@@ -121,12 +121,17 @@ AWS_CLI_DIRS = ("/snap/bin", "/usr/local/bin", "/usr/bin")
 AWS_CLI = "aws"
 # 状態の書き込み 1 回にかける時間の上限（秒）
 PUT_TIMEOUT = 15
-# インスタンスメタデータ（IMDSv2）。起動テンプレートがタグを読めるようにしてある
+# インスタンスメタデータ（IMDSv2）。temt の起動テンプレートは、既定でタグを読めるように
+# してある。install が、読めることを先に確かめる（service）
 IMDS = "http://169.254.169.254/latest"
 IMDS_TOKEN_TTL = "60"
 IMDS_TIMEOUT = 2
-NAME_TAG = "tags/instance/Name"
+# サービス名 <svc> を持つインスタンスのタグ。temt が起動テンプレートでかならず付ける
+SERVICE_TAG = "tags/instance/temt:service"
 REGION = "placement/region"
+INSTANCE_ID = "instance-id"
+# サービスの SSM パラメータの階層の名前 temt-<svc> の頭
+NAME_PREFIX = "temt-"
 
 USAGE = f"""\
 Usage: {PROG} [-n]            check now; power off if idle (the timer runs this)
@@ -508,13 +513,45 @@ def _imds(path: str, token: str) -> str:
 
 
 def _instance() -> tuple[str, str]:
-    """このインスタンスのサービスの名前 temt-<svc>（Name タグ）とリージョン。"""
+    """このインスタンスのサービスの名前 temt-<svc>（temt:service タグから作る）と
+    リージョン。
+    """
     token = _imds_token()
-    name = _imds(NAME_TAG, token)
+    svc = _imds(SERVICE_TAG, token)
     region = _imds(REGION, token)
-    if not name or not region:
-        raise ValueError("the Name tag or the region is empty")
-    return name, region
+    if not svc or not region:
+        raise ValueError("the tag temt:service or the region is empty")
+    return f"{NAME_PREFIX}{svc}", region
+
+
+def check_service() -> None:
+    """インスタンスメタデータからタグ temt:service を読めることを確かめる。install 専用。
+
+    読めなければ、状態を SSM パラメータに書けない。直し方を告げて失敗させ、install に
+    何も入れさせない。設定ファイルでタグを読めなくしたサービス（取り込んだものなど）で
+    起きる。
+    """
+    try:
+        token = _imds_token()
+    except (OSError, http.client.HTTPException) as e:
+        raise Fail(f"cannot read the instance metadata: {_printable(str(e))}") from None
+    try:
+        svc = _imds(SERVICE_TAG, token)
+    except (OSError, http.client.HTTPException):
+        svc = ""
+    if svc:
+        return
+    try:
+        instance_id = _imds(INSTANCE_ID, token) or "<id>"
+    except (OSError, http.client.HTTPException):
+        instance_id = "<id>"
+    raise Fail(
+        "cannot read the tag temt:service from the instance metadata; write "
+        'MetadataOptions.InstanceMetadataTags = "enabled" in [launch-template] of the config '
+        "file and run temt apply; for this instance, run 'aws ec2 "
+        f"modify-instance-metadata-options --instance-id {_printable(instance_id)} "
+        "--instance-metadata-tags enabled'; then deploy again"
+    )
 
 
 def report(text: str) -> None:
@@ -745,7 +782,9 @@ def run(args: list[str]) -> None:
             status(login=True)
         case ["limit"]:
             show_limit()
-        # limit --deploy と report は install 専用。USAGE には出さない
+        # limit --deploy、report、service は install 専用。USAGE には出さない
+        case ["service"]:
+            check_service()
         case ["limit", "--deploy", text]:
             set_deploy_limit(text)
         case ["report"]:

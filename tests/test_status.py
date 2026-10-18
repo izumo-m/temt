@@ -9,17 +9,7 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import (
-    ASSOCIATION,
-    OLD_VERSION,
-    REGION,
-    SSHD,
-    Stubs,
-    an_instance,
-    association_ran,
-    listed_associations,
-    reservations,
-)
+from conftest import REGION, Stubs, an_instance, reservations
 
 from temt import app, aws, cli, conf, instances, resources, status
 from temt.msg import TemtError, UsageError
@@ -29,22 +19,18 @@ NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
 INSTANCE = "i-0123456789abcdef0"
 OTHER = "i-0fedcba9876543210"
-# 名前が同じ、別の関連付け <名前>-sshd の ID
-OTHER_ASSOCIATION = "99999999-8888-7777-6666-555555555555"
 ADDRESS = "203.0.113.10"
 
 TEMPLATES = {"LaunchTemplateNames": [TEMPLATE]}
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
         },
     ]
 }
-# 関連付けそのものが無いときの sshd-ports の行
-NO_ASSOCIATION = f"sshd-ports: none (no association {SSHD}; run 'temt apply --svc dev-main')"
 # 起動テンプレートがあるときの 1 行目
 APPLIED = f"template:   {TEMPLATE}"
 # アプリの状態が 1 つも無いときの最後の行
@@ -77,15 +63,6 @@ def agents(stubs: Stubs, ids: list[str], pings: dict[str, str]) -> None:
             ]
         },
         {"Filters": [{"Key": "InstanceIds", "Values": ids}]},
-    )
-
-
-def sshd_ran(stubs: Stubs, instance_id: str, *runs: dict[str, Any]) -> None:
-    """describe-instance-associations-status の応答を積む。runs が無ければ一覧に無い。"""
-    stubs.ssm.add_response(
-        "describe_instance_associations_status",
-        {"InstanceAssociationStatusInfos": list(runs)},
-        {"InstanceId": instance_id},
     )
 
 
@@ -147,8 +124,6 @@ def test_it_shows_a_running_instance(
         SEARCH,
     )
     agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Success"))
     apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
@@ -161,7 +136,6 @@ def test_it_shows_a_running_instance(
         f"instance:   {INSTANCE} (running)\n"
         f"ipv4:       {ADDRESS}\n"
         "ssm-agent:  Online\n"
-        "sshd-ports: applied\n"
         f"{NO_APPS}\n"
         f"{NO_STATUS}\n"
     )
@@ -187,8 +161,7 @@ def test_it_shows_every_instance(
 ) -> None:
     """2 台以上あれば全部を表示し、エージェントは 1 回の問い合わせで尋ねる。
 
-    関連付けの今の版も 1 回だけ読み、インスタンスごとの状態はそれぞれ読む。余分な
-    ものを ID を指して終了するよう警告する。
+    余分なものを ID を指して終了するよう警告する。
     """
     applied(aws_stubs)
     aws_stubs.ec2.add_response(
@@ -200,9 +173,6 @@ def test_it_shows_every_instance(
     )
     # 応答の順は ID の順になる。OTHER は一度も登録していない
     agents(aws_stubs, [INSTANCE, OTHER], {INSTANCE: "ConnectionLost"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("InProgress"))
-    sshd_ran(aws_stubs, OTHER)
     apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
@@ -213,11 +183,9 @@ def test_it_shows_every_instance(
         f"instance:   {INSTANCE} (running)",
         f"ipv4:       {ADDRESS}",
         "ssm-agent:  ConnectionLost",
-        "sshd-ports: pending",
         f"instance:   {OTHER} (stopping)",
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
-        "sshd-ports: (not run)",
         NO_APPS,
         NO_STATUS,
     ]
@@ -238,9 +206,6 @@ def test_it_does_not_count_an_instance_that_is_shutting_down(
         SEARCH,
     )
     agents(aws_stubs, [INSTANCE, OTHER], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE)
-    sshd_ran(aws_stubs, OTHER)
     apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
@@ -265,8 +230,6 @@ def test_it_takes_an_answer_with_missing_items(
         {"InstanceInformationList": [{"InstanceId": INSTANCE}, {"PingStatus": "Online"}]},
         {"Filters": [{"Key": "InstanceIds", "Values": [INSTANCE, OTHER]}]},
     )
-    # 関連付けそのものが無ければ、インスタンスでの状態は読まずに apply を促す
-    listed_associations(aws_stubs.ssm)
     apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
@@ -277,11 +240,9 @@ def test_it_takes_an_answer_with_missing_items(
         f"instance:   {INSTANCE} (running)",
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
-        NO_ASSOCIATION,
         f"instance:   {OTHER} (pending)",
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
-        NO_ASSOCIATION,
         NO_APPS,
         NO_STATUS,
     ]
@@ -303,74 +264,21 @@ def test_it_takes_an_answer_without_the_list(
         {},
         {"Filters": [{"Key": "InstanceIds", "Values": [INSTANCE]}]},
     )
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Failed"))
     apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
     assert capsys.readouterr().out.splitlines()[3:] == [
         "ssm-agent:  (not registered)",
-        "sshd-ports: failed",
         NO_APPS,
         NO_STATUS,
     ]
 
 
-@pytest.mark.parametrize(
-    ("runs", "shown"),
-    [
-        pytest.param([association_ran("Success")], "applied", id="success"),
-        pytest.param([association_ran("Queued")], "pending", id="queued"),
-        pytest.param([association_ran("Pending")], "pending", id="pending"),
-        pytest.param([association_ran("InProgress")], "pending", id="in progress"),
-        # update-association の直後は、前の版の状態が残っている
-        pytest.param([association_ran("Success", OLD_VERSION)], "pending", id="previous success"),
-        pytest.param([association_ran("Failed", OLD_VERSION)], "pending", id="previous failed"),
-        pytest.param(
-            [association_ran("Failed", OLD_VERSION), association_ran("Success")],
-            "applied",
-            id="previous and current",
-        ),
-        pytest.param([association_ran("Failed")], "failed", id="failed"),
-        pytest.param([association_ran("TimedOut")], "timedout", id="timed out"),
-        pytest.param([], "(not run)", id="not run"),
-        # 名前で見つけた関連付けと ID の違うものの状態は、名前が同じでも数えない
-        pytest.param(
-            [association_ran("Success", association_id=OTHER_ASSOCIATION)],
-            "(not run)",
-            id="another association",
-        ),
-    ],
-)
-def test_it_shows_the_sshd_ports_of_the_current_version(
-    aws_stubs: Stubs,
-    configured: Service,
-    capsys: pytest.CaptureFixture[str],
-    runs: list[dict[str, Any]],
-    shown: str,
-) -> None:
-    applied(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, *runs)
-    apps(aws_stubs)
-    statuses(aws_stubs)
-    status.run(configured)
-    aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[-3] == f"sshd-ports: {shown}"
-
-
 def test_it_shows_that_the_service_is_not_applied(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """起動テンプレートが無くても止めず、取り残されたインスタンスも表示する。
-
-    destroy のあとなので、関連付けも無い。
-    """
+    """起動テンプレートが無くても止めず、取り残されたインスタンスも表示する。"""
     aws_stubs.ec2.add_client_error(
         "describe_launch_templates",
         service_error_code=resources.NO_SUCH_TEMPLATE,
@@ -383,7 +291,6 @@ def test_it_shows_that_the_service_is_not_applied(
         SEARCH,
     )
     agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
@@ -392,47 +299,8 @@ def test_it_shows_that_the_service_is_not_applied(
         f"instance:   {INSTANCE} (running)",
         f"ipv4:       {ADDRESS}",
         "ssm-agent:  Online",
-        NO_ASSOCIATION,
         NO_STATUS,
     ]
-
-
-def test_it_asks_for_apply_when_there_is_no_association(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """関連付けそのものが無ければ、apply を促す。
-
-    インスタンスでの状態は読まない。積んでいないので、読めば失敗する。
-    """
-    applied(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm)
-    apps(aws_stubs)
-    statuses(aws_stubs)
-    status.run(configured)
-    aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[-3:] == [NO_ASSOCIATION, NO_APPS, NO_STATUS]
-
-
-def test_it_reads_the_current_version_of_the_association_found_by_name(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """今の版は、名前で見つけた関連付けのものを使う。"""
-    applied(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION, version=OLD_VERSION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Success", OLD_VERSION))
-    apps(aws_stubs)
-    statuses(aws_stubs)
-    status.run(configured)
-    aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[-3] == "sshd-ports: applied"
 
 
 def test_other_errors_from_reading_the_template_are_not_swallowed(
@@ -493,8 +361,6 @@ def test_it_shows_the_app_statuses(
     running["LaunchTime"] = datetime.now(UTC) - timedelta(hours=1)
     aws_stubs.ec2.add_response("describe_instances", reservations(running), SEARCH)
     agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Success"))
     apps(aws_stubs)
     statuses(
         aws_stubs,
@@ -507,7 +373,7 @@ def test_it_shows_the_app_statuses(
     )
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[5:] == [
+    assert capsys.readouterr().out.splitlines()[4:] == [
         NO_APPS,
         "app status:",
         "  idle-shutdown  power off in 42m  [just now]",
@@ -552,8 +418,6 @@ def test_it_marks_the_statuses_of_a_stopped_instance_stale(
     stopped["LaunchTime"] = datetime.now(UTC) - timedelta(hours=1)
     aws_stubs.ec2.add_response("describe_instances", reservations(stopped), SEARCH)
     agents(aws_stubs, [INSTANCE], {INSTANCE: "ConnectionLost"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Success"))
     apps(aws_stubs)
     statuses(
         aws_stubs,
@@ -582,8 +446,6 @@ def test_it_shows_the_apps_that_are_not_baked(
         "describe_instances", reservations(an_instance(INSTANCE, "stopped")), SEARCH
     )
     agents(aws_stubs, [INSTANCE], {INSTANCE: "ConnectionLost"})
-    listed_associations(aws_stubs.ssm, ASSOCIATION)
-    sshd_ran(aws_stubs, INSTANCE, association_ran("Success"))
     apps(
         aws_stubs,
         a_record("emacs", baked_version="1", baked_image=IMAGE),

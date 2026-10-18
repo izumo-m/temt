@@ -36,10 +36,13 @@ INSTANCE_REBOOT = "instance reboot"
 INSTANCE_SHOW = "instance show"
 INSTANCE_LIST = "instance list"
 AMI_BAKE = "ami bake"
+AMI_IMPORT = "ami import"
 AMI_LIST = "ami list"
 AMI_PRUNE = "ami prune"
 AMI_DELETE = "ami delete"
 TEMPLATE_SHOW = "template show"
+ROLE_IMPORT = "role import"
+ROLE_DELETE = "role delete"
 SG_LIST = "sg list"
 SG_ADD = "sg add"
 SG_REMOVE = "sg remove"
@@ -53,6 +56,7 @@ APP_UNSET = "app unset"
 APP_DEPLOY = "app deploy"
 APP_REMOVE = "app remove"
 SSH_PROXY = "ssh proxy"
+SSH_SET_PORT = "ssh set-port"
 COMMANDS = (
     SERVICE_APPLY,
     SERVICE_DIFF,
@@ -65,10 +69,13 @@ COMMANDS = (
     INSTANCE_SHOW,
     INSTANCE_LIST,
     AMI_BAKE,
+    AMI_IMPORT,
     AMI_LIST,
     AMI_PRUNE,
     AMI_DELETE,
     TEMPLATE_SHOW,
+    ROLE_IMPORT,
+    ROLE_DELETE,
     SG_LIST,
     SG_ADD,
     SG_REMOVE,
@@ -82,6 +89,7 @@ COMMANDS = (
     APP_DEPLOY,
     APP_REMOVE,
     SSH_PROXY,
+    SSH_SET_PORT,
 )
 # 対象の名前。コマンドの 1 語め
 TARGETS = tuple(dict.fromkeys(command.split()[0] for command in COMMANDS))
@@ -109,10 +117,14 @@ YES_COMMANDS = (
     INSTANCE_REBOOT,
     AMI_BAKE,
     SERVICE_DESTROY,
+    AMI_IMPORT,
     AMI_PRUNE,
     AMI_DELETE,
+    ROLE_IMPORT,
+    ROLE_DELETE,
     APP_DEPLOY,
     APP_REMOVE,
+    SSH_SET_PORT,
 )
 # 終わったあとに AMI にする --bake を取るコマンド
 BAKE_COMMANDS = (APP_DEPLOY, APP_REMOVE)
@@ -125,6 +137,8 @@ TARGET_COMMANDS = BAKE_COMMANDS
 APP_OPTION_COMMANDS = (APP_DEPLOY,)
 # 接続先のポートを取るコマンド
 PORT_COMMANDS = (SSH_PROXY,)
+# sshd が待ち受けるポートを 1 つ以上取るコマンド
+PORTS_COMMANDS = (SSH_SET_PORT,)
 # --svc を省けるコマンド。付ければ、そのサービスのものだけを扱う。ほかのコマンドは
 # --svc が要る
 OPTIONAL_SERVICE_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, AMI_PRUNE, AMI_DELETE, APP_LIST)
@@ -140,6 +154,10 @@ DESCRIPTION_COMMANDS = (SG_ADD,)
 IMAGE_COMMANDS = (AMI_DELETE,)
 # 動詞の後ろにインスタンス ID を 0 個以上取るコマンド
 INSTANCE_ID_COMMANDS = (INSTANCE_TERMINATE,)
+# 動詞の後ろに、取り込むインスタンスの ID を 1 つ取るコマンド
+SOURCE_COMMANDS = (AMI_IMPORT,)
+# 動詞の後ろに、IAM のロールの名前か ARN を 1 つ取るコマンド
+ROLE_COMMANDS = (ROLE_IMPORT,)
 # 表を出し、出す列を選ぶ --format を取るコマンド
 LIST_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, APP_LIST, SG_LIST)
 # 動詞の後ろにアプリ ID、キー、値を取るコマンドと、取る引数の名前。並びは引数の順。
@@ -156,7 +174,8 @@ RECORD_KEEPING = (APP_SET, APP_UNSET)
 SVC_OPTION = "--svc"
 # 使うプロファイルを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る
 PROFILE_OPTION = "--profile"
-# 使うリージョンを選ぶコマンドラインオプション。--svc の無いときだけ使える
+# 使うリージョンを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
+# 付けたコマンドでは、設定ファイルに AwsRegion が無いときだけ使う
 REGION_OPTION = "--region"
 FORMAT_OPTION = "--format"
 # install と uninstall を実行するインスタンスのユーザーを選ぶコマンドラインオプション
@@ -213,10 +232,13 @@ SYNOPSES = {
     INSTANCE_SHOW: "",
     INSTANCE_LIST: "[--format <columns>]",
     AMI_BAKE: "[--yes]",
+    AMI_IMPORT: "<instance id> [--yes]",
     AMI_LIST: "[--format <columns>]",
     AMI_PRUNE: "[--yes]",
     AMI_DELETE: "<ami id or name> [--force] [--yes]",
     TEMPLATE_SHOW: "",
+    ROLE_IMPORT: "<role name or arn> [--yes]",
+    ROLE_DELETE: "[--yes]",
     SG_LIST: "[--format <columns>]",
     SG_ADD: "<port> [<cidr>] [--description <text>]",
     SG_REMOVE: "<port> [<cidr>]",
@@ -230,6 +252,7 @@ SYNOPSES = {
     APP_DEPLOY: "<app> [<name>=<value>...] [<options>]",
     APP_REMOVE: "<app id> [<options>]",
     SSH_PROXY: "[port] [--user <user>]",
+    SSH_SET_PORT: "<port>... [--yes]",
 }
 # 使い方で、短縮形の代わりにコマンドの行へ添える書き添え
 REMARKS = {SERVICE_LIST: "(no --profile/--region)"}
@@ -273,6 +296,26 @@ and those that come with temt), and takes no --profile or --region.""",
     ),
     ((APP_SET,), "<value> of app set may contain '=' and start with '-'."),
     (
+        SOURCE_COMMANDS,
+        """\
+ami import makes an AMI of a stopped instance and a new config file that
+launches the same instance; run apply next. It takes --region for the region of
+the instance, and changes nothing on the instance.""",
+    ),
+    (
+        (ROLE_IMPORT, ROLE_DELETE),
+        """\
+role import rewrites [role] and IamInstanceProfile of the config file to move a
+copy of the instance role under temt; run diff and apply next. role delete
+deletes the instance role and instance profile temt-<svc>.""",
+    ),
+    (
+        PORTS_COMMANDS,
+        """\
+ssh set-port sets the ports sshd listens on through Run Command, bakes the
+instance, and writes the first port to Port of the Host block.""",
+    ),
+    (
         TARGET_COMMANDS,
         """\
 <app> of app deploy is an app id, or a path if it has a '/'. An app id names a
@@ -292,7 +335,7 @@ HELP_LINE = "  --help              print this message; after <target>, the help 
 VERSION_LINE = "  --version           print the version of temt"
 SVC_LINE = "  --svc <svc>         the service; its config file gives the region and profile"
 PROFILE_LINE = "  --profile <name>    the AWS profile, over AwsProfile in the config file"
-REGION_LINE = "  --region <region>   the AWS region; not with --svc"
+REGION_LINE = "  --region <region>   the AWS region, while the config file has no AwsRegion"
 
 
 def _synopsis(command: str) -> str:
@@ -384,7 +427,7 @@ class Request:
     service: Service | None
     # --profile で選ばれたプロファイル。省かれていれば None
     profile: str | None = None
-    # --region で選ばれたリージョン。サービスの無いときだけ取る
+    # --region で選ばれたリージョン。省かれていれば None
     region: str | None = None
     # ami delete が取る AMI の ID か名前
     image: str | None = None
@@ -409,6 +452,8 @@ class Request:
     # --reset。APP_OPTION_COMMANDS だけが取る
     reset: bool = False
     port: int = DEFAULT_PORT
+    # PORTS_COMMANDS が取る、sshd が待ち受けるポート。並びは打たれた順
+    ports: tuple[int, ...] = ()
     # RULE_COMMANDS が取る受信規則。プロトコルとポートの範囲（icmp では None）、正規化した
     # CIDR。CIDR を省けば None で、グローバル IP アドレスから作る
     protocol: str | None = None
@@ -534,8 +579,6 @@ def _check_options(
     command: str, typed: str, cli_options: dict[str, str], service: Service | None
 ) -> None:
     """そのコマンドが取らないコマンドラインオプションを誤りとする。"""
-    if REGION_OPTION in cli_options and service is not None:
-        raise UsageError(f"{typed}: {REGION_OPTION} is not allowed with a service")
     if _is_local(command, service):
         why = "it does not call AWS"
         if command in LOCAL_WITHOUT_SERVICE_COMMANDS:
@@ -568,6 +611,22 @@ def _port(typed: str, words: list[str]) -> int:
             f"{typed}: port must be a number from 1 to {PORT_MAX}: {printable(words[0])}"
         )
     return int(words[0])
+
+
+def _ports(typed: str, words: list[str]) -> tuple[int, ...]:
+    """ssh set-port のポートを読む。1 つ以上で、重ねない。"""
+    if not words:
+        raise UsageError(f"{typed}: missing port")
+    ports: list[int] = []
+    for word in words:
+        if not PORT_RE.fullmatch(word) or not 1 <= int(word) <= PORT_MAX:
+            raise UsageError(
+                f"{typed}: port must be a number from 1 to {PORT_MAX}: {printable(word)}"
+            )
+        if int(word) in ports:
+            raise UsageError(f"{typed}: repeated port: {printable(word)}")
+        ports.append(int(word))
+    return tuple(ports)
 
 
 def _rule(
@@ -738,6 +797,16 @@ def parse(args: list[str]) -> Request:
         return replace(request, image=image)
     if command in INSTANCE_ID_COMMANDS:
         return replace(request, instance_ids=_instance_ids(typed, words))
+    if command in SOURCE_COMMANDS:
+        source = _one(typed, words, "instance id")
+        if not is_instance_id(source):
+            raise UsageError(f"{typed}: the instance id {INSTANCE_ID_RULE}: {printable(source)}")
+        return replace(request, instance_ids=(source,))
+    if command in ROLE_COMMANDS:
+        role = _one(typed, words, "role name or ARN")
+        if not options.is_utf8(role):
+            raise UsageError(f"{typed}: the role name is not valid UTF-8: {printable(role)}")
+        return replace(request, app=role)
     if command in TARGET_COMMANDS:
         request = replace(request, app=_target(command, typed, words))
         if command in APP_OPTION_COMMANDS:
@@ -754,6 +823,8 @@ def parse(args: list[str]) -> Request:
         )
     if command in PORT_COMMANDS:
         return replace(request, port=_port(typed, words))
+    if command in PORTS_COMMANDS:
+        return replace(request, ports=_ports(typed, words))
     if words:
         raise UsageError(f"{typed}: unexpected argument: {printable(words[0])}")
     return request
@@ -774,7 +845,22 @@ def _profile_hint(service: Service | None) -> str:
 
 def _run_service(request: Request) -> None:
     """--svc が要るコマンドを実行する。"""
-    from temt import apply, bake, destroy, proxy, reboot, sg, show, start, status, stop, terminate
+    from temt import (
+        apply,
+        bake,
+        destroy,
+        importing,
+        proxy,
+        reboot,
+        role,
+        setport,
+        sg,
+        show,
+        start,
+        status,
+        stop,
+        terminate,
+    )
 
     service = request.service
     if service is None:
@@ -800,6 +886,12 @@ def _run_service(request: Request) -> None:
         status.run(service)
     elif request.command == AMI_BAKE:
         bake.run(service, yes=request.yes)
+    elif request.command == AMI_IMPORT:
+        importing.run(service, request.instance_ids[0], yes=request.yes)
+    elif request.command == ROLE_IMPORT and request.app is not None:
+        role.import_role(service, request.app, yes=request.yes)
+    elif request.command == ROLE_DELETE:
+        role.delete(service, yes=request.yes)
     elif request.command == TEMPLATE_SHOW:
         show.template(service)
     elif request.command == SG_DIFF:
@@ -808,6 +900,8 @@ def _run_service(request: Request) -> None:
         sg.show(service)
     elif request.command == SSH_PROXY:
         proxy.run(service, request.port, request.user)
+    elif request.command == SSH_SET_PORT:
+        setport.run(service, request.ports, yes=request.yes)
     else:
         # parse が COMMANDS の中だけを通すので、振り分けを書き忘れない限り来ない
         raise TemtError(f"not implemented: {request.command}")
@@ -899,8 +993,9 @@ def run(request: Request) -> int:
     AWS を使う module は、この中で読み込む。module の先頭で読み込むと、boto3 が
     無いときに main が動く前に落ちる。botocore の例外も、ここで一度だけ包む。
     """
-    # どのプロファイルを使うかは、--profile と設定ファイルで決める
+    # どのプロファイルとリージョンを使うかは、--profile、--region と設定ファイルで決める
     conf.OPTION_PROFILE = request.profile
+    conf.OPTION_REGION = request.region
     if request.command == SSH_PROXY:
         # ProxyCommand の標準出力は ssh の通信路なので、何も書かない
         msg.use_stderr()
@@ -939,7 +1034,7 @@ def run(request: Request) -> int:
 def main(argv: list[str] | None = None) -> int:
     """引数を解釈してコマンドを実行し、終了コードを返す。argv は sys.argv と同じ形。"""
     argv = list(sys.argv) if argv is None else argv
-    # --svc を付けたコマンドは、どのリージョンを使うかを設定ファイルだけで決める
+    # どのリージョンを使うかは temt が決めて渡す
     conf.take_region_env()
     text = _early(argv[1:])
     if text is not None:

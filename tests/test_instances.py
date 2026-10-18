@@ -29,7 +29,7 @@ ADDRESS = "203.0.113.10"
 
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],

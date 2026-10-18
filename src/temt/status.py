@@ -1,8 +1,7 @@
 """instance show（短縮形 status）と instance list の本体。
 
 instance show は、起動テンプレートの有無、サービスのインスタンス、そのパブリック
-IPv4 アドレス、SSM エージェントの状態、sshd の待ち受けポートを揃える関連付けが
-実行し終えたか、焼いていないアプリ、アプリが SSM パラメータ
+IPv4 アドレス、SSM エージェントの状態、焼いていないアプリ、アプリが SSM パラメータ
 /<名前>/<アプリID>/status に書いた状態を表示する。状態のうち、今動いている
 インスタンスが書いたとみなせないものには印を付ける。インスタンスが 2 台以上あれば
 警告する。表示するだけなので、ロックは取らない。テンプレートが無くても止めず、
@@ -20,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from temt import app, aws, conf, instances, msg, resources, sshd, table
+from temt import app, aws, conf, instances, msg, resources, table
 from temt.names import STATUS_KEY, is_label
 
 if TYPE_CHECKING:
@@ -37,12 +36,6 @@ if TYPE_CHECKING:
 NOT_REGISTERED = "(not registered)"
 # パブリック IPv4 アドレスが付いていないインスタンスの表示
 NO_ADDRESS = "(none)"
-# 関連付け <名前>-sshd のインスタンスでの状態の表示。今の版が Success なら applied、
-# 実行を待っているか前の版の状態しか無ければ pending。ほかは AWS の状態を小文字で出す
-SSHD_APPLIED = "applied"
-SSHD_PENDING = "pending"
-# 状態の一覧に関連付けが無いインスタンスの表示
-SSHD_NOT_RUN = "(not run)"
 # 焼いていないアプリの行の、すべて焼いてあるときと、記録が 1 つも無いときの表示
 ALL_BAKED = "all baked"
 NO_APPS = "none"
@@ -83,7 +76,7 @@ def _ping_statuses(ssm: SSMClient, ids: list[str]) -> dict[str, str]:
 
 
 def _line(label: str, value: str) -> None:
-    """表示の 1 行。値の頭を、いちばん長いラベル sshd-ports: に揃える。"""
+    """表示の 1 行。値の頭を、いちばん長いラベル app status: に揃える。"""
     msg.tell(f"{label + ':':<12}{value}\n")
 
 
@@ -96,42 +89,16 @@ def _show_template(ec2: EC2Client, service: Service) -> bool:
     return False
 
 
-def _sshd_ports(ssm: SSMClient, instance_id: str, current: sshd.Association) -> str:
-    """そのインスタンスで、関連付け <名前>-sshd の今の版が実行し終えたかの表示。
-
-    current は sshd.find で読んだ今の版。
-    """
-    runs = sshd.instance_status(ssm, current, instance_id)
-    if not runs:
-        return SSHD_NOT_RUN
-    found = sshd.outcome(runs, current)
-    if found is None:
-        return SSHD_PENDING
-    return SSHD_APPLIED if found == sshd.SUCCESS else found.lower()
-
-
-def _show_instances(ssm: SSMClient, service: Service, found: list[Instance]) -> None:
-    """インスタンスとそのアドレス、エージェントの状態、関連付けの状態を表示する。
-
-    関連付けそのものが無ければ、インスタンスでの状態は読まずに apply を促す。
-    """
+def _show_instances(ssm: SSMClient, found: list[Instance]) -> None:
+    """インスタンスとそのアドレス、エージェントの状態を表示する。"""
     if not found:
         _line("instance", "none")
         return
     pings = _ping_statuses(ssm, [one.id for one in found])
-    current = sshd.find(ssm, service)
     for one in found:
         _line("instance", f"{one.id} ({one.state})")
         _line("ipv4", one.public_ipv4 or NO_ADDRESS)
         _line("ssm-agent", pings.get(one.id, NOT_REGISTERED))
-        if current is not None:
-            _line("sshd-ports", _sshd_ports(ssm, one.id, current))
-        else:
-            _line(
-                "sshd-ports",
-                f"none (no association {service.sshd_association}; "
-                f"run 'temt apply --svc {service.svc}')",
-            )
 
 
 def apps_line(found: list[tuple[str, dict[str, str]]], where: app.Place) -> str:
@@ -234,7 +201,7 @@ def run(service: Service) -> None:
     ssm = session.client("ssm")
     applied = _show_template(ec2, service)
     found = instances.find(ec2, service)
-    _show_instances(ssm, service, found)
+    _show_instances(ssm, found)
     # 終了の途中のものは数えない。余分なものは ID を指して終了させる
     count = len(instances.remaining(found))
     if count > 1:

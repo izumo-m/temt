@@ -6,6 +6,10 @@ here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 # deploy のオプション。TEMT_OPTION_LIMIT は、deploy のオプション limit の値
 . "$here/temt-options.env"
 
+# 判定の結果を SSM パラメータに書くのに、インスタンスメタデータのタグ temt:service から
+# サービス名を読む。読めなければ、直し方を告げて、何も入れずに失敗する
+python3 -I "$here/idle_shutdown.py" service
+
 # deploy で決めた制限時間を、/etc/idle-shutdown/limit に置く。期間は本体が検査するので、
 # aws-cli や本体などを入れる前に、送られた本体で行う。通らなければ、何も入れずに失敗する
 python3 -I "$here/idle_shutdown.py" limit --deploy "$TEMT_OPTION_LIMIT"

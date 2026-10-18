@@ -12,7 +12,6 @@ import pytest
 
 from temt import home, keys, proc
 from temt.change import Change
-from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import SSH_DIR_ENV, Service, keys_dir
 
@@ -342,7 +341,7 @@ def test_offered_reads_what_ssh_reads_from_the_host_block(
     ブロックの前に置いた、展開して初めて無いと分かる鍵は飛ばされる。
     """
     home.prepare_dirs()
-    edit = home.detect_host_block(Service("dev-main"), Conf())
+    edit = home.detect_host_block(Service("dev-main"))
     assert home.write_edit(edit)
     config = f"Host {HOST}\n    IdentityFile %d/.ssh/missing\n\n" + edit.after
     use_config(tmp_path, monkeypatch, config + "\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n")

@@ -13,13 +13,10 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from conftest import (
-    ASSOCIATION,
-    SSHD,
     Clock,
     Stubs,
     an_instance,
     deadline,
-    listed_associations,
     reservations,
     taken,
 )
@@ -50,7 +47,7 @@ WHEN = datetime(2026, 9, 20, tzinfo=UTC)
 # 手順 1 の探索。探す状態の一覧は設計のとおりに固定する
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
@@ -73,6 +70,14 @@ SERVICE_IMAGES = {
     ],
 }
 
+# temt のものであることを示すタグ。消してよいのは、これが付いたものだけである
+OURS = [{"Key": "temt:service", "Value": "dev-main"}]
+# ロールに付いた管理ポリシー。AWS 管理のものと、顧客管理のもの
+MANAGED = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+CUSTOMER = "arn:aws:iam::123456789012:policy/web-data"
+# 消さずに残したときの報告
+LEFT = "left (not tagged temt:service=dev-main)"
+
 PROMPT = f"destroy {NAME}? [y/N] "
 
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
@@ -83,7 +88,6 @@ def listed(found: str = "none", *, role: str = f"role {NAME}") -> str:
     lines = [
         f"instances: {found}",
         f"launch template {TEMPLATE}",
-        f"association {SSHD}",
         f"parameters under /{NAME}/",
         f"security group {NAME}",
         f"instance profile {NAME}",
@@ -158,26 +162,55 @@ def missing(stub: Any, method: str, code: str, **params: Any) -> None:
     )
 
 
-def a_profile(roles: list[str]) -> dict[str, Any]:
-    """get-instance-profile が返す形。"""
+def a_profile(
+    roles: list[str], *, name: str = NAME, tags: list[dict[str, str]] | None = OURS
+) -> dict[str, Any]:
+    """get-instance-profile が返す形。
+
+    tags が None なら、タグを 1 つも持たない。AWS はそのとき Tags を返さない。
+    """
+    profile: dict[str, Any] = {
+        "Path": "/",
+        "InstanceProfileName": name,
+        "InstanceProfileId": "AIPAEXAMPLE000000",
+        "Arn": f"arn:aws:iam::123456789012:instance-profile/{name}",
+        "CreateDate": WHEN,
+        "Roles": [
+            {
+                "Path": "/",
+                "RoleName": role,
+                "RoleId": "AROAEXAMPLE000000",
+                "Arn": f"arn:aws:iam::123456789012:role/{role}",
+                "CreateDate": WHEN,
+            }
+            for role in roles
+        ],
+    }
+    if tags is not None:
+        profile["Tags"] = tags
+    return {"InstanceProfile": profile}
+
+
+def a_role(*, tags: list[dict[str, str]] | None = OURS) -> dict[str, Any]:
+    """get-role が返す、ロール <名前> の形。tags は a_profile と同じ。"""
+    role: dict[str, Any] = {
+        "Path": "/",
+        "RoleName": NAME,
+        "RoleId": "AROAEXAMPLE000000",
+        "Arn": f"arn:aws:iam::123456789012:role/{NAME}",
+        "CreateDate": WHEN,
+    }
+    if tags is not None:
+        role["Tags"] = tags
+    return {"Role": role}
+
+
+def attached(*arns: str) -> dict[str, Any]:
+    """list-attached-role-policies が返す形。"""
     return {
-        "InstanceProfile": {
-            "Path": "/",
-            "InstanceProfileName": NAME,
-            "InstanceProfileId": "AIPAEXAMPLE000000",
-            "Arn": f"arn:aws:iam::123456789012:instance-profile/{NAME}",
-            "CreateDate": WHEN,
-            "Roles": [
-                {
-                    "Path": "/",
-                    "RoleName": name,
-                    "RoleId": "AROAEXAMPLE000000",
-                    "Arn": f"arn:aws:iam::123456789012:role/{name}",
-                    "CreateDate": WHEN,
-                }
-                for name in roles
-            ],
-        }
+        "AttachedPolicies": [
+            {"PolicyName": arn.rsplit("/", 1)[-1], "PolicyArn": arn} for arn in arns
+        ]
     }
 
 
@@ -195,14 +228,15 @@ def terminating(instance_id: str) -> dict[str, Any]:
 
 
 def no_instance(stubs: Stubs) -> None:
-    """手順 1 と 2。インスタンスは 1 台も無く、ロールにインラインポリシーも無い。"""
+    """手順 1 と 2。インスタンスは 1 台も無く、ロールにポリシーも付いていない。"""
     stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    inline(stubs)
+    held(stubs)
 
 
-def inline(stubs: Stubs, *names: str) -> None:
-    """手順 2 の一覧が読む、ロールのインラインポリシー。"""
-    stubs.iam.add_response("list_role_policies", {"PolicyNames": list(names)}, THE_ROLE)
+def held(stubs: Stubs, inline: tuple[str, ...] = (), managed: tuple[str, ...] = ()) -> None:
+    """手順 2 の一覧が読む、ロールのインラインポリシーの名前と、管理ポリシーの ARN。"""
+    stubs.iam.add_response("list_role_policies", {"PolicyNames": list(inline)}, THE_ROLE)
+    stubs.iam.add_response("list_attached_role_policies", attached(*managed), THE_ROLE)
 
 
 def the_group(stubs: Stubs, *groups: tuple[str, str]) -> None:
@@ -219,12 +253,10 @@ def the_group(stubs: Stubs, *groups: tuple[str, str]) -> None:
 
 
 def template_deleted(stubs: Stubs) -> None:
-    """起動テンプレートと、その次に消す関連付けを消す。"""
+    """起動テンプレートを消す。"""
     stubs.ec2.add_response(
         "delete_launch_template", {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}}, THE_TEMPLATE
     )
-    listed_associations(stubs.ssm, ASSOCIATION)
-    stubs.ssm.add_response("delete_association", {}, {"AssociationId": ASSOCIATION})
 
 
 def no_parameters(stubs: Stubs) -> None:
@@ -252,29 +284,52 @@ def profile_deleted(stubs: Stubs) -> None:
     stubs.iam.add_response("delete_instance_profile", {}, THE_PROFILE)
 
 
-def unheld(stubs: Stubs) -> None:
-    """ロールを消せなくするものは無い。管理ポリシーは付いていない。"""
-    stubs.iam.add_response("list_attached_role_policies", {"AttachedPolicies": []}, THE_ROLE)
-    stubs.iam.add_response("list_instance_profiles_for_role", {"InstanceProfiles": []}, THE_ROLE)
+def role_read(stubs: Stubs, *profiles: str) -> None:
+    """インスタンスプロファイルを消す前に、ロールの temt のタグと、ロールを入れた
+    インスタンスプロファイル profiles を読む。
+
+    ロールがほかのインスタンスプロファイルにも入っていれば、インスタンスプロファイルも
+    消さずに止めるためである。
+    """
+    stubs.iam.add_response("get_role", a_role(), THE_ROLE)
+    stubs.iam.add_response(
+        "list_instance_profiles_for_role",
+        {"InstanceProfiles": [a_profile([NAME], name=one)["InstanceProfile"] for one in profiles]},
+        THE_ROLE,
+    )
 
 
-def role_deleted(stubs: Stubs, *names: str) -> None:
-    """ロールを消す。names のインラインポリシーが付いていて、先に消す。"""
-    unheld(stubs)
-    inline(stubs, *names)
-    for name in names:
+def role_stripped(
+    stubs: Stubs, inline: tuple[str, ...] = (), managed: tuple[str, ...] = ()
+) -> None:
+    """インスタンスプロファイルの後で、ロールを消す。managed の管理ポリシーを外し、inline の
+    インラインポリシーを消してから消す。
+    """
+    stubs.iam.add_response("list_attached_role_policies", attached(*managed), THE_ROLE)
+    for arn in managed:
+        stubs.iam.add_response("detach_role_policy", {}, {"RoleName": NAME, "PolicyArn": arn})
+    stubs.iam.add_response("list_role_policies", {"PolicyNames": list(inline)}, THE_ROLE)
+    for name in inline:
         stubs.iam.add_response("delete_role_policy", {}, {"RoleName": NAME, "PolicyName": name})
     stubs.iam.add_response("delete_role", {}, THE_ROLE)
 
 
+def iam_deleted(stubs: Stubs, inline: tuple[str, ...] = (), managed: tuple[str, ...] = ()) -> None:
+    """インスタンスプロファイルとロールを消す。ロールを読み、ロールを入れたインスタンス
+    プロファイル <名前> を消してから、ロールを消す。inline と managed は role_stripped と同じ。
+    """
+    role_read(stubs, NAME)
+    profile_deleted(stubs)
+    role_stripped(stubs, inline, managed)
+
+
 def all_deleted(stubs: Stubs) -> None:
-    """手順 4。5 つとも、あって消せる。"""
+    """手順 4。どれも、あって消せる。"""
     template_deleted(stubs)
     parameter_deleted(stubs)
     the_group(stubs, (GROUP, VPC))
     group_deleted(stubs)
-    profile_deleted(stubs)
-    role_deleted(stubs)
+    iam_deleted(stubs)
 
 
 def images(stubs: Stubs, *found: str) -> None:
@@ -295,9 +350,6 @@ def gone(*, what: str = "deleted") -> list[str]:
     """手順 4 と 5 の報告の行。"""
     return [
         f"launch template {TEMPLATE}: {what}",
-        f"association {SSHD} ({ASSOCIATION}): {what}"
-        if what == "deleted"
-        else f"association {SSHD}: {what}",
         f"parameters under /{NAME}/: deleted (1)"
         if what == "deleted"
         else f"parameters under /{NAME}/: {what}",
@@ -354,11 +406,20 @@ def test_it_destroys_everything_and_reports_what_is_left(
 def test_it_deletes_in_the_order_of_the_design(
     aws_stubs: Stubs, configured: Service, command: Path, calls: list[str]
 ) -> None:
-    """起動テンプレート、関連付け、/<名前> の下の SSM パラメータ、セキュリティグループ、
-    インスタンスプロファイル、IAM ロールの順に消す。"""
+    """起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティグループ、
+    インスタンスプロファイル、IAM ロールの順に消す。
+
+    ロールのタグと、ロールがほかのインスタンスプロファイルに入っていないことは、
+    インスタンスプロファイルを消す前に確かめる。ロールは、管理ポリシーを外し、インライン
+    ポリシーを消し、最後に消す。IAM の DeleteRole は、どちらかが残っていると断る。
+    """
     _ = command
     no_instance(aws_stubs)
-    all_deleted(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    iam_deleted(aws_stubs, ("temt-ec2",), (MANAGED,))
     images(aws_stubs, IMAGE)
 
     destroy.run(configured, yes=True)
@@ -367,19 +428,21 @@ def test_it_deletes_in_the_order_of_the_design(
     assert calls == [
         "DescribeInstances",
         "ListRolePolicies",
+        "ListAttachedRolePolicies",
         "DeleteLaunchTemplate",
-        "ListAssociations",
-        "DeleteAssociation",
         "GetParametersByPath",
         "DeleteParameters",
         "DescribeSecurityGroups",
         "DeleteSecurityGroup",
+        "GetRole",
+        "ListInstanceProfilesForRole",
         "GetInstanceProfile",
         "RemoveRoleFromInstanceProfile",
         "DeleteInstanceProfile",
         "ListAttachedRolePolicies",
-        "ListInstanceProfilesForRole",
+        "DetachRolePolicy",
         "ListRolePolicies",
+        "DeleteRolePolicy",
         "DeleteRole",
         "DescribeImages",
     ]
@@ -426,16 +489,17 @@ def test_it_finishes_when_the_amis_cannot_be_read(
 def test_it_reports_what_was_not_there(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """何も無ければ、5 つとも absent と知らせて終わる。エラーにはしない。"""
-    no_instance(aws_stubs)
+    """何も無ければ、どれも absent と知らせて終わる。エラーにはしない。"""
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    # 手順 2 の一覧も、ロールが無ければ空とする
+    missing(aws_stubs.iam, "list_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
+    missing(aws_stubs.iam, "list_attached_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
     missing(aws_stubs.ec2, "delete_launch_template", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE)
-    listed_associations(aws_stubs.ssm)
     no_parameters(aws_stubs)
     the_group(aws_stubs)
+    # ロールが無ければ、ロールを入れたインスタンスプロファイルは読まない
+    missing(aws_stubs.iam, "get_role", resources.NO_SUCH_ENTITY, **THE_ROLE)
     missing(aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, **THE_PROFILE)
-    missing(aws_stubs.iam, "list_attached_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
-    missing(aws_stubs.iam, "list_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
-    missing(aws_stubs.iam, "delete_role", resources.NO_SUCH_ENTITY, **THE_ROLE)
     images(aws_stubs)
 
     destroy.run(configured, yes=True)
@@ -465,13 +529,12 @@ def test_it_names_and_deletes_every_inline_policy(
     _ = command
     names = ("temt-jupyter", "temt-idle", "by-hand")
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    inline(aws_stubs, *names)
+    held(aws_stubs, names)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     group_deleted(aws_stubs)
-    profile_deleted(aws_stubs)
-    role_deleted(aws_stubs, *names)
+    iam_deleted(aws_stubs, names)
     images(aws_stubs, IMAGE)
 
     destroy.run(configured, yes=False)
@@ -482,7 +545,7 @@ def test_it_names_and_deletes_every_inline_policy(
     listing = listed(role=f"role {NAME} (inline policies: temt-jupyter, temt-idle, by-hand)")
     assert captured.out.startswith(listing)
     reported = told(captured.out.removeprefix(listing))
-    assert reported[5:9] == [
+    assert reported[4:8] == [
         "role policy temt-jupyter: deleted",
         "role policy temt-idle: deleted",
         "role policy by-hand: deleted",
@@ -499,9 +562,10 @@ def test_it_goes_on_when_an_inline_policy_is_already_gone(
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME)
     profile_deleted(aws_stubs)
-    unheld(aws_stubs)
-    inline(aws_stubs, "temt-jupyter")
+    aws_stubs.iam.add_response("list_attached_role_policies", attached(), THE_ROLE)
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": ["temt-jupyter"]}, THE_ROLE)
     missing(
         aws_stubs.iam,
         "delete_role_policy",
@@ -538,7 +602,7 @@ def test_it_terminates_the_instance_before_it_deletes(
         SEARCH,
     )
     # 手順 2
-    inline(aws_stubs)
+    held(aws_stubs)
     # 手順 3
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
@@ -575,7 +639,7 @@ def test_it_terminates_every_instance_with_the_name(
         reservations(an_instance(INSTANCE, "running"), an_instance(OTHER, "stopped")),
         SEARCH,
     )
-    inline(aws_stubs)
+    held(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response("terminate_instances", terminating(OTHER), {"InstanceIds": [OTHER]})
     both = {"InstanceIds": [INSTANCE, OTHER]}
@@ -622,7 +686,7 @@ def test_it_deletes_nothing_when_the_instance_does_not_go_away(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
-    inline(aws_stubs)
+    held(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     for _ in range(6):
         aws_stubs.ec2.add_response(
@@ -732,7 +796,6 @@ def test_the_error_codes_are_the_ones_aws_returns() -> None:
     テストの応答も同じ定数で作るので、値はここで固定する。
     """
     assert resources.NO_SUCH_GROUP == "InvalidGroup.NotFound"
-    assert resources.NO_SUCH_ASSOCIATION == "AssociationDoesNotExist"
     assert resources.DEPENDENCY_VIOLATION == "DependencyViolation"
     assert resources.DELETE_CONFLICT == "DeleteConflict"
 
@@ -750,8 +813,7 @@ def test_it_deletes_every_group_with_the_name(
     the_group(aws_stubs, (GROUP, VPC), (OTHER_GROUP, OTHER_VPC))
     group_deleted(aws_stubs)
     aws_stubs.ec2.add_response("delete_security_group", {"Return": True}, {"GroupId": OTHER_GROUP})
-    profile_deleted(aws_stubs)
-    role_deleted(aws_stubs)
+    iam_deleted(aws_stubs)
     images(aws_stubs)
 
     destroy.run(configured, yes=True)
@@ -773,8 +835,7 @@ def test_it_counts_a_group_gone_after_listing_as_absent(
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     missing(aws_stubs.ec2, "delete_security_group", resources.NO_SUCH_GROUP, **THE_GROUP_ID)
-    profile_deleted(aws_stubs)
-    role_deleted(aws_stubs)
+    iam_deleted(aws_stubs)
     images(aws_stubs)
 
     destroy.run(configured, yes=True)
@@ -794,6 +855,8 @@ def test_it_stops_when_the_instance_profile_holds_another_role(
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     group_deleted(aws_stubs)
+    # ロール <名前> は、どのインスタンスプロファイルにも入っていない
+    role_read(aws_stubs)
     aws_stubs.iam.add_response("get_instance_profile", a_profile(["other"]), THE_PROFILE)
 
     with pytest.raises(
@@ -820,6 +883,7 @@ def test_it_stops_when_the_instance_profile_will_not_go(
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME)
     aws_stubs.iam.add_response("get_instance_profile", a_profile([NAME]), THE_PROFILE)
     aws_stubs.iam.add_response(
         "remove_role_from_instance_profile", {}, {"InstanceProfileName": NAME, "RoleName": NAME}
@@ -844,47 +908,316 @@ def test_it_stops_when_the_instance_profile_will_not_go(
     aws_stubs.done()
 
 
-def test_it_stops_when_the_role_has_more_attached(
-    aws_stubs: Stubs, configured: Service, command: Path
+def test_it_detaches_the_managed_policies_and_deletes_the_role(
+    aws_stubs: Stubs,
+    configured: Service,
+    answer: Terminal,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """管理ポリシーは temt が付けないので、付いていれば手で付けたものである。インライン
-    ポリシーも消さずに止まる。"""
-    other = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+    """管理ポリシーは外すだけで、ポリシーそのものは残す。temt が作ったものではない。
+
+    外すものも確認の一覧に挙げ、外したものを 1 つずつ知らせる。
+    """
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    held(aws_stubs, ("temt-ec2", "by-hand"), (MANAGED, CUSTOMER))
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    iam_deleted(aws_stubs, ("temt-ec2", "by-hand"), (MANAGED, CUSTOMER))
+    images(aws_stubs)
+
+    destroy.run(configured, yes=False)
+
+    # 管理ポリシーを消す呼び出し（DeletePolicy）は積んでいないので、呼べば Stubber が失敗する
+    aws_stubs.done()
+    assert answer.reads == 1
+    captured = capsys.readouterr()
+    listing = listed(
+        role=(
+            f"role {NAME} (inline policies: temt-ec2, by-hand; "
+            f"managed policies: {MANAGED}, {CUSTOMER})"
+        )
+    )
+    assert captured.out.startswith(listing)
+    assert told(captured.out.removeprefix(listing))[3:9] == [
+        f"instance profile {NAME}: deleted",
+        f"role {NAME}: detached {MANAGED}",
+        f"role {NAME}: detached {CUSTOMER}",
+        "role policy temt-ec2: deleted",
+        "role policy by-hand: deleted",
+        f"role {NAME}: deleted",
+    ]
+
+
+def test_it_lists_only_the_managed_policies_when_there_is_no_inline_one(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """確認の一覧には、付いているものだけを挙げる。"""
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    held(aws_stubs, managed=(MANAGED,))
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    iam_deleted(aws_stubs, managed=(MANAGED,))
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert capsys.readouterr().out.startswith(
+        listed(role=f"role {NAME} (managed policies: {MANAGED})")
+    )
+
+
+def test_it_stops_when_the_role_is_in_another_instance_profile(
+    aws_stubs: Stubs,
+    configured: Service,
+    command: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ロールがほかのインスタンスプロファイルにも入っていれば、インスタンスプロファイル
+    <名前> も消さず、ロールから何も外さず、ロールも消さずに止まる。それより前に消すもの
+    （セキュリティグループまで）は消える。
+
+    インスタンスプロファイル <名前> は、ロールを入れていても、ほかのものとは数えない。
+    """
     no_instance(aws_stubs)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
     group_deleted(aws_stubs)
-    profile_deleted(aws_stubs)
-    aws_stubs.iam.add_response(
-        "list_attached_role_policies",
-        {"AttachedPolicies": [{"PolicyName": "ReadOnlyAccess", "PolicyArn": other}]},
-        THE_ROLE,
+    role_read(aws_stubs, NAME, "web-profile")
+
+    with pytest.raises(TemtError) as caught:
+        destroy.run(configured, yes=True)
+
+    assert str(caught.value) == (
+        f"the role {NAME} is also in the instance profile web-profile; "
+        "remove it from there by hand and run destroy again"
     )
-    aws_stubs.iam.add_response(
-        "list_instance_profiles_for_role",
-        # 自分のプロファイルは直前に消したもので、IAM の反映が遅れて残っても数えない
-        {
-            "InstanceProfiles": [
-                a_profile([NAME])["InstanceProfile"],
-                {**a_profile([NAME])["InstanceProfile"], "InstanceProfileName": "other"},
-            ]
-        },
-        THE_ROLE,
+    # インスタンスプロファイルを読む呼び出しも、ロールのポリシーを外す呼び出しも積んで
+    # いない
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[-1] == f"security group {NAME} ({GROUP}): deleted"
+    # 手順 5 は手順 4 の後なので、サービスのコマンドも known_hosts も残る
+    assert command.exists()
+    assert configured.known_hosts_dir.is_dir()
+
+
+def test_it_stops_when_the_role_is_in_the_instance_profile_left_alone(
+    aws_stubs: Stubs,
+    configured: Service,
+    command: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """タグが違って残したインスタンスプロファイル <名前> にロールが入っていれば、ロールの
+    ポリシーを外しも消しもせずに止まる。
+
+    残したインスタンスプロファイルは誰かが使っているかもしれず、ロールのポリシーだけを
+    消すと、そのインスタンスが権限を失う。
+    """
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME)
+    aws_stubs.iam.add_response("get_instance_profile", a_profile([NAME], tags=None), THE_PROFILE)
+
+    with pytest.raises(TemtError) as caught:
+        destroy.run(configured, yes=True)
+
+    assert str(caught.value) == (
+        f"the role {NAME} is also in the instance profile {NAME}, which is left as it is not "
+        "tagged temt:service=dev-main; remove the role from it by hand and run destroy again"
+    )
+    # ロールを外す、ポリシーを外す、消す呼び出しは積んでいない
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[-1] == f"instance profile {NAME}: {LEFT}"
+    assert command.exists()
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        pytest.param(None, id="untagged"),
+        pytest.param([{"Key": "Name", "Value": NAME}], id="other-tags"),
+        pytest.param([{"Key": "temt:service", "Value": "dev-other"}], id="other-service"),
+    ],
+)
+def test_it_leaves_a_pair_not_tagged_for_the_service(
+    aws_stubs: Stubs,
+    configured: Service,
+    capsys: pytest.CaptureFixture[str],
+    tags: list[dict[str, str]] | None,
+) -> None:
+    """temt:service=<svc> の無いインスタンスプロファイルとロールは、外しも消しもせずに
+    残し、そう知らせて先へ進む。設定ファイルが指しているかどうかは問わない。
+
+    ロールを消さないので、ロールを入れたインスタンスプロファイルも読まない。
+    """
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    aws_stubs.iam.add_response("get_role", a_role(tags=tags), THE_ROLE)
+    aws_stubs.iam.add_response("get_instance_profile", a_profile([NAME], tags=tags), THE_PROFILE)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    # ロールを外す、ポリシーを外す、消す呼び出しは積んでいない
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :] == [
+        f"launch template {TEMPLATE}: deleted",
+        f"parameters under /{NAME}/: deleted (1)",
+        f"security group {NAME} ({GROUP}): deleted",
+        f"instance profile {NAME}: {LEFT}",
+        f"role {NAME}: {LEFT}",
+        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
+        f"~/.local/bin/{NAME}: absent",
+        *staying(image=None),
+    ]
+
+
+@pytest.mark.parametrize("left", ["instance profile", "role"])
+def test_it_decides_each_of_the_pair_by_its_own_tag(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str], left: str
+) -> None:
+    """インスタンスプロファイルとロールは、それぞれ自分のタグで決める。片方だけでも消す。
+
+    残すインスタンスプロファイルにロールが入っていなければ、ロールは消す。残すロールが
+    入っていても、インスタンスプロファイルからロール <名前> を外して消す。
+    """
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    if left == "instance profile":
+        role_read(aws_stubs)
+        aws_stubs.iam.add_response("get_instance_profile", a_profile([], tags=None), THE_PROFILE)
+        role_stripped(aws_stubs)
+    else:
+        aws_stubs.iam.add_response("get_role", a_role(tags=None), THE_ROLE)
+        profile_deleted(aws_stubs)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    lines = told(capsys.readouterr().out)
+    profile_state = LEFT if left == "instance profile" else "deleted"
+    role_state = LEFT if left == "role" else "deleted"
+    assert lines[len(LISTING.splitlines()) :][3:5] == [
+        f"instance profile {NAME}: {profile_state}",
+        f"role {NAME}: {role_state}",
+    ]
+
+
+def test_it_deletes_the_instance_profile_when_the_role_is_gone(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ロールが無くても、インスタンスプロファイル <名前> は消し、ロールは absent と知らせる。"""
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    missing(aws_stubs.iam, "get_role", resources.NO_SUCH_ENTITY, **THE_ROLE)
+    # ロールが無いので、インスタンスプロファイルにも入っていない。外す呼び出しは積まない
+    aws_stubs.iam.add_response("get_instance_profile", a_profile([]), THE_PROFILE)
+    aws_stubs.iam.add_response("delete_instance_profile", {}, THE_PROFILE)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][3:5] == [
+        f"instance profile {NAME}: deleted",
+        f"role {NAME}: absent",
+    ]
+
+
+def test_it_does_not_count_the_instance_profile_deleted_before(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """前の実行で消したインスタンスプロファイル <名前> が、IAM の反映が遅れて、ロールを
+    入れたものの一覧に残っていても、ほかのものとは数えずにロールを消す。
+    """
+    no_instance(aws_stubs)
+    missing(aws_stubs.ec2, "delete_launch_template", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE)
+    no_parameters(aws_stubs)
+    the_group(aws_stubs)
+    role_read(aws_stubs, NAME)
+    missing(aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, **THE_PROFILE)
+    role_stripped(aws_stubs)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][3:5] == [
+        f"instance profile {NAME}: absent",
+        f"role {NAME}: deleted",
+    ]
+
+
+def test_it_stops_when_the_role_will_not_go(aws_stubs: Stubs, configured: Service) -> None:
+    """外したことが IAM にまだ映らないときも、読んだ後に何かが付いたときも、消せなかった
+    ことと AWS の文、両方の直し方が伝わる。"""
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME)
+    profile_deleted(aws_stubs)
+    aws_stubs.iam.add_response("list_attached_role_policies", attached(), THE_ROLE)
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": []}, THE_ROLE)
+    aws_stubs.iam.add_client_error(
+        "delete_role",
+        service_error_code=resources.DELETE_CONFLICT,
+        service_message="Cannot delete entity, must detach all policies first.",
+        http_status_code=409,
+        expected_params=THE_ROLE,
     )
 
     with pytest.raises(TemtError) as caught:
         destroy.run(configured, yes=True)
 
     assert str(caught.value) == (
-        f"the role {NAME} is still held by the managed policy {other}, "
-        "the instance profile other; detach or remove them by hand and run destroy again"
+        f"cannot delete the role {NAME}: An error occurred (DeleteConflict) when calling the "
+        "DeleteRole operation: Cannot delete entity, must detach all policies first.; if "
+        "nothing is attached to it, IAM may not show the change yet, so run destroy "
+        "again; otherwise detach it by hand and run destroy again"
     )
+    aws_stubs.done()
+
+
+def test_it_counts_a_role_gone_before_deleting_as_absent(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """読んでから消すまでに消えたロール（並行する destroy など）は absent と知らせる。"""
+    no_instance(aws_stubs)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME)
+    profile_deleted(aws_stubs)
+    aws_stubs.iam.add_response("list_attached_role_policies", attached(), THE_ROLE)
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": []}, THE_ROLE)
+    missing(aws_stubs.iam, "delete_role", resources.NO_SUCH_ENTITY, **THE_ROLE)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    # 手順 5 は手順 4 の後なので、サービスのコマンドも known_hosts も残る
-    assert command.exists()
-    assert configured.known_hosts_dir.is_dir()
+    assert f"role {NAME}: absent" in told(capsys.readouterr().out)
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink"])
@@ -1006,19 +1339,19 @@ def test_a_second_run_goes_on_from_where_it_stopped(
     """消えたものは absent で飛ばし、残りを消す。"""
     no_instance(aws_stubs)
     missing(aws_stubs.ec2, "delete_launch_template", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE)
-    listed_associations(aws_stubs.ssm)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs)
+    # インスタンスプロファイルは前の実行で消えていて、ロールはどれにも入っていない
+    role_read(aws_stubs)
     missing(aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, **THE_PROFILE)
-    role_deleted(aws_stubs)
+    role_stripped(aws_stubs)
     images(aws_stubs)
 
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][:6] == [
+    assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][:5] == [
         f"launch template {TEMPLATE}: absent",
-        f"association {SSHD}: absent",
         f"parameters under /{NAME}/: deleted (1)",
         f"security group {NAME}: absent",
         f"instance profile {NAME}: absent",
@@ -1060,7 +1393,7 @@ def test_it_holds_the_lock_while_it_waits(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
-    inline(aws_stubs)
+    held(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "shutting-down")), BY_ID

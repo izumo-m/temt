@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -1089,10 +1091,10 @@ def test_aws_cli_is_looked_up_in_order(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_instance_reads_the_name_and_the_region(monkeypatch: pytest.MonkeyPatch) -> None:
-    """IMDSv2 のトークンを取ってから、Name タグとリージョンを読む。"""
+    """IMDSv2 のトークンを取ってから、タグ temt:service とリージョンを読む。"""
     module: Any = load()
     answers = {
-        "http://169.254.169.254/latest/meta-data/tags/instance/Name": "temt-web\n",
+        "http://169.254.169.254/latest/meta-data/tags/instance/temt:service": "web\n",
         "http://169.254.169.254/latest/meta-data/placement/region": "ap-northeast-1",
     }
 
@@ -1106,9 +1108,49 @@ def test_instance_reads_the_name_and_the_region(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(module, "_fetch", fetch)
     assert module._instance() == ("temt-web", "ap-northeast-1")
-    answers["http://169.254.169.254/latest/meta-data/tags/instance/Name"] = ""
-    with pytest.raises(ValueError, match="the Name tag or the region is empty"):
+    answers["http://169.254.169.254/latest/meta-data/tags/instance/temt:service"] = ""
+    with pytest.raises(ValueError, match="the tag temt:service or the region is empty"):
         module._instance()
+
+
+def test_service_passes_when_the_tag_is_readable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """install の初めに、タグ temt:service が読めれば何も言わずに通る。"""
+    module: Any = load()
+    monkeypatch.setattr(module, "_imds_token", lambda: "TOKEN")
+    monkeypatch.setattr(module, "_imds", lambda path, token: "web")
+    assert module.main(["service"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_service_tells_how_to_enable_the_tags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """タグが読めなければ（IMDS は 404 を返す）、設定ファイルと今のインスタンスの直し方を
+    告げて失敗する。"""
+    module: Any = load()
+
+    def imds(path: str, token: str) -> str:
+        if path == "instance-id":
+            return "i-0123456789abcdef0"
+        raise urllib.error.HTTPError(path, 404, "Not Found", Message(), None)
+
+    monkeypatch.setattr(module, "_imds_token", lambda: "TOKEN")
+    monkeypatch.setattr(module, "_imds", imds)
+    assert module.main(["service"]) == 1
+    err = capsys.readouterr().err
+    assert "cannot read the tag temt:service from the instance metadata" in err
+    assert 'MetadataOptions.InstanceMetadataTags = "enabled"' in err
+    assert "--instance-id i-0123456789abcdef0 --instance-metadata-tags enabled" in err
+    assert "then deploy again" in err
+
+
+def test_install_checks_the_tag_before_anything() -> None:
+    """install は、タグ temt:service が読めることを、制限時間を書くより先に確かめる。"""
+    install = (APP / "install").read_text(encoding="utf-8")
+    checked = install.index('python3 -I "$here/idle_shutdown.py" service')
+    assert checked < install.index("limit --deploy")
 
 
 def test_install_puts_aws_cli_with_snap() -> None:

@@ -5,9 +5,8 @@
 書く。instance show（短縮形 status）は status の module が持つ。次の apply が
 何を変えるかは diff が出すので、ここでは設定ファイルと比べない。
 
-項目のラベルは、設定ファイルから来る 4 つ（ImageId、InstanceType、SubnetId、
-VolumeSize）だけ設定ファイルのキーにし、temt が決める項目は平たい言葉にする。
-どの項目が設定ファイルから来るかが、名前で分かるようにするためである。
+既定バージョンの中身は、設定ファイルの [launch-template] と同じ TOML の形で、全部を
+出す。そのまま設定ファイルに写せる。読み出したときにだけある項目は出さない。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -17,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from temt import aws, conf, msg, resources
+from temt import aws, conf, ltdata, msg, resources
 from temt.table import printable
 
 if TYPE_CHECKING:
@@ -52,54 +51,36 @@ def _text(value: Any) -> str:
 
 
 def _interface(data: Mapping[str, Any]) -> Mapping[str, Any]:
-    """temt が入れるネットワークインターフェース。無ければ空とする。"""
-    interfaces: Sequence[Mapping[str, Any]] = data["NetworkInterfaces"]
-    return interfaces[0] if interfaces else {}
+    """NetworkInterfaces の DeviceIndex が 0 の要素。無ければ空とする。"""
+    return ltdata.element(data.get("NetworkInterfaces") or [], "DeviceIndex", 0) or {}
 
 
-def _subnet(ec2: EC2Client, subnet_id: Any) -> str:
-    """SubnetId の表示。そのサブネットが属する VPC を添える。
+def _vpc(ec2: EC2Client, subnet_id: Any) -> str:
+    """SubnetId に添える、そのサブネットが属する VPC。
 
     aws.subnet は IPv4 の CIDR が無いサブネットをエラーにするので、表示には使わない。
     サブネットが消えていても、その旨を添えて表示を続ける。
     """
-    if not isinstance(subnet_id, str) or not aws.SUBNET_ID_RE.fullmatch(subnet_id):
-        return _text(subnet_id)
     found = ec2.describe_subnets(Filters=[{"Name": "subnet-id", "Values": [subnet_id]}]).get(
         "Subnets", []
     )
     vpc_id = found[0].get("VpcId") if found else None
-    return f"{subnet_id} ({vpc_id})" if vpc_id else f"{subnet_id} {NO_SUCH_SUBNET_NOTE}"
+    return str(vpc_id) if vpc_id else NO_SUCH_SUBNET_NOTE
 
 
 def _show_default(
     ec2: EC2Client, service: Service, version: Mapping[str, Any], data: Mapping[str, Any]
 ) -> None:
-    """1 つめ。既定バージョンの、temt が管理する項目を表示する。"""
-    interface = _interface(data)
+    """1 つめ。既定バージョンの中身を、設定ファイルと同じ TOML の形で表示する。"""
     number = _text(version.get("VersionNumber"))
-    rows = [
-        ("version", f"{number} (created {aws.when(version.get('CreateTime'))})"),
-        ("ImageId", _text(data["ImageId"])),
-        ("InstanceType", _text(data["InstanceType"])),
-        ("VolumeSize", _text(resources.volume_size(data))),
-        ("SubnetId", _subnet(ec2, interface.get("SubnetId"))),
-        ("security groups", _text(" ".join(interface.get("Groups") or []))),
-        ("instance profile", _text(data["IamInstanceProfile"])),
-        ("shutdown behavior", _text(data["InstanceInitiatedShutdownBehavior"])),
-        ("cpu credits", _text(data["CpuCredits"])),
-        ("public ipv4", _text(interface.get("AssociatePublicIpAddress"))),
-        # projection が項目なしと 0 を同じ None に畳むので、数として 0 に戻す
-        ("ipv6 addresses", _text(interface.get("Ipv6AddressCount") or 0)),
-        ("http tokens", _text(data["HttpTokens"])),
-        ("metadata tags", _text(data["InstanceMetadataTags"])),
-    ]
-    rows += [
-        (f"{kind} tags", printable(" ".join(f"{key}={value}" for key, value in tags)))
-        for kind, tags in data["TagSpecifications"]
-    ]
+    subnet_id = _interface(data).get("SubnetId")
+    notes: dict[str, str] = {}
+    if isinstance(subnet_id, str) and aws.SUBNET_ID_RE.fullmatch(subnet_id):
+        notes[subnet_id] = _vpc(ec2, subnet_id)
     msg.tell(f"launch template {service.launch_template}:\n")
-    msg.rows(rows)
+    msg.rows([("version", f"{number} (created {aws.when(version.get('CreateTime'))})")])
+    lines = ltdata.render(ltdata.readable(data), notes)
+    msg.tell("".join(f"  {printable(line)}\n" if line else "\n" for line in lines))
 
 
 def _image(ec2: EC2Client, image_id: str) -> Mapping[str, Any] | None:
@@ -151,11 +132,11 @@ def _show_versions(versions: Sequence[Mapping[str, Any]]) -> None:
     width = max(len(number) for number in numbers)
     msg.tell(f"versions ({DEFAULT_MARK} is the default):\n")
     for number, one in zip(numbers, ordered, strict=True):
-        data = resources.projection(one.get("LaunchTemplateData") or {})
+        data = one.get("LaunchTemplateData") or {}
         mark = DEFAULT_MARK if one.get("DefaultVersion") else " "
         msg.tell(
             f"  {number:>{width}} {mark} {aws.when(one.get('CreateTime'))} "
-            f"{_text(data['ImageId'])} {_text(data['InstanceType'])} "
+            f"{_text(data.get('ImageId'))} {_text(data.get('InstanceType'))} "
             f"{_text(_interface(data).get('SubnetId'))}\n"
         )
 
@@ -167,7 +148,7 @@ def template(service: Service) -> None:
     ec2 = session.client("ec2")
     versions = resources.versions(ec2, service)
     current = resources.default_version(versions, service)
-    data = resources.projection(current.get("LaunchTemplateData") or {})
+    data = current.get("LaunchTemplateData") or {}
     _show_default(ec2, service, current, data)
-    _show_image(ec2, service, data["ImageId"])
+    _show_image(ec2, service, data.get("ImageId"))
     _show_versions(versions)

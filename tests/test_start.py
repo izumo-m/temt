@@ -28,7 +28,7 @@ ADDRESS = "203.0.113.10"
 TEMPLATES = {"LaunchTemplateNames": [TEMPLATE]}
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
@@ -113,6 +113,32 @@ def test_it_launches_and_waits_until_login_is_possible(
     ]
     # start は何も確認しない
     assert "[y/N]" not in err
+
+
+def test_it_ends_at_running_without_waiting_for_ssm(
+    aws_stubs: Stubs, configured: Service, clock: Clock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WaitForSsm = false なら、running になったところで終わり、SSM には問い合わせない。"""
+    configured.conf_path.write_text(
+        configured.conf_path.read_text(encoding="utf-8").replace(
+            "[launch-template]", "WaitForSsm = false\n\n[launch-template]", 1
+        ),
+        encoding="utf-8",
+    )
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
+    launched(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), BY_ID
+    )
+
+    start.run(configured, is_async=False)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out) == [
+        f"launched {INSTANCE} from {TEMPLATE}",
+        f"{INSTANCE} is running",
+    ]
 
 
 def test_it_makes_the_known_hosts_directories_private(

@@ -1,5 +1,7 @@
 """サービスの AWS リソースを揃える処理のテスト。AWS は Stubber で差し替える。"""
 
+import base64
+import copy
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -8,22 +10,13 @@ from urllib.parse import quote
 import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
-from conftest import (
-    ASSOCIATION,
-    SSHD,
-    association_content,
-    association_in_place,
-    association_started,
-    described_association,
-    listed_associations,
-)
 from types_boto3_ec2.client import EC2Client
 from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 
-from temt import policy, resources, sshd
+from temt import ltbuild, policy, resources
 from temt.change import Change
-from temt.conf import Conf, Ingress, LaunchTemplate, SecurityGroup
+from temt.conf import Conf, Ingress, Role, SecurityGroup
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -37,10 +30,8 @@ GROUP = "sg-0123456789abcdef0"
 IMAGE = "ami-0123456789abcdef0"
 TEMPLATE_ID = "lt-0123456789abcdef0"
 WHEN = datetime(2026, 9, 20, tzinfo=UTC)
-# 同じ名前の、もう 1 つの関連付けの ID
-OTHER_ASSOCIATION = "99999999-8888-7777-6666-555555555555"
 
-# temt が管理していることを示すタグ。5 つに付ける
+# temt が管理していることを示すタグ。4 つに付ける
 MARK: list[dict[str, str]] = [{"Key": "temt:service", "Value": "dev-main"}]
 # インスタンスとそのボリュームとネットワークインターフェース、セキュリティグループに付けるタグ
 TAGS: list[dict[str, str]] = [{"Key": "Name", "Value": NAME}, *MARK]
@@ -62,24 +53,26 @@ STATEMENT: dict[str, Any] = {
 CONTENT: dict[str, Any] = {"Version": policy.VERSION, "Statement": [STATEMENT]}
 JUPYTER = policy.policy_name("jupyter")
 THE_POLICY = {"RoleName": NAME, "PolicyName": JUPYTER}
+# 管理ポリシーの ARN
+S3_READ = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+SSM_CORE = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 # 足した temt のタグの、diff での表示
 MARK_SHOWN = "tags: temt:service=dev-main"
 
-VALUES = Conf(launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET))
+# 受信規則もポリシーも無い設定
+VALUES = Conf()
 
 # 揃っているときに、detect が AWS を読む順。update が揃える順と同じである。インライン
 # ポリシーは無い
 READS = [
     "GetRole",
     "ListRolePolicies",
+    "ListAttachedRolePolicies",
     "GetInstanceProfile",
     "DescribeSecurityGroups",
     "DescribeSecurityGroupRules",
     "DescribeLaunchTemplateVersions",
     "DescribeLaunchTemplates",
-    "ListAssociations",
-    "DescribeAssociation",
-    "ListTagsForResource",
 ]
 
 
@@ -155,42 +148,58 @@ def missing(stub: Stubber, method: str, code: str, **params: Any) -> None:
     )
 
 
-def wanted(*, ipv6: bool = False) -> dict[str, Any]:
-    """temt が起動テンプレートに入れる設定。"""
-    return dict(
-        resources.template_data(Service("dev-main"), VALUES, IMAGE, SUBNET, GROUP, ipv6=ipv6)
-    )
-
-
-def echo(**changes: Any) -> dict[str, Any]:
-    """AWS が返す形。並びを変え、名前は ARN で返し、temt が決めない項目を混ぜる。
-
-    手で足された項目があっても動じないことを確かめるために EbsOptimized を、
-    IPv6 アドレスを付けないことを 0 で表した応答も同じと見なすことを確かめるために
-    Ipv6AddressCount = 0 を入れてある。
-    """
-    data = wanted()
-    data["IamInstanceProfile"] = {"Arn": f"arn:aws:iam::123456789012:instance-profile/{NAME}"}
-    data["NetworkInterfaces"] = [{**data["NetworkInterfaces"][0], "Ipv6AddressCount": 0}]
-    data["TagSpecifications"] = [
-        {"ResourceType": one["ResourceType"], "Tags": list(reversed(one["Tags"]))}
-        for one in reversed(data["TagSpecifications"])
-    ]
-    data["EbsOptimized"] = False
-    return {**data, **changes}
-
-
 def tags(resource_type: str) -> dict[str, Any]:
     """1 つのリソース種別ぶんのタグ仕様。"""
     return {"ResourceType": resource_type, "Tags": TAGS}
 
 
+# 起動テンプレートに入れる中身。ltbuild.build が設定ファイルから組み立てたものに当たる
+WANTED: dict[str, Any] = {
+    "ImageId": IMAGE,
+    "InstanceType": "t3.micro",
+    "InstanceInitiatedShutdownBehavior": "terminate",
+    "IamInstanceProfile": {"Name": NAME},
+    "NetworkInterfaces": [
+        {"DeviceIndex": 0, "SubnetId": SUBNET, "AssociatePublicIpAddress": True, "Groups": [GROUP]}
+    ],
+    "MetadataOptions": {"HttpTokens": "required", "InstanceMetadataTags": "enabled"},
+    "CreditSpecification": {"CpuCredits": "unlimited"},
+    "TagSpecifications": [tags("instance"), tags("volume"), tags("network-interface")],
+}
+
+
+def wanted(**changes: Any) -> dict[str, Any]:
+    """WANTED の写し。changes で最上位の項目を足すか替える。"""
+    return {**copy.deepcopy(WANTED), **changes}
+
+
+def echo(**changes: Any) -> dict[str, Any]:
+    """WANTED を、AWS が読み出しで返す形にしたもの。changes で最上位の項目を足すか替える。
+
+    配列の並びを変え、IamInstanceProfile を ARN で返し、空の配列と、読み出したときにだけ
+    ある MetadataOptions.State を混ぜる。どれも違いと見なさない。
+    """
+    data = wanted()
+    data["IamInstanceProfile"] = {"Arn": f"arn:aws:iam::123456789012:instance-profile/{NAME}"}
+    data["MetadataOptions"] = {**data["MetadataOptions"], "State": "applied"}
+    data["TagSpecifications"] = [
+        {"ResourceType": one["ResourceType"], "Tags": list(reversed(one["Tags"]))}
+        for one in reversed(data["TagSpecifications"])
+    ]
+    data["SecurityGroupIds"] = []
+    return {**data, **changes}
+
+
+def without(key: str) -> dict[str, Any]:
+    """echo() から、最上位の項目 key を除いたもの。"""
+    data = echo()
+    del data[key]
+    return data
+
+
 def with_ingress(*ingress: Ingress) -> Conf:
     """受信規則を定めた設定。"""
-    return Conf(
-        launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET),
-        security_group=SecurityGroup(ingress=list(ingress)),
-    )
+    return Conf(security_group=SecurityGroup(ingress=list(ingress)))
 
 
 def a_group(*, group_id: str = GROUP, vpc_id: str = VPC, tagged: bool = True) -> dict[str, Any]:
@@ -344,6 +353,26 @@ def create_template(stub: Stubber, data: dict[str, Any], **response: Any) -> Non
     )
 
 
+def new_version(stub: Stubber, data: dict[str, Any], number: int = 2, *old: int) -> None:
+    """中身 data の新しいバージョン number を作って既定にし、old（省けば 1）を消す応答を積む。"""
+    stub.add_response(
+        "create_launch_template_version",
+        {"LaunchTemplateVersion": {"VersionNumber": number}},
+        {"LaunchTemplateName": TEMPLATE, "LaunchTemplateData": data},
+    )
+    stub.add_response(
+        "modify_launch_template",
+        {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
+        {"LaunchTemplateName": TEMPLATE, "DefaultVersion": str(number)},
+    )
+    gone = old or (1,)
+    stub.add_response(
+        "delete_launch_template_versions",
+        deleted(*gone),
+        {"LaunchTemplateName": TEMPLATE, "Versions": [str(one) for one in gone]},
+    )
+
+
 def deleted(*numbers: int) -> dict[str, Any]:
     """delete-launch-template-versions が、すべて消せたときに返す形。"""
     return {
@@ -369,21 +398,30 @@ def align_group(ec2: EC2Client, service: Service, values: Conf = VALUES) -> str:
     return resources.security_group(ec2, service, found)
 
 
-def align_template(ec2: EC2Client, service: Service, *, ipv6: bool = False) -> None:
+def align_template(
+    ec2: EC2Client,
+    service: Service,
+    data: dict[str, Any] | None = None,
+    *,
+    group_id: str | None = None,
+    managed: bool = False,
+) -> None:
     """apply と同じく、起動テンプレートの差分を検出してから、その差分で揃える。
 
-    セキュリティグループ GROUP は、既にあるものとする。
+    data は揃える中身で、省けば wanted()。group_id は揃えたセキュリティグループの ID、
+    managed は temt のインスタンスプロファイルを揃えたか。
     """
-    found = resources.detect_template(ec2, service, VALUES, IMAGE, SUBNET, GROUP, ipv6=ipv6)
-    resources.template(ec2, service, found, GROUP)
+    found = resources.detect_template(ec2, service, wanted() if data is None else data)
+    resources.template(ec2, service, found, group_id, managed=managed)
 
 
 def iam_in_place(stub: Stubber) -> None:
-    """ロールとインスタンスプロファイルが揃っていて、インラインポリシーが無いときに
-    読む応答を積む。
+    """ロールとインスタンスプロファイルが揃っていて、インラインポリシーも管理ポリシーも
+    無いときに読む応答を積む。
     """
     stub.add_response("get_role", a_role(), {"RoleName": NAME})
     stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+    stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
     stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
 
 
@@ -395,23 +433,6 @@ def template_in_place(stub: Stubber) -> None:
         {"LaunchTemplateName": TEMPLATE},
     )
     template_tags(stub)
-
-
-def an_association(
-    stub: Stubber, ports: list[int], tags: list[dict[str, str]], *others: str
-) -> None:
-    """関連付けが名前で見つかるときに、detect_association が読む応答を積む。
-
-    最初に見つかるのは ASSOCIATION で、ports はそれに埋め込まれた SshdPorts、tags は
-    それに付いたタグ。others は、その後に見つかる同じ名前の関連付けの ID で、読まれない。
-    """
-    listed_associations(stub, ASSOCIATION, *others)
-    described_association(stub, ports)
-    stub.add_response(
-        "list_tags_for_resource",
-        {"TagList": tags},
-        {"ResourceType": "Association", "ResourceId": ASSOCIATION},
-    )
 
 
 def test_the_inline_policy_is_put_when_the_role_has_none(
@@ -631,7 +652,9 @@ def test_role_policies_puts_each_and_deletes_the_temt_ones_that_are_gone(
 
 
 def test_role_is_created_with_its_tag(iam: IAMClient, service: Service) -> None:
-    """管理ポリシーは付けない。権限はインラインポリシーだけである。"""
+    """作るときは信頼ポリシーとタグだけを渡す。権限は、インラインポリシーと管理ポリシーを
+    それぞれ別に揃える。
+    """
     with Stubber(iam) as stub:
         missing(stub, "get_role", "NoSuchEntity", RoleName=NAME)
         stub.add_response(
@@ -660,18 +683,6 @@ def test_a_role_without_any_tag_gets_it(
     """タグを 1 つも持たないロールは、AWS が Tags を返さない。"""
     with Stubber(iam) as stub:
         stub.add_response("get_role", a_role(None), {"RoleName": NAME})
-        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
-        align_role(iam, service)
-        stub.assert_no_pending_responses()
-    assert f"role {NAME}: updated" in capsys.readouterr().out
-
-
-def test_a_role_tag_with_another_value_is_rewritten(
-    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """値の違うタグは書き直す。temt が付けないタグには触らない。"""
-    with Stubber(iam) as stub:
-        stub.add_response("get_role", a_role(WRONG), {"RoleName": NAME})
         stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
@@ -777,20 +788,6 @@ def test_an_instance_profile_without_any_tag_gets_it(
     with Stubber(iam) as stub:
         stub.add_response(
             "get_instance_profile", a_profile([NAME], None), {"InstanceProfileName": NAME}
-        )
-        stub.add_response("tag_instance_profile", {}, {"InstanceProfileName": NAME, "Tags": MARK})
-        align_profile(iam, service)
-        stub.assert_no_pending_responses()
-    assert f"instance profile {NAME}: updated" in capsys.readouterr().out
-
-
-def test_an_instance_profile_tag_with_another_value_is_rewritten(
-    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """値の違うタグは書き直す。temt が付けないタグには触らない。"""
-    with Stubber(iam) as stub:
-        stub.add_response(
-            "get_instance_profile", a_profile([NAME], WRONG), {"InstanceProfileName": NAME}
         )
         stub.add_response("tag_instance_profile", {}, {"InstanceProfileName": NAME, "Tags": MARK})
         align_profile(iam, service)
@@ -1355,6 +1352,87 @@ def test_versions_asks_for_apply_when_the_template_is_gone(
             _ = resources.versions(ec2, service)
 
 
+def test_the_managed_policies_are_detected_without_writing(
+    iam: IAMClient, service: Service
+) -> None:
+    """ManagedPolicyArns に無いものを外し、付いていないものを付ける。重ねて書いたものは
+    1 度だけ付ける。付けるもの、外すものの順に見せる。
+    """
+    other = "arn:aws:iam::123456789012:policy/other"
+    with Stubber(iam) as stub:
+        stub.add_response(
+            "list_attached_role_policies", attached(SSM_CORE, other), {"RoleName": NAME}
+        )
+        found = resources.detect_managed_policies(iam, service, [other, S3_READ, S3_READ])
+        stub.assert_no_pending_responses()
+    assert found == resources.ManagedDiff(attach=(S3_READ,), detach=(SSM_CORE,))
+    assert found.changes() == [
+        Change("+", resources.MANAGED_POLICY, S3_READ),
+        Change("-", resources.MANAGED_POLICY, SSM_CORE),
+    ]
+
+
+def test_the_managed_policies_of_a_role_that_is_not_there(iam: IAMClient, service: Service) -> None:
+    """ロールが無ければ、管理ポリシーはどれも付いていないものとする。"""
+    with Stubber(iam) as stub:
+        missing(stub, "list_attached_role_policies", "NoSuchEntity", RoleName=NAME)
+        found = resources.detect_managed_policies(iam, service, [S3_READ])
+        stub.assert_no_pending_responses()
+    assert found == resources.ManagedDiff(attach=(S3_READ,))
+
+
+def test_other_errors_from_reading_the_managed_policies_are_left_to_apply(
+    iam: IAMClient, service: Service
+) -> None:
+    with Stubber(iam) as stub:
+        stub.add_client_error(
+            "list_attached_role_policies", service_error_code="AccessDenied", http_status_code=403
+        )
+        with pytest.raises(ClientError):
+            _ = resources.detect_managed_policies(iam, service, [S3_READ])
+
+
+def test_the_managed_policies_are_attached_before_detaching(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """付けてから外す。管理ポリシーそのものには触らない。"""
+    calls = recorded(iam)
+    with Stubber(iam) as stub:
+        stub.add_response("attach_role_policy", {}, {"RoleName": NAME, "PolicyArn": S3_READ})
+        stub.add_response("detach_role_policy", {}, {"RoleName": NAME, "PolicyArn": SSM_CORE})
+        resources.managed_policies(
+            iam, service, resources.ManagedDiff(attach=(S3_READ,), detach=(SSM_CORE,))
+        )
+        stub.assert_no_pending_responses()
+    assert calls == ["AttachRolePolicy", "DetachRolePolicy"]
+    out = capsys.readouterr().out
+    assert f"role {NAME}: attached {S3_READ}\n" in out
+    assert f"role {NAME}: detached {SSM_CORE}\n" in out
+
+
+def test_a_role_or_instance_profile_of_another_service_stops(
+    iam: IAMClient, service: Service
+) -> None:
+    """同じ名前でも、別のサービスの temt:service が付いていれば、temt のものではない。"""
+    other = [{"Key": "temt:service", "Value": "other"}]
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(other), {"RoleName": NAME})
+        stub.add_response(
+            "get_instance_profile", a_profile([NAME], other), {"InstanceProfileName": NAME}
+        )
+        with pytest.raises(TemtError, match=f"^the role {NAME} has temt:service=other, so it "):
+            _ = resources.detect_role(iam, service)
+        with pytest.raises(
+            TemtError,
+            match=(
+                f"^the instance profile {NAME} has temt:service=other, so it belongs to another "
+                "service; fix the tag or delete it by hand$"
+            ),
+        ):
+            _ = resources.detect_instance_profile(iam, service)
+        stub.assert_no_pending_responses()
+
+
 def test_the_launch_template_is_created_with_its_tag(
     ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1372,20 +1450,10 @@ def test_the_launch_template_is_created_with_its_tag(
     assert f"launch template {TEMPLATE}: created (version 1)" in capsys.readouterr().out
 
 
-def test_the_instance_and_its_volumes_and_network_interfaces_are_tagged() -> None:
-    """起動したインスタンスと、そのボリュームとネットワークインターフェースに、Name と
-    temt:service を付ける。"""
-    assert wanted()["TagSpecifications"] == [
-        tags("instance"),
-        tags("volume"),
-        tags("network-interface"),
-    ]
-
-
 def test_the_launch_template_that_already_matches(
     ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AWS が補った項目や並びの違いは、違いと見なさない。
+    """AWS が読み出しで変える形の違いは、違いと見なさない。
 
     テンプレート自身のタグも揃っていれば、何も書かず、知らせもしない。temt が付けない
     タグがあってもよい。
@@ -1397,8 +1465,10 @@ def test_the_launch_template_that_already_matches(
             {"LaunchTemplateName": TEMPLATE},
         )
         template_tags(stub, [*MARK, *OTHERS])
-        align_template(ec2, service)
+        found = resources.detect_template(ec2, service, wanted())
+        resources.template(ec2, service, found, None, managed=False)
         stub.assert_no_pending_responses()
+    assert found.changes() == []
     assert capsys.readouterr().err == ""
 
 
@@ -1465,97 +1535,73 @@ def test_the_tag_and_a_new_version_are_both_written(
         )
         template_tags(stub, None)
         stub.add_response("create_tags", {}, {"Resources": [TEMPLATE_ID], "Tags": MARK})
-        stub.add_response(
-            "create_launch_template_version",
-            {"LaunchTemplateVersion": {"VersionNumber": 2}},
-            {"LaunchTemplateName": TEMPLATE, "LaunchTemplateData": wanted()},
-        )
-        stub.add_response(
-            "modify_launch_template",
-            {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
-            {"LaunchTemplateName": TEMPLATE, "DefaultVersion": "2"},
-        )
-        stub.add_response(
-            "delete_launch_template_versions",
-            deleted(1),
-            {"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
-        )
+        new_version(stub, wanted())
         align_template(ec2, service)
         stub.assert_no_pending_responses()
     assert f"launch template {TEMPLATE}: updated (version 2)" in capsys.readouterr().out
 
 
-def test_every_item_that_temt_decides_is_compared(ec2: EC2Client, service: Service) -> None:
-    """temt が決める項目のどれが変わっても、新しいバージョンになる。"""
-    others: list[dict[str, Any]] = [
-        echo(ImageId="ami-00000000000000002"),
-        echo(InstanceType="t3.small"),
-        # temt は KeyName を入れない。前の temt か手で入れたものがあれば外す
-        echo(KeyName="temt"),
-        echo(InstanceInitiatedShutdownBehavior="stop"),
-        echo(CreditSpecification={"CpuCredits": "standard"}),
-        echo(
-            MetadataOptions={
-                "HttpTokens": "optional",
-                "InstanceMetadataTags": resources.METADATA_TAGS,
-            }
+@pytest.mark.parametrize(
+    "current",
+    [
+        pytest.param(echo(ImageId="ami-00000000000000002"), id="ImageId"),
+        pytest.param(echo(InstanceType="t3.small"), id="InstanceType"),
+        pytest.param(echo(InstanceInitiatedShutdownBehavior="stop"), id="shutdown"),
+        pytest.param(echo(CreditSpecification={"CpuCredits": "standard"}), id="credits"),
+        pytest.param(
+            echo(MetadataOptions={"HttpTokens": "optional", "InstanceMetadataTags": "enabled"}),
+            id="HttpTokens",
         ),
-        echo(
-            MetadataOptions={
-                "HttpTokens": resources.HTTP_TOKENS,
-                "InstanceMetadataTags": "disabled",
-            }
+        pytest.param(
+            echo(IamInstanceProfile={"Arn": "arn:aws:iam::123456789012:instance-profile/other"}),
+            id="another instance profile",
         ),
-        echo(IamInstanceProfile={"Arn": "arn:aws:iam::123456789012:instance-profile/other"}),
-        interface(SubnetId="subnet-00000000000000002"),
-        interface(Groups=["sg-00000000000000002"]),
-        interface(AssociatePublicIpAddress=False),
-        interface(DeviceIndex=1),
-        interface(Ipv6AddressCount=1),
-        one_tag(Value="other"),
-        one_tag(Key="Other"),
-        echo(TagSpecifications=[tags("volume"), tags("network-interface")]),
-        echo(TagSpecifications=[tags("instance")]),
-        # ネットワークインターフェースのタグを付けていなかったテンプレート
-        echo(TagSpecifications=[tags("instance"), tags("volume")]),
-    ]
-    for change in others:
-        with Stubber(ec2) as stub:
-            stub.add_response(
-                "describe_launch_template_versions",
-                listed(a_version(change)),
-                {"LaunchTemplateName": TEMPLATE},
-            )
-            template_tags(stub)
-            stub.add_response(
-                "create_launch_template_version",
-                {"LaunchTemplateVersion": {"VersionNumber": 2}},
-                {"LaunchTemplateName": TEMPLATE, "LaunchTemplateData": wanted()},
-            )
-            stub.add_response(
-                "modify_launch_template",
-                {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
-                {"LaunchTemplateName": TEMPLATE, "DefaultVersion": "2"},
-            )
-            stub.add_response(
-                "delete_launch_template_versions",
-                deleted(1),
-                {"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
-            )
-            align_template(ec2, service)
-            # 違いを見落とせば、新しいバージョンを作らずに応答が余る
-            stub.assert_no_pending_responses()
+        pytest.param(without("IamInstanceProfile"), id="no instance profile"),
+        pytest.param(interface(SubnetId="subnet-00000000000000002"), id="SubnetId"),
+        pytest.param(interface(Groups=["sg-00000000000000002"]), id="Groups"),
+        pytest.param(interface(AssociatePublicIpAddress=False), id="public address"),
+        pytest.param(interface(DeviceIndex=1), id="DeviceIndex"),
+        pytest.param(interface(Ipv6AddressCount=1), id="IPv6 address"),
+        pytest.param(interface(Ipv6AddressCount=0), id="no IPv6 address"),
+        pytest.param(one_tag(Value="other"), id="tag value"),
+        pytest.param(one_tag(Key="Other"), id="tag key"),
+        pytest.param(
+            echo(TagSpecifications=[tags("volume"), tags("network-interface")]), id="no instance"
+        ),
+        # 設定ファイルに無い項目は、AWS の既定と同じ値でも、手で入れたものでも外す
+        pytest.param(echo(KeyName="temt"), id="KeyName"),
+        pytest.param(echo(EbsOptimized=False), id="EbsOptimized"),
+        pytest.param(
+            echo(BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 30}}]),
+            id="BlockDeviceMappings",
+        ),
+        pytest.param(echo(UserData=base64.b64encode(b"#!/bin/sh\n").decode()), id="UserData"),
+    ],
+)
+def test_every_item_is_compared(ec2: EC2Client, service: Service, current: dict[str, Any]) -> None:
+    """中身全体を比べるので、どの項目が違っても、無くても、余分でも新しいバージョンになる。"""
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_launch_template_versions",
+            listed(a_version(current)),
+            {"LaunchTemplateName": TEMPLATE},
+        )
+        template_tags(stub)
+        new_version(stub, wanted())
+        align_template(ec2, service)
+        # 違いを見落とせば、新しいバージョンを作らずに応答が余る
+        stub.assert_no_pending_responses()
 
 
 def test_the_launch_template_is_detected_without_writing(ec2: EC2Client, service: Service) -> None:
-    """足すタグと、違う項目を 1 つ 1 行で <項目>: <今> -> <新> の形で見せる。
+    """足すタグと、違う項目を 1 つ 1 行で <位置>: <今> -> <新> の形で見せる。
 
-    ネットワークインターフェースの項目は番号を、インスタンスに付けるタグは種類を
-    添えて書く。今の値が無ければ - と書く。
+    配列の要素は対応づけのキーで書く。今か新しい値が無ければ - と書く。設定ファイルに無い
+    項目は、新しい値が無いものとして見せる。
     """
     current = interface(SubnetId="subnet-00000000000000002")
     current["InstanceType"] = "t3.small"
-    current["TagSpecifications"] = [tags("instance"), tags("volume")]
+    current["KeyName"] = "mykey"
     with Stubber(ec2) as stub:
         stub.add_response(
             "describe_launch_template_versions",
@@ -1563,15 +1609,15 @@ def test_the_launch_template_is_detected_without_writing(ec2: EC2Client, service
             {"LaunchTemplateName": TEMPLATE},
         )
         template_tags(stub, None)
-        found = resources.detect_template(ec2, service, VALUES, IMAGE, SUBNET, GROUP, ipv6=False)
+        found = resources.detect_template(ec2, service, wanted())
         stub.assert_no_pending_responses()
     assert found.changes() == [
         Change("~", resources.LAUNCH_TEMPLATE, TEMPLATE, detail)
         for detail in [
             MARK_SHOWN,
             "InstanceType: t3.small -> t3.micro",
-            f"NetworkInterfaces.0.SubnetId: subnet-00000000000000002 -> {SUBNET}",
-            "TagSpecifications.network-interface: - -> Name=temt-dev-main,temt:service=dev-main",
+            f"NetworkInterfaces[DeviceIndex=0].SubnetId: subnet-00000000000000002 -> {SUBNET}",
+            "KeyName: mykey -> -",
         ]
     ]
 
@@ -1579,7 +1625,8 @@ def test_the_launch_template_is_detected_without_writing(ec2: EC2Client, service
 def test_a_missing_launch_template_is_detected_to_be_created(
     ec2: EC2Client, service: Service
 ) -> None:
-    """セキュリティグループがまだ無ければ、NEW_GROUP を指すものとして比べる。"""
+    """無ければ作るものとして見せ、中身は組み立てたもの（NEW_GROUP を含む）のまま持つ。"""
+    data = wanted(NetworkInterfaces=[{"DeviceIndex": 0, "Groups": [resources.NEW_GROUP]}])
     with Stubber(ec2) as stub:
         missing(
             stub,
@@ -1587,206 +1634,33 @@ def test_a_missing_launch_template_is_detected_to_be_created(
             resources.NO_SUCH_TEMPLATE,
             LaunchTemplateName=TEMPLATE,
         )
-        found = resources.detect_template(ec2, service, VALUES, IMAGE, SUBNET, None, ipv6=False)
+        found = resources.detect_template(ec2, service, data)
         stub.assert_no_pending_responses()
     assert found.changes() == [Change("+", resources.LAUNCH_TEMPLATE, TEMPLATE)]
-    assert found.wanted == resources.template_data(
-        service, VALUES, IMAGE, SUBNET, resources.NEW_GROUP, ipv6=False
-    )
+    assert found.wanted == data
 
 
 def test_the_launch_template_gets_the_id_of_the_security_group_made_after_detecting(
     ec2: EC2Client, service: Service
 ) -> None:
-    """NEW_GROUP で比べた起動テンプレートは、揃えるときに渡したセキュリティグループの ID で作る。"""
-    with Stubber(ec2) as stub:
-        missing(
-            stub,
-            "describe_launch_template_versions",
-            resources.NO_SUCH_TEMPLATE,
-            LaunchTemplateName=TEMPLATE,
-        )
-        found = resources.detect_template(ec2, service, VALUES, IMAGE, SUBNET, None, ipv6=False)
-        create_template(stub, wanted())
-        resources.template(ec2, service, found, GROUP)
-        stub.assert_no_pending_responses()
-
-
-def test_the_subnet_with_ipv6_gets_an_address(ec2: EC2Client, service: Service) -> None:
-    """サブネットに IPv6 の CIDR が結び付いていれば、IPv6 アドレスを 1 つ付ける。"""
-    data = wanted(ipv6=True)
-    assert data["NetworkInterfaces"][0]["Ipv6AddressCount"] == 1
-    with Stubber(ec2) as stub:
-        missing(
-            stub,
-            "describe_launch_template_versions",
-            resources.NO_SUCH_TEMPLATE,
-            LaunchTemplateName=TEMPLATE,
-        )
-        create_template(stub, data)
-        align_template(ec2, service, ipv6=True)
-        stub.assert_no_pending_responses()
-
-
-@pytest.mark.parametrize(
-    ("instance_type", "credits"),
-    [
-        ("t3.micro", "unlimited"),
-        ("t4g.small", "unlimited"),
-        ("t2.nano", "unlimited"),
-        ("m7i.large", None),
-        ("c7g.medium", None),
-        ("t1.micro", None),
-        ("trn1.2xlarge", None),
-    ],
-)
-def test_cpu_credits_go_only_to_the_burstable_types(
-    instance_type: str, credits: str | None
-) -> None:
-    """CPU クレジットは T 系の型でしか意味を持たないので、ほかの型には項目を入れない。
-
-    t1 は CPU クレジットを持たない。trn1 のように t で始まっても、続くのが数字でなければ
-    T 系ではない。
+    """NEW_GROUP で比べた起動テンプレートは、揃えるときに渡したセキュリティグループの ID で
+    作る。ほかの ID はそのまま残す。
     """
-    values = Conf(launch_template=LaunchTemplate(InstanceType=instance_type, SubnetId=SUBNET))
-    data = resources.template_data(Service("dev-main"), values, IMAGE, SUBNET, GROUP, ipv6=False)
-    expected = None if credits is None else {"CpuCredits": credits}
-    assert data.get("CreditSpecification") == expected
-    assert resources.projection(data)["CpuCredits"] == credits
-
-
-def test_cpu_credits_are_dropped_when_the_type_leaves_the_burstable_ones(
-    ec2: EC2Client, service: Service
-) -> None:
-    """T 系から外れると CpuCredits の項目が無くなり、それも違いとして見せる。"""
-    values = Conf(launch_template=LaunchTemplate(InstanceType="m7i.large", SubnetId=SUBNET))
+    other = "sg-00000000000000077"
+    primary = {"DeviceIndex": 0, "SubnetId": SUBNET, "AssociatePublicIpAddress": True}
+    data = wanted(NetworkInterfaces=[{**primary, "Groups": [resources.NEW_GROUP, other]}])
     with Stubber(ec2) as stub:
-        stub.add_response(
+        missing(
+            stub,
             "describe_launch_template_versions",
-            listed(a_version(echo())),
-            {"LaunchTemplateName": TEMPLATE},
+            resources.NO_SUCH_TEMPLATE,
+            LaunchTemplateName=TEMPLATE,
         )
-        template_tags(stub)
-        found = resources.detect_template(ec2, service, values, IMAGE, SUBNET, GROUP, ipv6=False)
+        create_template(stub, wanted(NetworkInterfaces=[{**primary, "Groups": [GROUP, other]}]))
+        align_template(ec2, service, data, group_id=GROUP)
         stub.assert_no_pending_responses()
-    assert found.changed
-    assert found.changes() == [
-        Change("~", resources.LAUNCH_TEMPLATE, TEMPLATE, detail)
-        for detail in ["InstanceType: t3.micro -> m7i.large", "CpuCredits: unlimited -> -"]
-    ]
-
-
-ROOT_DEVICE = "/dev/sda1"
-
-
-def sized(size: int) -> Conf:
-    """VolumeSize を書いた設定。"""
-    return Conf(
-        launch_template=LaunchTemplate(InstanceType="t3.micro", SubnetId=SUBNET, VolumeSize=size),
-    )
-
-
-def test_the_volume_size_goes_to_the_root_device() -> None:
-    """VolumeSize は、AMI のルートデバイスの大きさだけとして入れる。"""
-    data = resources.template_data(
-        Service("dev-main"), sized(30), IMAGE, SUBNET, GROUP, ipv6=False, root_device=ROOT_DEVICE
-    )
-    assert data.get("BlockDeviceMappings") == [
-        {"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}}
-    ]
-    assert resources.projection(data)["BlockDeviceMappings"] == [(ROOT_DEVICE, 30)]
-
-
-def test_no_volume_size_leaves_the_block_devices_to_the_ami() -> None:
-    data = resources.template_data(
-        Service("dev-main"), VALUES, IMAGE, SUBNET, GROUP, ipv6=False, root_device=ROOT_DEVICE
-    )
-    assert "BlockDeviceMappings" not in data
-
-
-def test_the_volume_size_needs_the_root_device() -> None:
-    with pytest.raises(ValueError, match="root_device"):
-        _ = resources.template_data(
-            Service("dev-main"), sized(30), IMAGE, SUBNET, GROUP, ipv6=False
-        )
-
-
-def detected(ec2: EC2Client, service: Service, values: Conf, data: dict[str, Any]) -> Any:
-    """既定バージョンが data のテンプレートと values の差分。"""
-    with Stubber(ec2) as stub:
-        stub.add_response(
-            "describe_launch_template_versions",
-            listed(a_version(data)),
-            {"LaunchTemplateName": TEMPLATE},
-        )
-        template_tags(stub)
-        found = resources.detect_template(
-            ec2, service, values, IMAGE, SUBNET, GROUP, ipv6=False, root_device=ROOT_DEVICE
-        )
-        stub.assert_no_pending_responses()
-    return found
-
-
-def test_a_new_volume_size_is_shown_by_its_name(ec2: EC2Client, service: Service) -> None:
-    """diff は BlockDeviceMappings を、設定ファイルの項目名 VolumeSize で見せる。"""
-    found = detected(ec2, service, sized(30), echo())
-    assert found.changed
-    assert found.changes() == [
-        Change("~", resources.LAUNCH_TEMPLATE, TEMPLATE, "VolumeSize: - -> 30")
-    ]
-
-
-def test_a_removed_volume_size_is_shown_by_its_name(ec2: EC2Client, service: Service) -> None:
-    mappings = [{"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}}]
-    found = detected(ec2, service, VALUES, echo(BlockDeviceMappings=mappings))
-    assert found.changes() == [
-        Change("~", resources.LAUNCH_TEMPLATE, TEMPLATE, "VolumeSize: 30 -> -")
-    ]
-
-
-def test_the_same_volume_size_is_no_change(ec2: EC2Client, service: Service) -> None:
-    mappings = [{"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}}]
-    found = detected(ec2, service, sized(30), echo(BlockDeviceMappings=mappings))
-    assert not found.changed
-
-
-def test_another_root_device_makes_a_new_version(ec2: EC2Client, service: Service) -> None:
-    """デバイス名だけが違っても新しいバージョンを作る。開いても違いは見えない。"""
-    mappings = [{"DeviceName": "/dev/xvda", "Ebs": {"VolumeSize": 30}}]
-    found = detected(ec2, service, sized(30), echo(BlockDeviceMappings=mappings))
-    assert found.changed
-    assert found.changes() == [Change("~", resources.LAUNCH_TEMPLATE, TEMPLATE, "new version")]
-
-
-@pytest.mark.parametrize(
-    ("mappings", "shown"),
-    [
-        pytest.param([], None, id="none"),
-        pytest.param([{"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}}], 30, id="one"),
-        pytest.param(
-            [
-                {"DeviceName": "/dev/sdb", "Ebs": {"VolumeSize": 100}},
-                {"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}},
-            ],
-            "30,100",
-            id="added by hand",
-        ),
-        pytest.param(
-            [{"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeType": "gp3"}}], "-", id="no size"
-        ),
-        pytest.param(
-            [
-                {"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeSize": 30}},
-                {"DeviceName": ROOT_DEVICE, "Ebs": {"VolumeType": "gp3"}},
-            ],
-            "30,-",
-            id="the same device twice",
-        ),
-    ],
-)
-def test_volume_size_shows_the_block_devices(mappings: list[dict[str, Any]], shown: object) -> None:
-    data = resources.projection(echo(BlockDeviceMappings=mappings))
-    assert resources.volume_size(data) == shown
+    # 比べた中身は書き換えない
+    assert data["NetworkInterfaces"][0]["Groups"] == [resources.NEW_GROUP, other]
 
 
 def test_the_other_versions_are_deleted(
@@ -1951,7 +1825,7 @@ def test_a_template_without_a_default_version(ec2: EC2Client, service: Service) 
             {"LaunchTemplateName": TEMPLATE},
         )
         with pytest.raises(TemtError, match="no single default version"):
-            _ = resources.detect_template(ec2, service, VALUES, IMAGE, SUBNET, GROUP, ipv6=False)
+            _ = resources.detect_template(ec2, service, wanted())
 
 
 NEW_IMAGE = "ami-0fedcba9876543210"
@@ -2059,13 +1933,50 @@ def test_point_image_stops_without_a_default_version(ec2: EC2Client, service: Se
         stub.assert_no_pending_responses()
 
 
+def built(
+    data: dict[str, Any] | None = None,
+    *,
+    group_id: str | None = GROUP,
+    uses: bool = True,
+    vpc_id: str | None = VPC,
+) -> ltbuild.Built:
+    """手順 4 で組み立てた起動テンプレートの中身。
+
+    data は中身で、省けば wanted()（temt のセキュリティグループ GROUP を指す）。group_id は
+    VPC にある temt のセキュリティグループで、uses は起動テンプレートがそれを使うか。
+    """
+    return ltbuild.Built(
+        wanted() if data is None else data,
+        {"ImageId": IMAGE},
+        vpc_id,
+        group_id,
+        uses and group_id is None,
+        uses,
+        None,
+    )
+
+
+# temt のセキュリティグループがまだ無いときの中身。その ID は NEW_GROUP
+NEW_DATA = wanted(
+    NetworkInterfaces=[
+        {
+            "DeviceIndex": 0,
+            "SubnetId": SUBNET,
+            "AssociatePublicIpAddress": True,
+            "Groups": [resources.NEW_GROUP],
+        }
+    ]
+)
+
+
 def nothing_there(iam_stub: Stubber, ec2_stub: Stubber) -> None:
-    """ロール、インラインポリシー temt-jupyter、インスタンスプロファイル、
+    """ロール、インラインポリシー temt-jupyter、管理ポリシー、インスタンスプロファイル、
     セキュリティグループ、起動テンプレートが無いときに、detect が読む応答を積む。
     """
     missing(iam_stub, "get_role", "NoSuchEntity", RoleName=NAME)
     missing(iam_stub, "get_role_policy", "NoSuchEntity", **THE_POLICY)
     missing(iam_stub, "list_role_policies", "NoSuchEntity", RoleName=NAME)
+    missing(iam_stub, "list_attached_role_policies", "NoSuchEntity", RoleName=NAME)
     missing(iam_stub, "get_instance_profile", "NoSuchEntity", InstanceProfileName=NAME)
     groups(ec2_stub)
     missing(
@@ -2076,34 +1987,28 @@ def nothing_there(iam_stub: Stubber, ec2_stub: Stubber) -> None:
     )
 
 
+# 受信規則を 1 つと管理ポリシーを 1 つ書いた設定
+FULL = Conf(
+    security_group=SecurityGroup(
+        ingress=[Ingress(Port=(22, 22), Cidr="203.0.113.10/32", Description="home")]
+    ),
+    role=Role(ManagedPolicyArns=[S3_READ]),
+)
+
+
 def test_update_goes_through_them_in_order(
-    ec2: EC2Client,
-    iam: IAMClient,
-    ssm: SSMClient,
-    service: Service,
-    capsys: pytest.CaptureFixture[str],
+    ec2: EC2Client, iam: IAMClient, service: Service
 ) -> None:
-    """設計が決めた順に作る。関連付けは名前で見つからないので作り、実行を求める。
+    """設計が決めた順に作る。
 
     Stubber の待ち行列はクライアントごとなので、それだけではサービスをまたいだ
-    順序を確かめられない。3 つのクライアントの呼び出しを 1 つの並びに記録する。
+    順序を確かめられない。2 つのクライアントの呼び出しを 1 つの並びに記録する。
     """
-    values = with_ingress(Ingress(Port=(22, 22), Cidr="203.0.113.10/32", Description="home"))
-    calls = recorded(ec2, iam, ssm)
-    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
+    calls = recorded(ec2, iam)
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         nothing_there(iam_stub, ec2_stub)
-        listed_associations(ssm_stub)
         found = resources.detect(
-            ec2,
-            iam,
-            ssm,
-            service,
-            values,
-            IMAGE,
-            SUBNET,
-            VPC,
-            ipv6=False,
-            policies={JUPYTER: CONTENT},
+            ec2, iam, service, FULL, built(NEW_DATA, group_id=None), policies={JUPYTER: CONTENT}
         )
         calls.clear()
         iam_stub.add_response(
@@ -2114,6 +2019,7 @@ def test_update_goes_through_them_in_order(
         iam_stub.add_response(
             "put_role_policy", {}, {**THE_POLICY, "PolicyDocument": json.dumps(CONTENT)}
         )
+        iam_stub.add_response("attach_role_policy", {}, {"RoleName": NAME, "PolicyArn": S3_READ})
         iam_stub.add_response(
             "create_instance_profile", a_profile([]), {"InstanceProfileName": NAME, "Tags": MARK}
         )
@@ -2130,19 +2036,13 @@ def test_update_goes_through_them_in_order(
             {"GroupId": GROUP, "IpPermissions": [permission(22, 22, "203.0.113.10/32", "home")]},
         )
         create_template(ec2_stub, wanted())
-        ssm_stub.add_response(
-            "create_association",
-            {"AssociationDescription": {"AssociationId": ASSOCIATION}},
-            {**association_content([22]), "AssociationName": SSHD, "Tags": MARK},
-        )
-        association_started(ssm_stub)
-        resources.update(ec2, iam, ssm, service, values, found)
+        resources.update(ec2, iam, service, found)
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
     assert calls == [
         "CreateRole",
         "PutRolePolicy",
+        "AttachRolePolicy",
         "CreateInstanceProfile",
         # waiter instance_profile_exists が読む
         "GetInstanceProfile",
@@ -2150,16 +2050,12 @@ def test_update_goes_through_them_in_order(
         "CreateSecurityGroup",
         "AuthorizeSecurityGroupIngress",
         "CreateLaunchTemplate",
-        "CreateAssociation",
-        "StartAssociationsOnce",
     ]
-    assert f"association {SSHD}: created\n" in capsys.readouterr().out
 
 
 def test_update_puts_the_created_security_group_into_the_launch_template(
     ec2: EC2Client,
     iam: IAMClient,
-    ssm: SSMClient,
     service: Service,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -2167,10 +2063,10 @@ def test_update_puts_the_created_security_group_into_the_launch_template(
     新しいバージョンを作る。
 
     検出したときは、起動テンプレートを NEW_GROUP で比べている。変えなかったものは
-    知らせない。関連付けは揃っているので、読むだけで、実行も求めない。
+    知らせない。
     """
     old_group = "sg-00000000000000002"
-    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         iam_in_place(iam_stub)
         groups(ec2_stub)
         ec2_stub.add_response(
@@ -2179,36 +2075,20 @@ def test_update_puts_the_created_security_group_into_the_launch_template(
             {"LaunchTemplateName": TEMPLATE},
         )
         template_tags(ec2_stub)
-        association_in_place(ssm_stub)
         found = resources.detect(
-            ec2, iam, ssm, service, VALUES, IMAGE, SUBNET, VPC, ipv6=False, policies={}
+            ec2, iam, service, VALUES, built(NEW_DATA, group_id=None), policies={}
         )
         created(ec2_stub)
-        ec2_stub.add_response(
-            "create_launch_template_version",
-            {"LaunchTemplateVersion": {"VersionNumber": 2}},
-            {"LaunchTemplateName": TEMPLATE, "LaunchTemplateData": wanted()},
-        )
-        ec2_stub.add_response(
-            "modify_launch_template",
-            {"LaunchTemplate": {"LaunchTemplateName": TEMPLATE}},
-            {"LaunchTemplateName": TEMPLATE, "DefaultVersion": "2"},
-        )
-        ec2_stub.add_response(
-            "delete_launch_template_versions",
-            deleted(1),
-            {"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
-        )
-        resources.update(ec2, iam, ssm, service, VALUES, found)
+        new_version(ec2_stub, wanted())
+        resources.update(ec2, iam, service, found)
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
     assert found.template.changes() == [
         Change(
             "~",
             resources.LAUNCH_TEMPLATE,
             TEMPLATE,
-            f'NetworkInterfaces.0.Groups: ["{old_group}"] -> ["{resources.NEW_GROUP}"]',
+            f"NetworkInterfaces[DeviceIndex=0].Groups: {old_group} -> {resources.NEW_GROUP}",
         )
     ]
     assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()] == [
@@ -2218,109 +2098,128 @@ def test_update_puts_the_created_security_group_into_the_launch_template(
 
 
 def test_detect_reads_them_in_the_order_of_update_and_finds_nothing(
-    ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service
+    ec2: EC2Client, iam: IAMClient, service: Service
 ) -> None:
     """揃っていれば、update が揃える順に読むだけで、変更は空になる。"""
-    calls = recorded(ec2, iam, ssm)
-    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
+    calls = recorded(ec2, iam)
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         iam_in_place(iam_stub)
         groups(ec2_stub, a_group())
         rules(ec2_stub)
         template_in_place(ec2_stub)
-        association_in_place(ssm_stub)
-        found = resources.detect(
-            ec2, iam, ssm, service, VALUES, IMAGE, SUBNET, VPC, ipv6=False, policies={}
-        )
+        found = resources.detect(ec2, iam, service, VALUES, built(), policies={})
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
     assert found.changes() == []
     assert calls == READS
 
 
 def test_detect_shows_what_update_would_create_in_its_order(
-    ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service
+    ec2: EC2Client, iam: IAMClient, service: Service
 ) -> None:
-    """何も無ければ、ロール、インラインポリシー、インスタンスプロファイル、セキュリティグループと
-    その受信規則、起動テンプレート、関連付けを、作るものとして並べる。何も書かない。
-
-    関連付けは、名前で見つからなければ作るものとする。
+    """何も無ければ、ロール、インラインポリシー、管理ポリシー、インスタンスプロファイル、
+    セキュリティグループとその受信規則、起動テンプレートを、作るものとして並べる。何も
+    書かない。
     """
-    values = with_ingress(Ingress(Port=(22, 22), Cidr="203.0.113.10/32", Description="home"))
-    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         nothing_there(iam_stub, ec2_stub)
-        listed_associations(ssm_stub)
         found = resources.detect(
-            ec2,
-            iam,
-            ssm,
-            service,
-            values,
-            IMAGE,
-            SUBNET,
-            VPC,
-            ipv6=False,
-            policies={JUPYTER: CONTENT},
+            ec2, iam, service, FULL, built(NEW_DATA, group_id=None), policies={JUPYTER: CONTENT}
         )
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
     assert [(one.mark, one.kind, one.name, one.detail) for one in found.changes()] == [
         ("+", resources.ROLE, NAME, ""),
         ("+", resources.ROLE_POLICY, JUPYTER, ""),
+        ("+", resources.MANAGED_POLICY, S3_READ, ""),
         ("+", resources.INSTANCE_PROFILE, NAME, ""),
         ("+", resources.SECURITY_GROUP, NAME, f"in {VPC}"),
         ("+", resources.INGRESS, "22/tcp", "203.0.113.10/32   home"),
         ("+", resources.LAUNCH_TEMPLATE, TEMPLATE, ""),
-        ("+", resources.ASSOCIATION, SSHD, "SshdPorts: 22"),
     ]
 
 
 def test_detect_compares_the_template_with_the_group_to_be_created(
-    ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service
+    ec2: EC2Client, iam: IAMClient, service: Service
 ) -> None:
     """セキュリティグループがまだ無ければ、起動テンプレートは NEW_GROUP を指すものとして比べる。"""
-    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         iam_in_place(iam_stub)
         groups(ec2_stub)
         template_in_place(ec2_stub)
-        association_in_place(ssm_stub)
         found = resources.detect(
-            ec2, iam, ssm, service, VALUES, IMAGE, SUBNET, VPC, ipv6=False, policies={}
+            ec2, iam, service, VALUES, built(NEW_DATA, group_id=None), policies={}
         )
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
     assert found.changes() == [
         Change("+", resources.SECURITY_GROUP, NAME, f"in {VPC}"),
         Change(
             "~",
             resources.LAUNCH_TEMPLATE,
             TEMPLATE,
-            f'NetworkInterfaces.0.Groups: ["{GROUP}"] -> ["{resources.NEW_GROUP}"]',
+            f"NetworkInterfaces[DeviceIndex=0].Groups: {GROUP} -> {resources.NEW_GROUP}",
         ),
     ]
 
 
-def test_the_changes_of_what_was_found_come_in_the_order_of_update() -> None:
-    """ロール、インラインポリシー、インスタンスプロファイル、セキュリティグループとその
-    受信規則、起動テンプレート、関連付けの順に並べる。インラインポリシーは検出した順である。
+def test_detect_reads_no_iam_without_the_instance_profile_of_temt(
+    ec2: EC2Client, iam: IAMClient, service: Service
+) -> None:
+    """policies が None（IamInstanceProfile が temt のものを指さない）なら、ロールも
+    インスタンスプロファイルも読まない。IAM の応答は積んでいないので、読めば Stubber が
+    失敗する。
     """
-    service = Service("dev-main")
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
+        groups(ec2_stub, a_group())
+        rules(ec2_stub)
+        template_in_place(ec2_stub)
+        found = resources.detect(ec2, iam, service, VALUES, built(), policies=None)
+        iam_stub.assert_no_pending_responses()
+        ec2_stub.assert_no_pending_responses()
+    assert found.iam is None
+    assert found.changes() == []
+
+
+@pytest.mark.parametrize(
+    ("uses", "vpc_id"),
+    [(False, VPC), (True, None)],
+    ids=["the template does not use it", "no subnet"],
+)
+def test_detect_reads_no_security_group_that_the_template_does_not_use(
+    ec2: EC2Client, iam: IAMClient, service: Service, uses: bool, vpc_id: str | None
+) -> None:
+    """起動テンプレートが temt のセキュリティグループを使わないか、VPC が決まらなければ、
+    セキュリティグループを読まず、揃えもしない。
+    """
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
+        template_in_place(ec2_stub)
+        found = resources.detect(
+            ec2, iam, service, VALUES, built(uses=uses, vpc_id=vpc_id), policies=None
+        )
+        resources.update(ec2, iam, service, found)
+        iam_stub.assert_no_pending_responses()
+        ec2_stub.assert_no_pending_responses()
+    assert found.group is None
+
+
+def test_the_changes_of_what_was_found_come_in_the_order_of_update() -> None:
+    """ロール、インラインポリシー、管理ポリシー、インスタンスプロファイル、セキュリティ
+    グループとその受信規則、起動テンプレートの順に並べる。インラインポリシーは検出した順
+    である。
+    """
     idle = policy.policy_name("idle")
     mark = (("temt:service", "dev-main"),)
-    association = {
-        "Name": sshd.DOCUMENT,
-        "Targets": sshd.targets(service),
-        "Parameters": {sshd.COMMANDS: sshd.commands([22], "dev-main")},
-    }
     found = resources.Found(
-        role=resources.RoleDiff(NAME, exists=True, tags=mark),
-        policies=(
-            resources.PolicyDiff(JUPYTER, None, CONTENT),
-            resources.PolicyDiff(idle, CONTENT, None),
+        iam=resources.IamDiff(
+            role=resources.RoleDiff(NAME, exists=True, tags=mark),
+            policies=(
+                resources.PolicyDiff(JUPYTER, None, CONTENT),
+                resources.PolicyDiff(idle, CONTENT, None),
+            ),
+            managed=resources.ManagedDiff(attach=(S3_READ,), detach=(SSM_CORE,)),
+            profile=resources.ProfileDiff(NAME, exists=True, roles=("other",)),
         ),
-        profile=resources.ProfileDiff(NAME, exists=True, roles=("other",)),
         group=resources.GroupDiff(
             NAME,
             VPC,
@@ -2328,84 +2227,19 @@ def test_the_changes_of_what_was_found_come_in_the_order_of_update() -> None:
             resources.Changes([resources.Rule("tcp", 22, 22, "203.0.113.10/32")], [], []),
             mark,
         ),
-        template=resources.TemplateDiff(
-            TEMPLATE, resources.template_data(service, VALUES, IMAGE, SUBNET, GROUP, ipv6=False)
-        ),
-        association=resources.AssociationDiff(SSHD, (22,), association),
+        template=resources.TemplateDiff(TEMPLATE, wanted()),
     )
     assert [(one.mark, one.kind, one.name) for one in found.changes()] == [
         ("~", resources.ROLE, NAME),
         ("+", resources.ROLE_POLICY, JUPYTER),
         ("-", resources.ROLE_POLICY, idle),
+        ("+", resources.MANAGED_POLICY, S3_READ),
+        ("-", resources.MANAGED_POLICY, SSM_CORE),
         ("~", resources.INSTANCE_PROFILE, NAME),
         ("~", resources.SECURITY_GROUP, NAME),
         ("+", resources.INGRESS, "22/tcp"),
         ("+", resources.LAUNCH_TEMPLATE, TEMPLATE),
-        ("+", resources.ASSOCIATION, SSHD),
     ]
-
-
-def test_the_association_is_detected_without_writing(ssm: SSMClient, service: Service) -> None:
-    """SshdPorts の違いを今と新しいポートで見せ、スクリプトの違いを続く行に出す。
-
-    足すタグは別の行に見せる。
-    """
-    with Stubber(ssm) as stub:
-        an_association(stub, [22], [])
-        found = resources.detect_association(ssm, service, Conf(SshdPorts=[2222, 443]))
-        stub.assert_no_pending_responses()
-    ported, tagged = found.changes()
-    assert (ported.mark, ported.kind, ported.name, ported.detail) == (
-        "~",
-        resources.ASSOCIATION,
-        SSHD,
-        "SshdPorts: 22 -> 2222,443",
-    )
-    assert ported.body[0].startswith("@@ ")
-    assert '-want="22"' in ported.body
-    assert '+want="2222 443"' in ported.body
-    assert tagged == Change("~", resources.ASSOCIATION, SSHD, MARK_SHOWN)
-
-
-def test_the_association_is_found_by_its_name(ssm: SSMClient, service: Service) -> None:
-    """名前 <名前>-sshd で探し、見つけたものの中身とタグを読む。揃っていれば差分は空。"""
-    calls = recorded(ssm)
-    with Stubber(ssm) as stub:
-        association_in_place(stub)
-        found = resources.detect_association(ssm, service, VALUES)
-        stub.assert_no_pending_responses()
-    assert calls == ["ListAssociations", "DescribeAssociation", "ListTagsForResource"]
-    assert found.association_id == ASSOCIATION
-    assert found.current is not None
-    assert found.changes() == []
-
-
-def test_an_association_that_is_not_there_is_to_be_created(
-    ssm: SSMClient, service: Service
-) -> None:
-    """名前で見つからなければ、作るものとする。中身もタグも読まない。"""
-    calls = recorded(ssm)
-    with Stubber(ssm) as stub:
-        listed_associations(stub)
-        found = resources.detect_association(ssm, service, Conf())
-        stub.assert_no_pending_responses()
-    assert calls == ["ListAssociations"]
-    assert (found.association_id, found.current) == ("", None)
-    assert found.changes() == [Change("+", resources.ASSOCIATION, SSHD, "SshdPorts: 22")]
-
-
-def test_the_first_of_two_associations_with_the_name_is_compared(
-    ssm: SSMClient, service: Service
-) -> None:
-    """同じ名前の関連付けが 2 つ以上あれば（手で作ったときなど）、最初の 1 つだけを読んで
-    比べる。ほかのものは読まない。
-    """
-    with Stubber(ssm) as stub:
-        an_association(stub, [2222], MARK, OTHER_ASSOCIATION)
-        found = resources.detect_association(ssm, service, Conf(SshdPorts=[2222]))
-        stub.assert_no_pending_responses()
-    assert found.association_id == ASSOCIATION
-    assert found.changes() == []
 
 
 def test_the_security_group_is_in_this_vpc_and_another(ec2: EC2Client, service: Service) -> None:
@@ -2437,7 +2271,7 @@ def test_a_warning_from_aws_is_shown(
             wanted(),
             Warning={"Errors": [{"Code": "InvalidType", "Message": "no such type"}]},
         )
-        align_template(ec2, service)
+        align_template(ec2, service, managed=True)
         stub.assert_no_pending_responses()
     shown = capsys.readouterr().err
     assert "InvalidType: no such type" in shown
@@ -2445,12 +2279,14 @@ def test_a_warning_from_aws_is_shown(
     assert resources.NOT_READY_NOTE not in shown
 
 
+@pytest.mark.parametrize("managed", [True, False])
 def test_the_instance_profile_warning_says_it_is_iam_propagation(
-    ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str]
+    ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str], managed: bool
 ) -> None:
     """作った直後は EC2 がインスタンスプロファイルを見つけられないことがある。
 
-    手順 6 はその前にインスタンスプロファイルを揃えているので、これは反映待ちである。
+    temt のインスタンスプロファイルなら、update はその前に揃えているので、これは反映待ち
+    であり、そう添える。temt のものでなければ、待っても直らないので添えない。
     """
     with Stubber(ec2) as stub:
         missing(
@@ -2471,11 +2307,11 @@ def test_the_instance_profile_warning_says_it_is_iam_propagation(
                 ]
             },
         )
-        align_template(ec2, service)
+        align_template(ec2, service, managed=managed)
         stub.assert_no_pending_responses()
     shown = capsys.readouterr().err
     assert f"{resources.PROFILE_NOT_READY}: The IamInstanceProfile.Name '{NAME}'" in shown
-    assert resources.NOT_READY_NOTE in shown
+    assert (resources.NOT_READY_NOTE in shown) == managed
 
 
 def test_an_instance_profile_arn_with_a_path(ec2: EC2Client, service: Service) -> None:
@@ -2580,11 +2416,14 @@ def test_other_errors_from_deleting_the_instance_profile_are_left_to_destroy(
 
 
 def unheld(stub: Stubber) -> None:
-    """delete_role が先に読む、ロールを消せなくするもの。何も無い。"""
-    stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+    """delete_role が先に読むもの。temt のタグの付いたロールで、ほかのインスタンス
+    プロファイルにも入っておらず、管理ポリシーも付いていない。
+    """
+    stub.add_response("get_role", a_role(), {"RoleName": NAME})
     stub.add_response(
         "list_instance_profiles_for_role", {"InstanceProfiles": []}, {"RoleName": NAME}
     )
+    stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
 
 
 @pytest.mark.parametrize("method", ["list_role_policies", "delete_role_policy"])
@@ -2622,18 +2461,29 @@ def test_other_errors_from_reading_what_holds_the_role_are_left_to_destroy(
     iam: IAMClient, service: Service, method: str
 ) -> None:
     with Stubber(iam) as stub:
-        if method == "list_instance_profiles_for_role":
-            stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+        stub.add_response("get_role", a_role(), {"RoleName": NAME})
+        if method == "list_attached_role_policies":
+            stub.add_response(
+                "list_instance_profiles_for_role", {"InstanceProfiles": []}, {"RoleName": NAME}
+            )
         stub.add_client_error(method, service_error_code="AccessDenied", http_status_code=403)
         with pytest.raises(ClientError):
             resources.delete_role(iam, service)
 
 
+@pytest.mark.parametrize(
+    ("given", "command"),
+    [
+        pytest.param(None, "destroy", id="destroy"),
+        pytest.param("role delete", "role delete", id="role delete"),
+    ],
+)
 def test_a_role_that_gets_held_after_the_check_is_reported(
-    iam: IAMClient, service: Service
+    iam: IAMClient, service: Service, given: str | None, command: str
 ) -> None:
     """確かめた後に付けられたときも、外したことが IAM にまだ映らないときも DeleteConflict に
-    なる。どちらか分からないので、AWS の文を添えて両方の直し方を告げる。"""
+    なる。どちらか分からないので、AWS の文を添えて両方の直し方を告げる。やり直すコマンドは
+    呼んだ側が渡し、省けば destroy。"""
     with Stubber(iam) as stub:
         unheld(stub)
         stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
@@ -2644,13 +2494,158 @@ def test_a_role_that_gets_held_after_the_check_is_reported(
             http_status_code=409,
         )
         with pytest.raises(TemtError) as caught:
-            resources.delete_role(iam, service)
+            if given is None:
+                resources.delete_role(iam, service)
+            else:
+                resources.delete_role(iam, service, command=given)
     assert str(caught.value) == (
         f"cannot delete the role {NAME}: An error occurred (DeleteConflict) when calling the "
         "DeleteRole operation: Cannot delete entity, must remove roles from instance profile "
-        "first.; if nothing is attached to it, IAM may not show the change yet, so run destroy "
-        "again; otherwise detach it by hand and run destroy again"
+        f"first.; if nothing is attached to it, IAM may not show the change yet, so run "
+        f"{command} again; otherwise detach it by hand and run {command} again"
     )
+
+
+def held_by(stub: Stubber, *profiles: str) -> None:
+    """delete_role が先に読むもの。temt のタグの付いたロールが、profiles のインスタンス
+    プロファイルに入っている。
+    """
+    stub.add_response("get_role", a_role(), {"RoleName": NAME})
+    stub.add_response(
+        "list_instance_profiles_for_role",
+        {
+            "InstanceProfiles": [
+                {**a_profile([NAME])["InstanceProfile"], "InstanceProfileName": one}
+                for one in profiles
+            ]
+        },
+        {"RoleName": NAME},
+    )
+
+
+def test_a_role_still_in_its_instance_profile_just_deleted_is_deleted(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """インスタンスプロファイル <名前> を消した直後は、IAM の反映が遅れて一覧に残ることが
+    あるので数えない。
+    """
+    with Stubber(iam) as stub:
+        held_by(stub, NAME)
+        stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+        stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+        stub.add_response("delete_role", {}, {"RoleName": NAME})
+        resources.delete_role(iam, service)
+        stub.assert_no_pending_responses()
+    assert f"role {NAME}: {resources.DELETED}" in capsys.readouterr().out
+
+
+def test_a_role_in_the_instance_profile_left_alone_stops_before_anything(
+    iam: IAMClient, service: Service
+) -> None:
+    """インスタンスプロファイル <名前> をタグが違って残したとき（own_gone が偽）は、それに
+    入ったロールを、ほかのインスタンスプロファイルに入ったものと同じく扱う。管理ポリシーを
+    外しもインラインポリシーを消しもせずに止まる。外せば、残したインスタンスプロファイルで
+    動くインスタンスが権限を失う。
+    """
+    with Stubber(iam) as stub:
+        held_by(stub, NAME)
+        with pytest.raises(TemtError) as caught:
+            resources.delete_role(iam, service, own_gone=False)
+        # 外す、消す呼び出しは積んでいない
+        stub.assert_no_pending_responses()
+    assert str(caught.value) == (
+        f"the role {NAME} is also in the instance profile {NAME}; "
+        "remove it from there by hand and run destroy again"
+    )
+
+
+def test_delete_instance_profile_tells_whether_it_is_gone(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """消したか、もともと無ければ True。タグが違って残せば False。"""
+    with Stubber(iam) as stub:
+        stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
+        stub.add_response(
+            "remove_role_from_instance_profile", {}, {"InstanceProfileName": NAME, "RoleName": NAME}
+        )
+        stub.add_response("delete_instance_profile", {}, {"InstanceProfileName": NAME})
+        missing(stub, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME)
+        stub.add_response(
+            "get_instance_profile", a_profile([NAME], WRONG), {"InstanceProfileName": NAME}
+        )
+        assert resources.delete_instance_profile(iam, service) is True
+        assert resources.delete_instance_profile(iam, service) is True
+        assert resources.delete_instance_profile(iam, service) is False
+        stub.assert_no_pending_responses()
+    assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()] == [
+        f"instance profile {NAME}: {resources.DELETED}",
+        f"instance profile {NAME}: {resources.ABSENT}",
+        f"instance profile {NAME}: {resources.LEFT.format(svc='dev-main')}",
+    ]
+
+
+@pytest.mark.parametrize("command", ["destroy", "role delete"])
+def test_an_instance_profile_holding_another_role_names_the_command(
+    iam: IAMClient, service: Service, command: str
+) -> None:
+    """ほかのロールが入っていれば、何も外さずに、やり直すコマンドを告げて止まる。"""
+    with Stubber(iam) as stub:
+        stub.add_response(
+            "get_instance_profile", a_profile([NAME, "other"]), {"InstanceProfileName": NAME}
+        )
+        with pytest.raises(TemtError) as caught:
+            resources.delete_instance_profile(iam, service, command=command)
+        stub.assert_no_pending_responses()
+    assert str(caught.value) == (
+        f"the instance profile {NAME} holds another role: other; "
+        f"remove it by hand and run {command} again"
+    )
+
+
+def test_an_instance_profile_that_will_not_go_names_the_command(
+    iam: IAMClient, service: Service
+) -> None:
+    with Stubber(iam) as stub:
+        stub.add_response("get_instance_profile", a_profile([]), {"InstanceProfileName": NAME})
+        stub.add_client_error(
+            "delete_instance_profile",
+            service_error_code=resources.DELETE_CONFLICT,
+            service_message="Cannot delete entity, must remove roles from instance profile first.",
+            http_status_code=409,
+        )
+        with pytest.raises(TemtError) as caught:
+            resources.delete_instance_profile(iam, service, command="role delete")
+    assert str(caught.value) == (
+        f"cannot delete the instance profile {NAME}: An error occurred (DeleteConflict) when "
+        "calling the DeleteInstanceProfile operation: Cannot delete entity, must remove roles "
+        "from instance profile first.; IAM may not show the role removed yet, so run role "
+        "delete again; if this persists, remove the role from it by hand"
+    )
+
+
+def test_profile_roles_lists_the_roles_in_the_instance_profile(
+    iam: IAMClient, service: Service
+) -> None:
+    """インスタンスプロファイル <名前> が無ければ空。"""
+    with Stubber(iam) as stub:
+        stub.add_response(
+            "get_instance_profile", a_profile([NAME, "other"]), {"InstanceProfileName": NAME}
+        )
+        missing(stub, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME)
+        assert resources.profile_roles(iam, service) == [NAME, "other"]
+        assert resources.profile_roles(iam, service) == []
+        stub.assert_no_pending_responses()
+
+
+def test_other_errors_from_reading_the_roles_of_the_instance_profile_are_left_to_the_caller(
+    iam: IAMClient, service: Service
+) -> None:
+    with Stubber(iam) as stub:
+        stub.add_client_error(
+            "get_instance_profile", service_error_code="AccessDenied", http_status_code=403
+        )
+        with pytest.raises(ClientError):
+            resources.profile_roles(iam, service)
 
 
 def names(count: int) -> list[str]:
@@ -2768,24 +2763,174 @@ def test_other_errors_from_reading_the_parameters_are_left_to_destroy(
             resources.delete_parameters(ssm, service)
 
 
+def shown_changes(current: dict[str, Any], data: dict[str, Any]) -> list[str]:
+    """template_changes の違いの文。続く行は含めない。"""
+    return [detail for detail, _ in resources.template_changes(current, data)]
+
+
+def test_template_changes_ignore_the_forms_aws_changes_on_reading() -> None:
+    """並び、ARN で返る IamInstanceProfile、空の値、読み出したときにだけある項目は、違いに
+    しない。
+    """
+    assert resources.template_changes(echo(), wanted()) == []
+    found = resources.TemplateDiff(TEMPLATE, wanted(), echo(), 1, (1,))
+    assert not found.changed
+    assert found.changes() == []
+
+
+@pytest.mark.parametrize(
+    ("current", "data", "shown"),
+    [
+        pytest.param(
+            wanted(),
+            wanted(BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 30}}]),
+            ["BlockDeviceMappings[DeviceName=/dev/sda1].Ebs.VolumeSize: - -> 30"],
+            id="an element added",
+        ),
+        pytest.param(
+            wanted(BlockDeviceMappings=[{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 30}}]),
+            wanted(),
+            ["BlockDeviceMappings[DeviceName=/dev/sda1].Ebs.VolumeSize: 30 -> -"],
+            id="an element removed",
+        ),
+        pytest.param(
+            wanted(),
+            wanted(BlockDeviceMappings=[{"DeviceName": "/dev/sdb", "NoDevice": ""}]),
+            ['BlockDeviceMappings[DeviceName=/dev/sdb].NoDevice: - -> ""'],
+            id="a device left out",
+        ),
+        pytest.param(
+            wanted(),
+            {key: value for key, value in wanted().items() if key != "MetadataOptions"},
+            [
+                "MetadataOptions.HttpTokens: required -> -",
+                "MetadataOptions.InstanceMetadataTags: enabled -> -",
+            ],
+            id="a table removed whole",
+        ),
+        pytest.param(
+            interface(Groups=["sg-b", "sg-a"]),
+            wanted(),
+            [f"NetworkInterfaces[DeviceIndex=0].Groups: sg-a,sg-b -> {GROUP}"],
+            id="an array of strings",
+        ),
+        pytest.param(
+            interface(AssociatePublicIpAddress=False),
+            wanted(),
+            ["NetworkInterfaces[DeviceIndex=0].AssociatePublicIpAddress: false -> true"],
+            id="a boolean",
+        ),
+        pytest.param(
+            wanted(),
+            wanted(LicenseSpecifications=[{"LicenseConfigurationArn": "arn:aws:license:x"}]),
+            ['LicenseSpecifications: - -> {"LicenseConfigurationArn":"arn:aws:license:x"}'],
+            id="an array of tables without a key",
+        ),
+        pytest.param(
+            wanted(LicenseSpecifications=[{"LicenseConfigurationArn": "arn:aws:license:x"}]),
+            wanted(),
+            ['LicenseSpecifications: {"LicenseConfigurationArn":"arn:aws:license:x"} -> -'],
+            id="an array of tables without a key removed",
+        ),
+        pytest.param(
+            wanted(
+                LicenseSpecifications=[
+                    {"LicenseConfigurationArn": "arn:aws:license:a"},
+                    {"LicenseConfigurationArn": "arn:aws:license:b"},
+                ]
+            ),
+            wanted(
+                LicenseSpecifications=[
+                    {"LicenseConfigurationArn": "arn:aws:license:c"},
+                    {"LicenseConfigurationArn": "arn:aws:license:b"},
+                ]
+            ),
+            [
+                'LicenseSpecifications: {"LicenseConfigurationArn":"arn:aws:license:a"} -> -',
+                'LicenseSpecifications: - -> {"LicenseConfigurationArn":"arn:aws:license:c"}',
+            ],
+            id="an element of an array of tables without a key replaced",
+        ),
+        pytest.param(
+            echo(KeyName="mykey"), wanted(), ["KeyName: mykey -> -"], id="an item to remove"
+        ),
+    ],
+)
+def test_template_changes_show_one_line_per_leaf(
+    current: dict[str, Any], data: dict[str, Any], shown: list[str]
+) -> None:
+    """違いは、葉の項目の位置ごとに 1 行で見せる。配列の要素は対応づけのキーで書き、
+    無い側は - と書く。
+    """
+    assert shown_changes(current, data) == shown
+
+
+def user_data(text: str) -> str:
+    """UserData の書き方。文書を base64 にしたもの。"""
+    return base64.b64encode(text.encode()).decode()
+
+
+def test_template_changes_show_the_user_data_as_a_diff() -> None:
+    """UserData は base64 を戻した文書の違いを、unified diff で続く行に出す。"""
+    before = wanted(UserData=user_data("#!/bin/sh\necho old\n"))
+    after = wanted(UserData=user_data("#!/bin/sh\necho new\n"))
+    assert resources.template_changes(before, after) == [
+        (
+            "UserData: (text) -> (text)",
+            ("@@ -1,2 +1,2 @@", " #!/bin/sh", "-echo old", "+echo new"),
+        )
+    ]
+
+
+def test_template_changes_show_user_data_added_or_removed_as_a_diff() -> None:
+    """UserData を足すときも消すときも、文書なら、戻した文書を続く行に出す。"""
+    data = wanted(UserData=user_data("#!/bin/sh\necho new\n"))
+    assert resources.template_changes(wanted(), data) == [
+        ("UserData: - -> (text)", ("@@ -0,0 +1,2 @@", "+#!/bin/sh", "+echo new"))
+    ]
+    assert resources.template_changes(data, wanted()) == [
+        ("UserData: (text) -> -", ("@@ -1,2 +0,0 @@", "-#!/bin/sh", "-echo new"))
+    ]
+
+
+def test_template_changes_show_user_data_that_is_not_text_by_its_size() -> None:
+    """文字として読めない UserData は、バイト数だけを見せる。片側だけが文字でも同じ。"""
+    data = wanted(UserData=base64.b64encode(b"\xff\xfe\x00\x01").decode())
+    assert resources.template_changes(wanted(), data) == [("UserData: - -> 4 bytes", ())]
+    assert resources.template_changes(data, wanted()) == [("UserData: 4 bytes -> -", ())]
+    text = wanted(UserData=user_data("#!/bin/sh\n"))
+    assert resources.template_changes(text, data) == [("UserData: 10 bytes -> 4 bytes", ())]
+
+
+def test_template_differ_names_the_positions_that_differ() -> None:
+    """違う項目の位置を、組み立てた側（wanted）の順に、続けていまの側にだけあるものを
+    挙げる。AWS が読み出しで変える形は違いにしない。
+    """
+    assert resources.template_differ(echo(), wanted()) == []
+    current = echo(KeyName="mykey", InstanceType="t3.small")
+    data = wanted(UserData=user_data("#!/bin/sh\n"))
+    assert resources.template_differ(current, data) == ["InstanceType", "UserData", "KeyName"]
+    assert resources.template_differ(interface(SubnetId="subnet-other"), wanted()) == [
+        "NetworkInterfaces[DeviceIndex=0].SubnetId"
+    ]
+
+
 def test_template_changes_show_a_new_version_when_no_item_differs() -> None:
     """同じ種類の TagSpecifications が 2 つあると、開いた項目では違いが見えない。
     それでも apply は新しいバージョンを作るので、そのことを出す。"""
-    wanted = resources.template_data(Service("dev-main"), Conf(), IMAGE, SUBNET, GROUP, ipv6=False)
-    current = dict(wanted)
+    current = wanted()
     current["TagSpecifications"] = [
-        *wanted.get("TagSpecifications", []),
+        *current["TagSpecifications"],
         {"ResourceType": "instance", "Tags": [{"Key": "Name", "Value": "temt-dev-main"}]},
     ]
-    found = resources.TemplateDiff(TEMPLATE, wanted, current, 1, (1,))
+    found = resources.TemplateDiff(TEMPLATE, wanted(), current, 1, (1,))
     assert found.changed
     assert found.changes() == [Change("~", "launch-template", TEMPLATE, "new version")]
 
 
 def test_template_changes_show_leftover_versions() -> None:
     """中身が同じでも、既定以外のバージョンが残っていれば、消すことを出す。"""
-    wanted = resources.template_data(Service("dev-main"), Conf(), IMAGE, SUBNET, GROUP, ipv6=False)
-    found = resources.TemplateDiff(TEMPLATE, wanted, dict(wanted), 3, (1, 2, 3))
+    found = resources.TemplateDiff(TEMPLATE, wanted(), echo(), 3, (1, 2, 3))
     assert found.changes() == [
         Change("~", "launch-template", TEMPLATE, "delete other versions: 1, 2")
     ]
@@ -2793,36 +2938,15 @@ def test_template_changes_show_leftover_versions() -> None:
 
 def test_template_changes_show_versions_newer_than_the_default() -> None:
     """既定より新しいバージョンも、既定以外として消す。"""
-    wanted = resources.template_data(Service("dev-main"), Conf(), IMAGE, SUBNET, GROUP, ipv6=False)
-    found = resources.TemplateDiff(TEMPLATE, wanted, dict(wanted), 3, (2, 3, 4))
+    found = resources.TemplateDiff(TEMPLATE, wanted(), echo(), 3, (2, 3, 4))
     assert found.leftovers == (2, 4)
 
 
 def test_template_changes_leave_leftover_versions_to_the_new_version() -> None:
     """新しいバージョンを作るときは、既定以外を消すことを別に出さない。"""
-    wanted = resources.template_data(Service("dev-main"), Conf(), IMAGE, SUBNET, GROUP, ipv6=False)
-    current = {**wanted, "InstanceType": "t3.small"}
-    found = resources.TemplateDiff(TEMPLATE, wanted, current, 3, (2, 3))
+    found = resources.TemplateDiff(TEMPLATE, wanted(), echo(InstanceType="t3.small"), 3, (2, 3))
     assert found.leftovers == ()
-    assert [one.detail for one in found.changes()] == [
-        f"InstanceType: t3.small -> {wanted.get('InstanceType')}"
-    ]
-
-
-def test_association_changes_show_a_script_that_temt_changed() -> None:
-    """ポートが同じでスクリプトだけが違えば、script と書き、違いを続く行に出す。"""
-    wanted = {
-        "Name": sshd.DOCUMENT,
-        "Targets": [{"Key": "tag:Name", "Values": [NAME]}],
-        "Parameters": {sshd.COMMANDS: sshd.commands([22], "dev-main")},
-    }
-    current = {**wanted, "Parameters": {sshd.COMMANDS: ["set -u", 'want="22"', "old line"]}}
-    found = resources.AssociationDiff(
-        SSHD, (22,), wanted, association_id=ASSOCIATION, current=current
-    )
-    [line] = found.changes()
-    assert (line.mark, line.kind, line.detail) == ("~", "association", "script")
-    assert "-old line" in line.body
+    assert [one.detail for one in found.changes()] == ["InstanceType: t3.small -> t3.micro"]
 
 
 def test_old_versions_are_deleted_in_batches_aws_accepts(

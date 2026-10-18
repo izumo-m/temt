@@ -41,7 +41,8 @@ If it stops during the update phase, whatever was already written stays.
    ([config.md](../config.md#region)) and the items of [Filled when
    missing](../topics/launch-template.md#filled-when-missing). Missing `ImageId` and
    `SubnetId` are chosen from AWS here. When the file does not exist, also plan to write
-   `IamInstanceProfile = { Name = "${temt:name}" }`. A file the user made before the
+   `IamInstanceProfile = { Name = "${temt:name}" }` (the defaults file's
+   `IamInstanceProfile` instead, if it has one, as for the other values). A file the user made before the
    first `apply` gets none: the user writes the line there
    ([docs/conf.md](../../docs/conf.md#apply-が書くこと)). Decided with the requester over
    writing it at the first `apply` without a launch template, which would also write it
@@ -243,8 +244,8 @@ AMIs are kept, and the next `apply` uses them as they are. There is no
      managed policies (the policies themselves stay; temt did not make them) and
      delete all inline policies, whoever owns them; IAM's `DeleteRole` refuses with
      `DeleteConflict` while either remains.
-   - If the role is in another instance profile, stop without detaching or deleting
-     anything.
+   - If the role is in another instance profile, stop before deleting the instance
+     profile or touching the role.
    - Deleting the instance profile or the role can still fail with `DeleteConflict`:
      right after the role was removed from the instance profile, IAM may not show it yet, and
      something may have been attached after the check. AWS's text does not tell which,
@@ -296,7 +297,8 @@ symlink) stops the command before listing, naming the defaults file.
 Values are the effective values when the config file is read over the defaults file
 (not with `Defaults = false`):
 keys with a default show the default when not written. Keys with no value (unwritten
-`AwsProfile`; `ImageId` and `SubnetId` before `apply`) show `-`. `ImageId` is shown as
+`AwsProfile`; `AwsRegion`, `ImageId`, and `SubnetId` before `apply`) show `-`;
+`AwsRegion` is decided by the first `apply` ([config.md](../config.md#region)). `ImageId` is shown as
 written and not resolved to an AMI ID. There is no column for the root volume size:
 `service list` does not call AWS, so it cannot tell which `BlockDeviceMappings` element
 is the root volume when `DeviceName` is written.

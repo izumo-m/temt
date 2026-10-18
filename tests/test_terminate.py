@@ -25,7 +25,7 @@ ADDRESS = "203.0.113.10"
 # 手順 1 の探索。探す状態の一覧は設計のとおりに固定する
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
@@ -281,26 +281,45 @@ def test_it_terminates_every_instance_when_there_are_two(
     assert f"{OTHER} is terminated" in told(out)
 
 
-def test_it_makes_the_volumes_go_with_the_instance(
+# ルートボリュームのデバイス名と、ほかの EBS のデバイス名
+ROOT_DEVICE = "/dev/sda1"
+DATA_DEVICE = "/dev/sdf"
+# 終了の前にルートボリュームを消えるようにする modify-instance-attribute の引数
+ROOT_GOES = {
+    "InstanceId": INSTANCE,
+    "BlockDeviceMappings": [{"DeviceName": ROOT_DEVICE, "Ebs": {"DeleteOnTermination": True}}],
+}
+
+
+def with_volumes(*, root_kept: bool, data_kept: bool = True) -> dict[str, Any]:
+    """ルートボリュームとほかの EBS を持つ、describe-instances の応答の 1 台分。
+
+    root_kept と data_kept は、それぞれが終了しても消えない（DeleteOnTermination が
+    false）かどうか。
+    """
+    return {
+        **an_instance(INSTANCE, "running", address=ADDRESS),
+        "RootDeviceName": ROOT_DEVICE,
+        "BlockDeviceMappings": [
+            {"DeviceName": ROOT_DEVICE, "Ebs": {"DeleteOnTermination": not root_kept}},
+            {"DeviceName": DATA_DEVICE, "Ebs": {"DeleteOnTermination": not data_kept}},
+        ],
+    }
+
+
+def test_it_makes_the_root_volume_go_with_the_instance(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """DeleteOnTermination が false のボリュームは、終了の前に true にする。"""
+    """DeleteOnTermination が false のルートボリュームは、終了の前に true にする。
+
+    ほかの EBS は、インスタンスの中の側が付けるもので、インスタンスより長く使うので、
+    false のままにする。modify-instance-attribute はルートボリュームの分だけ積んでいる。
+    """
     aws_stubs.ec2.add_response(
-        "describe_instances",
-        reservations(an_instance(INSTANCE, "running", address=ADDRESS, kept=("/dev/sdb",))),
-        SEARCH,
+        "describe_instances", reservations(with_volumes(root_kept=True)), SEARCH
     )
     read_records(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "modify_instance_attribute",
-        {},
-        {
-            "InstanceId": INSTANCE,
-            "BlockDeviceMappings": [
-                {"DeviceName": "/dev/sdb", "Ebs": {"DeleteOnTermination": True}}
-            ],
-        },
-    )
+    aws_stubs.ec2.add_response("modify_instance_attribute", {}, ROOT_GOES)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
@@ -311,30 +330,45 @@ def test_it_makes_the_volumes_go_with_the_instance(
     aws_stubs.done()
     assert (
         told(capsys.readouterr().out)[0]
-        == f"{INSTANCE}: /dev/sdb will be deleted with the instance"
+        == f"{INSTANCE}: {ROOT_DEVICE} will be deleted with the instance"
     )
 
 
-def test_it_goes_on_when_a_volume_cannot_be_fixed(
+def test_it_leaves_the_other_volumes_alone(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """ボリュームを直せなくても終了は続ける。残ることを知らせる。"""
+    """ルートボリュームが終了と一緒に消えるなら、ほかの EBS が残るものでも何も変えない。
+
+    modify-instance-attribute は積んでいないので、呼べば Stubber が失敗する。
+    """
     aws_stubs.ec2.add_response(
-        "describe_instances",
-        reservations(an_instance(INSTANCE, "running", address=ADDRESS, kept=("/dev/sdb",))),
-        SEARCH,
+        "describe_instances", reservations(with_volumes(root_kept=False)), SEARCH
+    )
+    read_records(aws_stubs)
+    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
+    )
+
+    terminate.run(configured, is_async=False, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[0] == f"terminating {INSTANCE}"
+
+
+def test_it_goes_on_when_the_root_volume_cannot_be_fixed(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ルートボリュームを直せなくても終了は続ける。残ることを知らせる。"""
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(with_volumes(root_kept=True)), SEARCH
     )
     read_records(aws_stubs)
     aws_stubs.ec2.add_client_error(
         "modify_instance_attribute",
         service_error_code="UnauthorizedOperation",
         http_status_code=403,
-        expected_params={
-            "InstanceId": INSTANCE,
-            "BlockDeviceMappings": [
-                {"DeviceName": "/dev/sdb", "Ebs": {"DeleteOnTermination": True}}
-            ],
-        },
+        expected_params=ROOT_GOES,
     )
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
@@ -346,7 +380,7 @@ def test_it_goes_on_when_a_volume_cannot_be_fixed(
     aws_stubs.done()
     out, err = capsys.readouterr()
     assert err.startswith(
-        f"temt: warning: {INSTANCE}: /dev/sdb will remain after the instance is gone"
+        f"temt: warning: {INSTANCE}: {ROOT_DEVICE} will remain after the instance is gone"
     )
     assert f"terminating {INSTANCE}" in told(out)
 

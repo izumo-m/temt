@@ -325,11 +325,6 @@ class Service:
         return f"{self.name}-template"
 
     @property
-    def sshd_association(self) -> str:
-        """sshd の待ち受けポートを揃える State Manager の関連付けの名前。"""
-        return f"{self.name}-sshd"
-
-    @property
     def parameter_path(self) -> str:
         """このサービスの SSM パラメータを置く階層。アプリの値と記録はこの下に置く。"""
         return f"/{self.name}"

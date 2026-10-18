@@ -32,7 +32,7 @@ INSTANCE = "i-0123456789abcdef0"
 OTHER = "i-0fedcba9876543210"
 SEARCH = {
     "Filters": [
-        {"Name": "tag:Name", "Values": [NAME]},
+        {"Name": "tag:temt:service", "Values": ["dev-main"]},
         {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
@@ -631,7 +631,9 @@ class Baking:
 
     made: list[str] = field(default_factory=list)
 
-    def check(self, ec2: Any, service: Service, values: Any, one: Instance) -> None:
+    def check(
+        self, ec2: Any, service: Service, values: Any, one: Instance, *, command: str
+    ) -> None:
         self.made.append("check")
 
     def make(self, ec2: Any, ssm: Any, service: Service, one: Instance) -> None:
@@ -1321,7 +1323,7 @@ def test_bake_stops_before_any_change_when_the_template_does_not_match(
 ) -> None:
     """--bake で bake の確かめが通らなければ、確認も、送ることも uninstall もせずに止める。"""
 
-    def check(ec2: Any, service: Service, values: Any, one: Instance) -> None:
+    def check(ec2: Any, service: Service, values: Any, one: Instance, *, command: str) -> None:
         raise TemtError("the launch template does not match")
 
     monkeypatch.setattr(bake, "check", check)
@@ -2093,7 +2095,7 @@ def test_deploy_with_bake_records_the_options_as_baked(
 ) -> None:
     """deploy が記録に書いたオプションを、続けて焼く bake が baked_options に写す。"""
     baked_image = "ami-00000000000000001"
-    monkeypatch.setattr(bake, "check", lambda ec2, service, values, one: None)
+    monkeypatch.setattr(bake, "check", lambda ec2, service, values, one, command: None)
     monkeypatch.setattr(
         bake, "make", lambda ec2, ssm, service, one: app.mark_baked(ssm, service, one, baked_image)
     )

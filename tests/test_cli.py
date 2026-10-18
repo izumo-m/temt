@@ -25,9 +25,12 @@ from temt import (
     deploy,
     home,
     images,
+    importing,
     ingress,
     manifest,
+    role,
     services,
+    setport,
     sg,
     status,
     terminate,
@@ -38,10 +41,22 @@ from temt.names import INSTANCE_ID_RULE, LABEL_RULE, USER_NAME_RULE, Service, de
 SVC = ["--svc", "dev-main"]
 
 
+# 取り込むインスタンスの ID と、temt の管理に移すロール
+SOURCE = "i-0123456789abcdef0"
+ANOTHER_SOURCE = "i-0fedcba9876543210"
+ROLE = "work-role"
+
+
 def positional(command: str) -> list[str]:
-    """動詞の後ろに付ける位置引数。AMI、アプリ ID、キー、値、受信規則のポートを取るものには、
-    それを付ける。
+    """動詞の後ろに付ける位置引数。AMI、アプリ ID、キー、値、受信規則のポート、sshd の
+    ポート、取り込むインスタンス、ロールを取るものには、それを付ける。
     """
+    if command in cli.PORTS_COMMANDS:
+        return ["2222"]
+    if command in cli.SOURCE_COMMANDS:
+        return [SOURCE]
+    if command in cli.ROLE_COMMANDS:
+        return [ROLE]
     if command in cli.IMAGE_COMMANDS:
         return ["temt"]
     if command in cli.TARGET_COMMANDS:
@@ -75,8 +90,12 @@ def service_args(command: str) -> list[str]:
         (["instance", "reboot", *SVC], cli.INSTANCE_REBOOT),
         (["instance", "show", *SVC], cli.INSTANCE_SHOW),
         (["ami", "bake", *SVC], cli.AMI_BAKE),
+        (["ami", "import", *SVC, SOURCE], cli.AMI_IMPORT),
         (["template", "show", *SVC], cli.TEMPLATE_SHOW),
+        (["role", "import", *SVC, ROLE], cli.ROLE_IMPORT),
+        (["role", "delete", *SVC], cli.ROLE_DELETE),
         (["ssh", "proxy", *SVC], cli.SSH_PROXY),
+        (["ssh", "set-port", *SVC, "2222"], cli.SSH_SET_PORT),
     ],
 )
 def test_command_form(args: list[str], command: str) -> None:
@@ -175,8 +194,8 @@ def test_options_go_anywhere(args: list[str]) -> None:
             ["instance", "start", "dev-main", *SVC],
             "instance start: unexpected argument: dev-main",
         ),
-        # 枠としては決まっているが、まだ実装していない対象
-        (["role", "show", *SVC], "unknown command: role"),
+        # role の動詞は import と delete だけ
+        (["role", "show", *SVC], "role: unknown verb: show"),
         # keypair という対象は無い
         (["keypair", "list"], "unknown command: keypair"),
         (["keypair", "list", *SVC], "unknown command: keypair"),
@@ -327,6 +346,202 @@ def test_a_negative_port_is_read_as_an_option() -> None:
     """
     with pytest.raises(UsageError, match="^proxy: unknown option: -1$"):
         cli.parse(["proxy", "-1", *SVC])
+
+
+def test_set_port_takes_ports() -> None:
+    """ssh set-port は sshd のポートを 1 つ以上取る。並びは打たれた順。"""
+    request = cli.parse(["ssh", "set-port", *SVC, "2222", "443"])
+    assert (request.command, request.ports, request.yes) == (cli.SSH_SET_PORT, (2222, 443), False)
+    # コマンドラインオプションの間に置いてもよい
+    request = cli.parse(["ssh", "set-port", "443", *SVC, "--yes", "2222"])
+    assert (request.ports, request.yes) == ((443, 2222), True)
+    assert cli.parse(["ssh", "set-port", *SVC, "1", "65535"]).ports == (1, 65535)
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        ([], "ssh set-port: missing port"),
+        (["--yes"], "ssh set-port: missing port"),
+        (["0"], "ssh set-port: port must be a number from 1 to 65535: 0"),
+        (["65536"], "ssh set-port: port must be a number from 1 to 65535: 65536"),
+        # どれか 1 つでも誤りなら止める
+        (["2222", "22x"], "ssh set-port: port must be a number from 1 to 65535: 22x"),
+        (["２２"], "ssh set-port: port must be a number from 1 to 65535: ２２"),
+        ([""], "ssh set-port: port must be a number from 1 to 65535: "),
+        (["2222", "443", "2222"], "ssh set-port: repeated port: 2222"),
+        # 書き方が違っても、値が同じなら重ねたとみなし、打たれた語で知らせる
+        (["22", "022"], "ssh set-port: repeated port: 022"),
+        (["-1"], "ssh set-port: unknown option: -1"),
+    ],
+)
+def test_set_port_rejected(args: list[str], message: str) -> None:
+    with pytest.raises(UsageError) as caught:
+        cli.parse(["ssh", "set-port", *SVC, *args])
+    assert str(caught.value) == message
+
+
+def test_main_passes_the_ports_to_set_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[Service, tuple[int, ...], bool]] = []
+
+    def set_port(service: Service, ports: tuple[int, ...], *, yes: bool) -> None:
+        seen.append((service, ports, yes))
+
+    monkeypatch.setattr(setport, "run", set_port)
+    assert cli.main(["temt", "ssh", "set-port", *SVC, "2222", "443"]) == 0
+    assert cli.main(["temt", "ssh", "set-port", "--yes", "22", *SVC]) == 0
+    assert seen == [
+        (Service("dev-main"), (2222, 443), False),
+        (Service("dev-main"), (22,), True),
+    ]
+
+
+def test_ami_import_takes_an_instance_id() -> None:
+    """ami import は、取り込むインスタンスの ID をちょうど 1 つ取る。"""
+    request = cli.parse(["ami", "import", *SVC, SOURCE])
+    assert (request.command, request.service, request.instance_ids, request.yes) == (
+        cli.AMI_IMPORT,
+        Service("dev-main"),
+        (SOURCE,),
+        False,
+    )
+    # コマンドラインオプションの間に置いてもよい。取り込むリージョンは --region で選ぶ
+    request = cli.parse(["--region", "us-east-1", "ami", "import", "--yes", "i-01234567", *SVC])
+    assert (request.instance_ids, request.yes, request.region) == (
+        ("i-01234567",),
+        True,
+        "us-east-1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["ami", "import", *SVC], "ami import: missing instance id"),
+        (["ami", "import", *SVC, ""], "ami import: missing instance id"),
+        (["ami", "import", *SVC, "--yes"], "ami import: missing instance id"),
+        (["ami", "import", SOURCE], "ami import: missing --svc"),
+        (
+            ["ami", "import", *SVC, "web"],
+            f"ami import: the instance id {INSTANCE_ID_RULE}: web",
+        ),
+        (
+            ["ami", "import", *SVC, "i-0123456789ABCDEF0"],
+            f"ami import: the instance id {INSTANCE_ID_RULE}: i-0123456789ABCDEF0",
+        ),
+        (
+            ["ami", "import", *SVC, "i-\x1b[2J"],
+            f"ami import: the instance id {INSTANCE_ID_RULE}: i-?[2J",
+        ),
+        # 取り込むのは 1 台だけ
+        (
+            ["ami", "import", *SVC, SOURCE, ANOTHER_SOURCE],
+            f"ami import: unexpected argument: {ANOTHER_SOURCE}",
+        ),
+        (["ami", "import", *SVC, SOURCE, "--async"], "ami import: unexpected argument: --async"),
+        (["ami", "import", *SVC, SOURCE, "--force"], "ami import: unexpected argument: --force"),
+    ],
+)
+def test_ami_import_arguments_rejected(args: list[str], message: str) -> None:
+    with pytest.raises(UsageError) as caught:
+        cli.parse(args)
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("named", [ROLE, "arn:aws:iam::123456789012:role/service-role/Work_Role"])
+def test_role_import_takes_a_role_name_or_arn(named: str) -> None:
+    """role import は、ロールの名前か ARN をちょうど 1 つ取る。書かれたまま渡す。"""
+    request = cli.parse(["role", "import", *SVC, named])
+    assert (request.command, request.service, request.app, request.yes) == (
+        cli.ROLE_IMPORT,
+        Service("dev-main"),
+        named,
+        False,
+    )
+    request = cli.parse(["role", "import", "--yes", named, *SVC])
+    assert (request.app, request.yes) == (named, True)
+
+
+def test_role_delete_takes_nothing_but_yes() -> None:
+    request = cli.parse(["role", "delete", *SVC])
+    assert (request.command, request.service, request.app, request.yes) == (
+        cli.ROLE_DELETE,
+        Service("dev-main"),
+        None,
+        False,
+    )
+    assert cli.parse(["role", "delete", "--yes", *SVC]).yes is True
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["role", "import", *SVC], "role import: missing role name or ARN"),
+        (["role", "import", *SVC, ""], "role import: missing role name or ARN"),
+        (["role", "import", ROLE], "role import: missing --svc"),
+        (["role", "import", *SVC, ROLE, "other"], "role import: unexpected argument: other"),
+        (
+            # UTF-8 として読めないバイトを含む名前は、AWS に送れないので先に断る
+            ["role", "import", *SVC, "work\udcff"],
+            "role import: the role name is not valid UTF-8: work?",
+        ),
+        (["role", "delete", *SVC, ROLE], f"role delete: unexpected argument: {ROLE}"),
+        (["role", "delete"], "role delete: missing --svc"),
+        (["role", "delete", *SVC, "--force"], "role delete: unexpected argument: --force"),
+    ],
+)
+def test_role_arguments_rejected(args: list[str], message: str) -> None:
+    with pytest.raises(UsageError) as caught:
+        cli.parse(args)
+    assert str(caught.value) == message
+
+
+def test_main_runs_ami_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[Service, str, bool]] = []
+
+    def imported(service: Service, instance_id: str, *, yes: bool) -> None:
+        seen.append((service, instance_id, yes))
+
+    monkeypatch.setattr(importing, "run", imported)
+    assert cli.main(["temt", "ami", "import", *SVC, SOURCE]) == 0
+    assert cli.main(["temt", "ami", "import", "--yes", ANOTHER_SOURCE, "--svc", "web"]) == 0
+    assert seen == [(Service("dev-main"), SOURCE, False), (Service("web"), ANOTHER_SOURCE, True)]
+
+
+def test_main_passes_the_region_to_ami_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--region は、設定ファイルの無いサービスに取り込むリージョンとして、conf に渡す。"""
+    seen: list[str | None] = []
+
+    def imported(service: Service, instance_id: str, *, yes: bool) -> None:
+        _ = (service, instance_id, yes)
+        seen.append(conf.OPTION_REGION)
+
+    monkeypatch.setattr(importing, "run", imported)
+    assert cli.main(["temt", "--region", "us-east-1", "ami", "import", *SVC, SOURCE]) == 0
+    assert seen == ["us-east-1"]
+
+
+def test_main_runs_the_role_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, Service, str | None, bool]] = []
+
+    def imported(service: Service, role: str, *, yes: bool) -> None:
+        seen.append(("import", service, role, yes))
+
+    def deleted(service: Service, *, yes: bool) -> None:
+        seen.append(("delete", service, None, yes))
+
+    monkeypatch.setattr(role, "import_role", imported)
+    monkeypatch.setattr(role, "delete", deleted)
+    assert cli.main(["temt", "role", "import", *SVC, ROLE]) == 0
+    assert cli.main(["temt", "role", "import", "--yes", "arn:aws:iam::1:role/x", *SVC]) == 0
+    assert cli.main(["temt", "role", "delete", *SVC]) == 0
+    assert cli.main(["temt", "role", "delete", "--yes", "--svc", "web"]) == 0
+    assert seen == [
+        ("import", Service("dev-main"), ROLE, False),
+        ("import", Service("dev-main"), "arn:aws:iam::1:role/x", True),
+        ("delete", Service("dev-main"), None, False),
+        ("delete", Service("web"), None, True),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -499,6 +714,22 @@ def test_the_usage_of_a_target_has_only_its_notes() -> None:
     assert "[--svc <svc>] of app list may be left out" in text
     assert "with it, the command deals only with" not in text
     assert "[--svc <svc>] of app list" not in cli.usage("instance")
+    assert "ssh set-port sets the ports sshd listens on" in cli.usage("ssh")
+    assert "ssh set-port sets" not in cli.usage("sg")
+    assert "ami import makes an AMI of a stopped instance" in cli.usage("ami")
+    assert "ami import makes" not in cli.usage("instance")
+    text = cli.usage("role")
+    assert "role import rewrites [role] and IamInstanceProfile" in text
+    assert "role delete\ndeletes the instance role and instance profile temt-<svc>" in text
+    assert "role import rewrites" not in cli.usage("ami")
+
+
+def test_the_usage_shows_the_new_commands() -> None:
+    """ami import と role のコマンドの行。位置引数の名前も出す。"""
+    assert "  ami import --svc <svc> <instance id> [--yes]\n" in cli.usage("ami")
+    text = cli.usage("role")
+    assert "  role import --svc <svc> <role name or arn> [--yes]\n" in text
+    assert "  role delete --svc <svc> [--yes]\n" in text
 
 
 def test_help_after_a_value_option_is_its_value() -> None:
@@ -516,6 +747,9 @@ def test_help_after_a_value_option_is_its_value() -> None:
             "instance",
         ),
         (["temt", "deploy", *SVC], "deploy: missing app id or path", "app"),
+        (["temt", "ssh", "set-port", *SVC], "ssh set-port: missing port", "ssh"),
+        (["temt", "ami", "import", *SVC], "ami import: missing instance id", "ami"),
+        (["temt", "role", "import", *SVC], "role import: missing role name or ARN", "role"),
         (["temt", "instance", "--format"], "missing value for --format", "instance"),
         (
             ["temt", "service", "list", "--format", "NOPE"],
@@ -773,20 +1007,12 @@ def test_a_format_goes_anywhere() -> None:
             "service list: --region is not allowed; it does not call AWS",
         ),
         (
-            ["--region", "us-east-1", "instance", "list", *SVC],
-            "instance list: --region is not allowed with a service",
-        ),
-        (
             ["app", "list", "--profile", "work"],
             "app list: --profile is not allowed; it does not call AWS without --svc",
         ),
         (
             ["app", "list", "--region", "us-east-1"],
             "app list: --region is not allowed; it does not call AWS without --svc",
-        ),
-        (
-            ["app", "list", "--region", "us-east-1", *SVC],
-            "app list: --region is not allowed with a service",
         ),
     ],
 )
@@ -852,10 +1078,6 @@ def test_ami_delete_takes_an_image() -> None:
             "ami delete: repeated argument: --force",
         ),
         (["ami", "prune", "--force"], "ami prune: unexpected argument: --force"),
-        (
-            ["--region", "us-east-1", "ami", "delete", "a", *SVC],
-            "ami delete: --region is not allowed with a service",
-        ),
     ],
 )
 def test_ami_delete_arguments_rejected(args: list[str], message: str) -> None:
@@ -938,26 +1160,30 @@ def test_main_passes_the_instance_ids_to_terminate(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize(
+    "args",
+    [
+        ["--region", "us-east-1", "instance", "list", *SVC],
+        ["app", "list", "--region", "us-east-1", *SVC],
+        ["--region", "us-east-1", "ami", "delete", "a", *SVC],
+        ["ami", "prune", *SVC, "--region", "us-east-1"],
+        ["--region", "us-east-1", "status", *SVC],
+        ["--region", "us-east-1", "apply", *SVC],
+        ["--region", "us-east-1", "ami", "import", *SVC, SOURCE],
+        ["role", "import", *SVC, ROLE, "--region", "us-east-1"],
+        ["role", "delete", *SVC, "--region", "us-east-1"],
+    ],
+)
+def test_region_is_taken_with_a_service(args: list[str]) -> None:
+    """--svc を付けても --region を取る。設定ファイルの AwsRegion と合わなければ、読むときに
+    誤りにする。"""
+    assert cli.parse(args).region == "us-east-1"
+
+
+@pytest.mark.parametrize(
     ("args", "message"),
     [
         (["ami", "prune", "dev-main"], "ami prune: unexpected argument: dev-main"),
         (["ami", "list", "--yes"], "ami list: unexpected argument: --yes"),
-        (
-            ["--region", "us-east-1", "ami", "list", *SVC],
-            "ami list: --region is not allowed with a service",
-        ),
-        (
-            ["--region", "us-east-1", "ami", "list", *SVC],
-            "ami list: --region is not allowed with a service",
-        ),
-        (
-            ["ami", "prune", *SVC, "--region", "us-east-1"],
-            "ami prune: --region is not allowed with a service",
-        ),
-        (
-            ["--region", "us-east-1", "status", *SVC],
-            "status: --region is not allowed with a service",
-        ),
         (["--region"], "missing value for --region"),
         (["--region", "", "ami", "prune"], "ami prune: missing value for --region"),
         (

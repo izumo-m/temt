@@ -90,12 +90,15 @@ puts this one in its place.
 
 `destroy` and [`role delete`](commands/role.md#role-delete) delete only the pair named
 `<name>` with `temt:service=<svc>`, whether or not the config file points at it. In
-order: detach the managed policies (`detach-role-policy`; the policies stay, temt did
-not make them), delete the inline policies (`delete-role-policy`; IAM's `DeleteRole`
-refuses with `DeleteConflict` while either remains), remove the role from the instance
-profile, and delete both. Untagged ones, or ones of another service, are left alone;
+order: remove the role from the instance profile and delete the instance profile, then
+detach the managed policies from the role (`detach-role-policy`; the policies stay, temt
+did not make them), delete its inline policies (`delete-role-policy`; IAM's `DeleteRole`
+refuses with `DeleteConflict` while either remains), and delete the role, as
+[`destroy`](commands/service.md#destroy) step 4 orders them. Untagged ones, or ones of
+another service, are left alone;
 instance profiles of other names (the source's, after `ami import`) are never targets. If the
-role is in another instance profile, they stop.
+role is in another instance profile, they stop before detaching or deleting anything;
+that includes the instance profile `<name>` when it was left alone because of its tags.
 
 ## Security group
 

@@ -14,12 +14,10 @@ boto3 を使うので、この module は cli.run が呼ばれたときに読み
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from temt import aws, change, conf, home, keys, msg, policy, resources
-from temt.aws import field
+from temt import aws, change, conf, home, keys, ltbuild, ltdata, msg, policy, resources
 from temt.change import ADD, ARROW, UPDATE, Change
 from temt.conf import Conf
 from temt.msg import TemtError
@@ -27,7 +25,7 @@ from temt.names import ssh_dir, tilde, user_ssh_dir
 from temt.table import printable
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
 
     import boto3
     from types_boto3_ec2.client import EC2Client
@@ -42,8 +40,10 @@ CONF = "conf"
 
 
 def _quoted(value: Any) -> str:
-    """設定ファイルの値の表示。TOML の文字列と同じく " で囲む。"""
-    return json.dumps(value, ensure_ascii=False)
+    """設定ファイルの値の表示。TOML の書き方にする（文字列は " で囲み、テーブルは
+    インラインテーブル）。表示できない文字は置き換える。
+    """
+    return printable(conf.toml_value(value))
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ class ConfDiff:
     並べたもの。ec2_default は、[[role.policy.ec2]] の既定を足すかどうか。
     """
 
-    items: tuple[tuple[str, Any, str], ...]
+    items: tuple[tuple[str, Any, Any], ...]
     ec2_default: bool = False
 
     def changes(self) -> list[Change]:
@@ -70,123 +70,155 @@ class ConfDiff:
         return found
 
 
+# 書いていなければ apply が決めて書く値。design/topics/launch-template.md の Filled when
+# missing
+SHUTDOWN_BEHAVIOR = "terminate"
+HTTP_TOKENS = "required"
+METADATA_TAGS = "enabled"
+CPU_CREDITS = "unlimited"
+# サービスを作るときに書く IamInstanceProfile。temt が作るインスタンスプロファイルを指す
+TEMT_PROFILE = {"Name": "${temt:name}"}
+
+
 def _conf_items(
-    ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf
-) -> Iterator[tuple[str, str]]:
+    ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf, *, new: bool
+) -> Iterator[tuple[str, Any]]:
     """手順 2 で設定ファイルに書く項目の位置と値を、1 つずつ決めて返す。
 
-    --profile で選ばれたプロファイルを AwsProfile として先頭に、残りを conf.md の表の
-    順に返す。AWS を読むのは ImageId と SubnetId が書かれていないときだけで、それぞれ
-    最新の AMI と公開サブネットを選ぶ。更新でもこの順に書くので、更新の途中で止まって
-    も、AwsProfile は書かれていて、次の apply が同じアカウントを向く。
+    --profile で選ばれたプロファイルを AwsProfile として先頭に、AwsRegion、続けて
+    docs/conf.md の「書かなければ apply が書く項目」の表の順に返す。書かれていれば（共通
+    ファイルに書かれていても）その値を、無ければ既定を返す。AWS を読むのは、ImageId と
+    SubnetId が書かれていないときと、IPv6 アドレスの数を決めるときだけである。new
+    （設定ファイルが無い）なら、最後に IamInstanceProfile を返す。更新でもこの順に
+    書くので、更新の途中で止まっても、AwsProfile は書かれていて、次の apply が同じ
+    アカウントを向く。
     """
     if conf.OPTION_PROFILE:
         yield "AwsProfile", conf.OPTION_PROFILE
     yield "AwsRegion", values.AwsRegion
-    template = values.launch_template
-    image = template.ImageId
-    if image is conf.UNSET:
-        image = aws.latest_ami(ec2, ssm, service.svc)
+    data = values.launch_template
+    image = data.get("ImageId") or aws.latest_ami(ec2, ssm, service.svc)
     yield conf.launch_template_key("ImageId"), image
-    yield conf.launch_template_key("InstanceType"), template.InstanceType
-    subnet = template.SubnetId
-    if subnet is conf.UNSET:
-        subnet = aws.public_subnet(ec2, values.AwsRegion, service.conf_path)
-    yield conf.launch_template_key("SubnetId"), subnet
+    instance_type = data.get("InstanceType") or conf.INSTANCE_TYPE
+    yield conf.launch_template_key("InstanceType"), instance_type
+    first = ltbuild.primary(data) or {}
+    if "NetworkInterfaceId" not in first:
+        subnet = first.get("SubnetId") or aws.public_subnet(
+            ec2, values.AwsRegion, service.conf_path
+        )
+        yield conf.primary_key("SubnetId"), subnet
+        public = first.get("AssociatePublicIpAddress")
+        yield conf.primary_key("AssociatePublicIpAddress"), True if public is None else public
+        count = first.get("Ipv6AddressCount")
+        if count is not None:
+            yield conf.primary_key("Ipv6AddressCount"), count
+        elif aws.subnet(ec2, subnet, conf.source(service, conf.primary_key("SubnetId"))).ipv6:
+            yield conf.primary_key("Ipv6AddressCount"), resources.IPV6_ADDRESSES
+    metadata = data.get("MetadataOptions") or {}
+    yield (
+        conf.launch_template_key("MetadataOptions.HttpTokens"),
+        (metadata.get("HttpTokens") or HTTP_TOKENS),
+    )
+    yield (
+        conf.launch_template_key("MetadataOptions.InstanceMetadataTags"),
+        (metadata.get("InstanceMetadataTags") or METADATA_TAGS),
+    )
+    yield (
+        conf.launch_template_key("InstanceInitiatedShutdownBehavior"),
+        (data.get("InstanceInitiatedShutdownBehavior") or SHUTDOWN_BEHAVIOR),
+    )
+    credits = (data.get("CreditSpecification") or {}).get("CpuCredits")
+    if credits:
+        yield conf.launch_template_key("CreditSpecification.CpuCredits"), credits
+    elif resources.BURSTABLE.match(instance_type):
+        yield conf.launch_template_key("CreditSpecification.CpuCredits"), CPU_CREDITS
+    if new:
+        yield conf.launch_template_key(ltdata.PROFILE), data.get(ltdata.PROFILE) or TEMT_PROFILE
 
 
 def _conf_diffs(
-    ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf
-) -> Iterator[tuple[str, Any, str]]:
+    ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf, *, new: bool
+) -> Iterator[tuple[str, Any, Any]]:
     """手順 2 の項目の差分を、項目を 1 つ決めるたびに検出して返す。
 
     書かれていないか値の違う項目の、位置、書かれている値（無ければ None）、書く値を返す。
+    書く先がインラインテーブルの中などで書けなければ、ここで止める。
     """
-    for key, value in _conf_items(ec2, ssm, service, values):
+    for key, value in _conf_items(ec2, ssm, service, values, new=new):
         now = conf.written(service, key)
         if now != value:
+            conf.check_writable(service, key, value)
             yield key, now, value
 
 
-def _needs_ec2_default(values: Conf) -> bool:
-    """[[role.policy.ec2]] の既定を足すか。1 つも書かれていなければ足す。"""
-    return conf.EC2 not in values.role.policy
+def _managed(service: Service, values: Conf) -> bool:
+    """IamInstanceProfile が temt のインスタンスプロファイル <名前> を指すか。"""
+    return ltbuild.points_at_temt(values.launch_template, service)
 
 
-def _detect_conf(ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf) -> ConfDiff:
+def _needs_ec2_default(service: Service, values: Conf) -> bool:
+    """[[role.policy.ec2]] の既定を足すか。temt のインスタンスプロファイルを指していて、
+    1 つも書かれていなければ足す。
+    """
+    return _managed(service, values) and conf.EC2 not in values.role.policy
+
+
+def _detect_conf(
+    ec2: EC2Client, ssm: SSMClient, service: Service, values: Conf, shown: list[Change]
+) -> ConfDiff:
     """手順 2 の差分を検出する。書かれていないか値の違う項目と、既定を足すか。
 
-    既定を足すなら、足せるかも確かめる。確かめるのはいまの設定ファイルを読んだ values
-    なので、項目を書いたものとする前に呼ぶ。ファイルがまだ無ければ、作ったファイルに
-    足すので、確かめるまでもない。
+    見せる変更は、項目を 1 つ検出するたびに shown に足す。途中で止まっても、それまでに
+    検出した変更は残る。既定を足すなら、足せるかも確かめる。確かめるのはいまの設定
+    ファイルを読んだ values なので、項目を書いたものとする前に呼ぶ。ファイルがまだ無ければ、
+    作ったファイルに足すので、確かめるまでもない。
     """
-    items = tuple(_conf_diffs(ec2, ssm, service, values))
-    ec2_default = _needs_ec2_default(values)
+    new = not service.conf_path.exists()
+    found: list[tuple[str, Any, Any]] = []
+    for item in _conf_diffs(ec2, ssm, service, values, new=new):
+        found.append(item)
+        shown += ConfDiff((item,)).changes()
+    items = tuple(found)
+    profile = dict((key, value) for key, _, value in items).get(
+        conf.launch_template_key(ltdata.PROFILE)
+    )
+    planned = {**values.launch_template, **({ltdata.PROFILE: profile} if profile else {})}
+    ec2_default = ltbuild.points_at_temt(planned, service) and conf.EC2 not in values.role.policy
     if ec2_default and service.conf_path.exists():
         _ = conf.with_ec2_default(service, values)
+    if ec2_default:
+        shown += ConfDiff((), ec2_default=True).changes()
     return ConfDiff(items, ec2_default=ec2_default)
 
 
-class Resolved(NamedTuple):
-    """手順 4 で設定ファイルから解いた、この後の手順が使う値。
-
-    root_device は、VolumeSize が書かれているときの AMI のルートボリュームのデバイス
-    名で、書かれていなければ None。
+def _check_role(service: Service, values: Conf) -> None:
+    """手順 4 の続き。temt のインスタンスプロファイルを指していないのに [role] が書かれて
+    いれば止める。どのファイルの項目かを告げる。
     """
+    if _managed(service, values) or not values.role:
+        return
+    keys = [f"role.policy.{name}" for name in values.role.policy]
+    if values.role.ManagedPolicyArns:
+        keys.append("role.ManagedPolicyArns")
+    places = ", ".join(f"{key} in {printable(tilde(conf.source(service, key)))}" for key in keys)
+    raise TemtError(
+        f"{conf.launch_template_key(ltdata.PROFILE)} does not point at the instance profile "
+        f"{service.name} that temt manages, so [role] cannot be used: {places}; remove them, "
+        f"or move the instance role under temt with 'temt role import --svc {service.svc}'"
+    )
 
-    image_id: str
-    subnet_id: str
-    subnet: aws.Subnet
-    root_device: str | None
 
-
-def _root_device(service: Service, values: Conf, found: Mapping[str, Any]) -> str | None:
-    """手順 4 の続き。VolumeSize が AMI のルートボリュームより小さくないことを確かめる。
-
-    書かれていれば、起動テンプレートに入れるルートボリュームのデバイス名を返す。
+def _check_ingress(service: Service, values: Conf, built: ltbuild.Built) -> None:
+    """手順 4 の続き。受信規則があるのに、起動テンプレートが temt のセキュリティグループを
+    使わなければ止める。どのファイルの規則かを告げる。
     """
-    size = values.launch_template.VolumeSize
-    if size is None:
-        return None
-    key = conf.launch_template_key("VolumeSize")
-    image_id = field(found, "ImageId")
-    root = aws.root_volume(found)
-    if root is None:
-        raise TemtError(
-            f"the AMI {image_id} has no EBS root volume; remove {key} from "
-            f"{printable(str(conf.source(service, key)))}"
-        )
-    if size < root.size:
-        raise TemtError(
-            f"{key} {size} is smaller than the root volume of {image_id} ({root.size} GiB); "
-            f"raise it or remove it in {printable(str(conf.source(service, key)))}"
-        )
-    return root.device
-
-
-def _resolve(ec2: EC2Client, service: Service, values: Conf) -> Resolved:
-    """手順 4。サブネットと AMI があることを確かめて、VPC と IPv6 の CIDR の有無を得る。
-
-    この後の手順が使う AMI とサブネットの ID も、サブネットの性質とともに返す。
-    ImageId が AMI の名前なら、ここで ID を引く。どちらの項目も手順 2 が必ず決めて
-    values に入れているので、ふつうは値がある。サブネットを先に確かめるのは、別の
-    アカウントで作ろうとしているときに、両方の行を消すよう案内するためである。
-    """
-    template = values.launch_template
-    subnet_id = template.SubnetId
-    if subnet_id is conf.UNSET:
-        raise TemtError(
-            f"no {conf.launch_template_key('SubnetId')} in {printable(str(service.conf_path))}"
-        )
-    image_id = template.ImageId
-    if image_id is conf.UNSET:
-        raise TemtError(
-            f"no {conf.launch_template_key('ImageId')} in {printable(str(service.conf_path))}"
-        )
-    subnet = aws.subnet(ec2, subnet_id, conf.source(service, conf.launch_template_key("SubnetId")))
-    found = aws.image(ec2, image_id, conf.source(service, conf.launch_template_key("ImageId")))
-    return Resolved(
-        field(found, "ImageId"), subnet_id, subnet, _root_device(service, values, found)
+    if built.uses_group or not values.security_group.ingress:
+        return
+    key = f"{conf.SECURITY_GROUP}{conf.SEPARATOR}{conf.INGRESS}"
+    raise TemtError(
+        f"the launch template uses no security group of temt, so the ingress rules in "
+        f"{printable(tilde(conf.source(service, key)))} cannot be used; add ${{temt:name}} to "
+        f"Groups in {conf.launch_template_key('NetworkInterfaces')}, or remove the rules"
     )
 
 
@@ -198,7 +230,7 @@ def _role_policies(
 
     インラインポリシーの名前から中身への対応を返す。ERROR があれば、すべてのポリシーを
     検査してから止める。手順 2 が ec2 の既定を足したものとして values に入れているので、
-    ポリシーはつねにある。
+    temt のインスタンスプロファイルを指していれば、ポリシーはつねにある。
     """
     made: dict[str, dict[str, Any]] = {}
     # 中身を作るところは AWS を呼ばないので、先にすべて作り、誤りがあれば検査の前に止める
@@ -274,33 +306,24 @@ def _detect(
     """
     ec2, ssm, iam = clients
     new = not service.conf_path.exists()
-    configured = _detect_conf(ec2, ssm, service, values)
+    configured = _detect_conf(ec2, ssm, service, values, shown)
     for key, _, value in configured.items:
         conf.assign(values, key, value)
     if configured.ec2_default:
         values.role.policy[conf.EC2] = conf.ec2_default()
-    shown += configured.changes()
     dirs = tuple(home.detect_dirs())
     shown += home.dir_changes(list(dirs))
     command = home.command_missing(service)
     shown += home.command_changes(service, command)
-    resolved = _resolve(ec2, service, values)
-    policies = _role_policies(session, service, values)
-    found = resources.detect(
-        ec2,
-        iam,
-        ssm,
-        service,
-        values,
-        resolved.image_id,
-        resolved.subnet_id,
-        resolved.subnet.vpc_id,
-        ipv6=resolved.subnet.ipv6,
-        root_device=resolved.root_device,
-        policies=policies,
-    )
+    # 手順 4
+    built = ltbuild.build(ec2, service, values)
+    _check_role(service, values)
+    _check_ingress(service, values, built)
+    policies = _role_policies(session, service, values) if _managed(service, values) else None
+    # 手順 5
+    found = resources.detect(ec2, iam, service, values, built, policies=policies)
     shown += found.changes()
-    host = home.detect_host_block(service, values)
+    host = home.detect_host_block(service)
     # Host ブロックが既定の鍵を使うなら、無ければ作る。利用者が替えた鍵には触らない
     path = home.default_key(host, service)
     key = None if path is None else keys.detect(path)
@@ -312,10 +335,10 @@ def _detect(
     return Plan(configured, new, dirs, command, found, key, host, include)
 
 
-def _write(service: Service, values: Conf, key: str, value: str) -> None:
+def _write(service: Service, values: Conf, key: str, value: Any) -> None:
     """設定ファイルの項目を書き、知らせる。"""
     if conf.update(service, values, key, value):
-        msg.info(f'wrote {key} = "{printable(value)}" in {printable(str(service.conf_path))}')
+        msg.info(f"wrote {key} = {_quoted(value)} in {printable(str(service.conf_path))}")
 
 
 def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> None:
@@ -344,7 +367,7 @@ def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> Non
         home.write_command(service)
         msg.info(f"wrote {printable(tilde(service.command_path))}")
     # 手順 5
-    resources.update(ec2, iam, ssm, service, values, plan.found)
+    resources.update(ec2, iam, service, plan.found)
     # 手順 6。鍵を先に作り、ssh の設定が無い鍵を指す時間を作らない
     keys.ensure(plan.key)
     if home.write_edit(plan.host):

@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from botocore.exceptions import ClientError
 
-from temt import msg, resources, sshd, wait
-from temt.aws import error_code, field
+from temt import msg, resources, wait
+from temt.aws import TAG_SERVICE, error_code, field
 from temt.msg import TemtError
 from temt.table import aws_error, printable
 
@@ -57,8 +57,6 @@ ONLINE = "Online"
 RUNNING_DEADLINE = 600
 STOPPED_DEADLINE = 600
 LOGIN_DEADLINE = 300
-# 起動後に、sshd の待ち受けポートを揃える関連付けが実行し終わるまで
-SSHD_DEADLINE = 300
 TERMINATED_DEADLINE = 600
 # 再開を求めてから、describe-instances が前の状態を返さなくなるまで
 LEAVE_DEADLINE = 60
@@ -83,7 +81,8 @@ class Instance:
     state: str
     # パブリック IPv4 アドレス。まだ付いていなければ空文字列
     public_ipv4: str
-    # 終了しても消えない EBS ボリュームのデバイス名
+    # 終了しても消えないルートボリュームのデバイス名。消えるなら空。ほかの EBS は、
+    # インスタンスの中の側が付けるもので、インスタンスより長く使うので、数えない
     kept_devices: tuple[str, ...]
     # 起動してからの秒数。AWS の応答の時刻から数えるので、ふつうは手元の時計に左右
     # されない。起動時刻が応答に無ければ None
@@ -96,6 +95,8 @@ class Instance:
     image_id: str = ""
     # ルートボリュームの ID。応答に無ければ空文字列
     root_volume: str = ""
+    # ルートボリューム以外の EBS のデバイス名。bake と ami import は AMI に入れない
+    other_devices: tuple[str, ...] = ()
 
     def because(self) -> str:
         """状態を述べる文に添える、変わった理由。理由が無ければ空文字列。"""
@@ -142,13 +143,20 @@ def _one(item: Mapping[str, Any], now: datetime) -> Instance:
         kept_devices=tuple(
             field(mapping, "DeviceName")
             for mapping in item.get("BlockDeviceMappings") or []
-            if (mapping.get("Ebs") or {}).get("DeleteOnTermination") is False
+            if mapping.get("DeviceName") == item.get("RootDeviceName")
+            and (mapping.get("Ebs") or {}).get("DeleteOnTermination") is False
         ),
         age=(now - launched).total_seconds() if launched is not None else None,
         launched=launched,
         reason=(item.get("StateReason") or {}).get("Message") or "",
         image_id=str(item.get("ImageId") or ""),
         root_volume=_root_volume(item),
+        other_devices=tuple(
+            field(mapping, "DeviceName")
+            for mapping in item.get("BlockDeviceMappings") or []
+            if mapping.get("Ebs") is not None
+            and mapping.get("DeviceName") != item.get("RootDeviceName")
+        ),
     )
 
 
@@ -174,7 +182,7 @@ def find(ec2: EC2Client, service: Service) -> list[Instance]:
     return _read(
         ec2.describe_instances(
             Filters=[
-                {"Name": "tag:Name", "Values": [service.name]},
+                {"Name": f"tag:{TAG_SERVICE}", "Values": [service.svc]},
                 {"Name": "instance-state-name", "Values": list(SEARCH_STATES)},
             ]
         )
@@ -288,9 +296,10 @@ def launch(ec2: EC2Client, service: Service) -> str:
 
 
 def delete_volumes(ec2: EC2Client, one: Instance) -> None:
-    """終了しても消えない EBS ボリュームを、消えるようにする。
+    """終了しても消えないルートボリュームを、消えるようにする。
 
-    失敗しても続ける。そのボリュームが残ることを知らせる。
+    ほかの EBS は、インスタンスの中の側が付けるもので、終了と一緒に消さない。失敗しても
+    続ける。そのボリュームが残ることを知らせる。
     """
     for device in one.kept_devices:
         try:
@@ -527,29 +536,6 @@ def relaunch_hint(service: Service) -> str:
     よう添える。
     """
     return f"run 'temt terminate --svc {service.svc}', wait a few minutes, and start again"
-
-
-def wait_sshd_ports(
-    ssm: SSMClient,
-    service: Service,
-    instance_id: str,
-    current: sshd.Association,
-    notice: str | None = None,
-) -> str:
-    """そのインスタンスで関連付け <名前>-sshd の今の版が実行し終わるまで待ち、その状態を返す。
-
-    current は sshd.find で読んだ今の版。前の版の状態と、一覧に無い状態は、まだ実行
-    されていないものとみなす。締め切りを過ぎたら、status を見るよう添えて終了する。
-    """
-    name = service.sshd_association
-    return wait.until(
-        SSHD_DEADLINE,
-        f"association {name} to finish on {instance_id}",
-        _noticing(
-            notice, lambda: sshd.outcome(sshd.instance_status(ssm, current, instance_id), current)
-        ),
-        hint=f"see 'temt status --svc {service.svc}'",
-    )
 
 
 def connect(address: str, port: int) -> socket.socket:

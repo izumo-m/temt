@@ -484,7 +484,7 @@ def run(
             added = {options.FILE: options.env_file(app_id, manifest.version, chosen)}
         data = archive(path, added)
         if baking:
-            bake.check(ec2, service, values, one)
+            bake.check(ec2, service, values, one, command="deploy")
             what = f"deploy {app_id} {options.visible(manifest.version)} to {one.id} as {user}"
             _confirm(service, one, what, yes=yes)
         # 手順 3
@@ -609,7 +609,7 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
         else:
             msg.warn(f"{directory} is not on {one.id}; updating only the record")
         if baking:
-            bake.check(ec2, service, values, one)
+            bake.check(ec2, service, values, one, command="app remove")
             _confirm(service, one, what, yes=yes)
         if present:
             msg.info(f"running {UNINSTALL} of {app_id} as {runner} on {one.id}")
