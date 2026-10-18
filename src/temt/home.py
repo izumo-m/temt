@@ -29,10 +29,9 @@ from temt.names import (
     replace_text,
     resolved,
     ssh_dir,
-    tilde,
     user_ssh_dir,
 )
-from temt.table import printable
+from temt.table import printable, tilde
 
 # インスタンスに入るときの利用者。temt の既定の AMI が Ubuntu なので、無いときだけ書く
 LOGIN_USER = "ubuntu"

@@ -30,7 +30,7 @@ from temt import conf, msg
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import defaults_path
-from temt.table import printable
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -135,7 +135,7 @@ def env_session(region: str | None) -> boto3.Session:
     if not session.region_name:
         raise TemtError(
             f"no region; give --region, write AwsRegion in "
-            f"{printable(str(defaults_path()))}, set AWS_REGION, or write region in the "
+            f"{printable(tilde(defaults_path()))}, set AWS_REGION, or write region in the "
             f"AWS profile"
         )
     return session
@@ -214,7 +214,7 @@ def error_code(e: ClientError) -> str:
 def _write_subnet(conf_path: Path) -> str:
     """既定のサブネットが決まらないときに伝えること。"""
     return (
-        f"write {conf.primary_key('SubnetId')} in {printable(str(conf_path))} and run apply again"
+        f"write {conf.primary_key('SubnetId')} in {printable(tilde(conf_path))} and run apply again"
     )
 
 
@@ -280,7 +280,7 @@ def subnet(ec2: EC2Client, subnet_id: str, conf_path: Path) -> Subnet:
             f"no such subnet: {subnet_id}; for another account, remove "
             f"{conf.primary_key('SubnetId')} and {conf.launch_template_key('ImageId')}, and "
             f"the other items that point into this account (Groups, IamInstanceProfile, "
-            f"KeyName, ...), from {printable(str(conf_path))} and run apply again"
+            f"KeyName, ...), from {printable(tilde(conf_path))} and run apply again"
         )
     item = subnets[0]
     if not item.get("CidrBlock"):
@@ -368,7 +368,7 @@ def find_image(ec2: EC2Client, value: str, *, own: bool = False) -> Mapping[str,
 def _pick_again(conf_path: Path) -> str:
     """ImageId の AMI が使えないときに伝えること。"""
     return (
-        f"remove {conf.launch_template_key('ImageId')} from {printable(str(conf_path))} "
+        f"remove {conf.launch_template_key('ImageId')} from {printable(tilde(conf_path))} "
         "and run apply again to pick one"
     )
 

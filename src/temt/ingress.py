@@ -19,7 +19,8 @@ from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from temt import conf, msg, table
 from temt.conf import RULE_PORT, Conf, Ingress
 from temt.msg import TemtError
-from temt.names import PREFIX, Service, defaults_path, tilde
+from temt.names import PREFIX, Service, defaults_path
+from temt.table import tilde
 
 COLUMNS = table.Columns(defaults=("PORT", "CIDR", "DESCRIPTION"))
 

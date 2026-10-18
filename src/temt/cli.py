@@ -22,7 +22,7 @@ from temt.names import (
     is_label,
     is_user_name,
 )
-from temt.table import aws_error, os_error, out, printable
+from temt.table import aws_error, os_error, out, printable, tilde
 
 # コマンドは <対象> <動詞> の 2 語で表す
 SERVICE_APPLY = "service apply"
@@ -834,12 +834,12 @@ def _profile_hint(service: Service | None) -> str:
     """資格情報でつまずいたときに、プロファイルを選べる場所を伝える。"""
     if service is None:
         return (
-            f"give {PROFILE_OPTION}, write AwsProfile in {printable(str(defaults_path()))}, "
+            f"give {PROFILE_OPTION}, write AwsProfile in {printable(tilde(defaults_path()))}, "
             f"or set AWS_PROFILE"
         )
     return (
         f"give {PROFILE_OPTION}, set AWS_PROFILE, or write AwsProfile in "
-        f"{printable(str(conf.source(service, 'AwsProfile')))}"
+        f"{printable(tilde(conf.source(service, 'AwsProfile')))}"
     )
 
 

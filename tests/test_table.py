@@ -163,6 +163,29 @@ def test_os_error_shows_the_path_like_other_paths(error: OSError, shown: str) ->
     assert table.os_error(error) == shown
 
 
+def test_os_error_shows_a_path_under_the_home_with_a_tilde(home_dir: Path) -> None:
+    """ホームの下のパスは、ほかのメッセージと同じく ~ で始める。"""
+    error = PermissionError(13, "Permission denied", str(home_dir / ".config/temt/a.toml"))
+    assert table.os_error(error) == "Permission denied: ~/.config/temt/a.toml"
+
+
+@pytest.mark.parametrize(
+    ("under", "shown"),
+    [
+        pytest.param(".ssh/config", "~/.ssh/config", id="under the home"),
+        pytest.param("", "~/.", id="the home itself"),
+    ],
+)
+def test_tilde_starts_a_path_under_the_home_with_a_tilde(
+    home_dir: Path, under: str, shown: str
+) -> None:
+    assert table.tilde(home_dir / under) == shown
+
+
+def test_tilde_leaves_a_path_outside_the_home() -> None:
+    assert table.tilde(Path("/etc/ssh/ssh_config")) == "/etc/ssh/ssh_config"
+
+
 def test_out_writes_nothing_when_stdout_is_closed(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

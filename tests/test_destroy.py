@@ -27,6 +27,7 @@ from types_boto3_ssm.client import SSMClient
 from temt import cli, destroy, home, lock, resources, wait
 from temt.msg import TemtError, UsageError
 from temt.names import Service
+from temt.table import tilde
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
@@ -1301,7 +1302,9 @@ def test_it_stops_when_there_is_no_config_file(
     aws_stubs.done()
     assert aws_stubs.passed == []
     err = capsys.readouterr().err
-    assert err == (f"temt: no config file: {service.conf_path}; destroy needs AwsRegion from it\n")
+    assert err == (
+        f"temt: no config file: {tilde(service.conf_path)}; destroy needs AwsRegion from it\n"
+    )
     assert "apply" not in err
 
 

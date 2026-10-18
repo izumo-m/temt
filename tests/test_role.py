@@ -18,6 +18,7 @@ from conftest import REGION, Stubs, an_instance, reservations
 from temt import cli, conf, ltbuild, resources, role
 from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path
+from temt.table import tilde
 
 NAME = "temt-dev-main"
 # 取り込むインスタンスロールと、それを入れた元のインスタンスプロファイル
@@ -753,7 +754,7 @@ def test_import_needs_the_config_file(
     assert aws_stubs.passed == []
     assert not service.conf_path.exists()
     assert capsys.readouterr().err == (
-        f"temt: no config file: {service.conf_path}; run 'temt apply --svc dev-main' first\n"
+        f"temt: no config file: {tilde(service.conf_path)}; run 'temt apply --svc dev-main' first\n"
     )
 
 

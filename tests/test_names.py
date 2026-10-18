@@ -46,11 +46,6 @@ def test_derived_paths(home_dir: Path) -> None:
     assert names.keys_dir() == home_dir / ".ssh/temt/keys"
 
 
-def test_tilde(home_dir: Path) -> None:
-    assert names.tilde(home_dir / ".ssh" / "config") == "~/.ssh/config"
-    assert names.tilde(Path("/etc/ssh/ssh_config")) == "/etc/ssh/ssh_config"
-
-
 def test_the_conf_dir_moves_only_the_config_files(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

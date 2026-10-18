@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 
 from temt import msg, names, options, table
 from temt.msg import TemtError
-from temt.names import USER_NAME_RULE, app_ids, is_user_name, tilde, user_apps_dir
+from temt.names import USER_NAME_RULE, app_ids, is_user_name, user_apps_dir
+from temt.table import tilde
 
 if TYPE_CHECKING:
     from pathlib import Path

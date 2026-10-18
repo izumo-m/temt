@@ -18,8 +18,8 @@ from botocore.exceptions import ClientError
 from temt import aws, bake, conf, home, instances, lock, msg, resources, sshd, start, wait
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import PREFIX, defaults_path, ssh_dir, tilde
-from temt.table import printable
+from temt.names import PREFIX, defaults_path, ssh_dir
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

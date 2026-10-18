@@ -198,7 +198,7 @@ def test_diff_names_the_file_with_a_missing_subnet(
         "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId and "
         "launch-template.ImageId, and the other items that point into this account "
         "(Groups, IamInstanceProfile, KeyName, ...), from "
-        f"{home_dir}/.config/temt/defaults.toml and run apply again"
+        "~/.config/temt/defaults.toml and run apply again"
     )
 
 

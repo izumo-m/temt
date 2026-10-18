@@ -23,8 +23,8 @@ from tomlkit.items import Table
 from temt import aws, conf, instances, ltbuild, ltdata, msg, resources
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import LABEL_RULE, PREFIX, is_label, replace_text, tilde
-from temt.table import printable
+from temt.names import LABEL_RULE, PREFIX, is_label, replace_text
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

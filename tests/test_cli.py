@@ -37,6 +37,7 @@ from temt import (
 )
 from temt.msg import UsageError
 from temt.names import INSTANCE_ID_RULE, LABEL_RULE, USER_NAME_RULE, Service, defaults_path
+from temt.table import tilde
 
 SVC = ["--svc", "dev-main"]
 
@@ -897,7 +898,7 @@ def test_main_says_where_the_profile_can_be_chosen(
     assert cli.main(["temt", "apply", *SVC]) == 1
     err = capsys.readouterr().err
     assert "give --profile, set AWS_PROFILE" in err
-    assert f"or write AwsProfile in {service.conf_path}" in err
+    assert f"or write AwsProfile in {tilde(service.conf_path)}" in err
 
 
 def test_main_reports_a_file_error(
@@ -949,7 +950,7 @@ def test_main_takes_the_region_out_of_the_environment(
     # 設定ファイルが無いので、AWS に触れる前に 1 で終わる
     assert cli.main(["temt", "status", *SVC]) == 1
     assert capsys.readouterr().err == (
-        f"temt: no config file: {service.conf_path}; run 'temt apply --svc dev-main' first\n"
+        f"temt: no config file: {tilde(service.conf_path)}; run 'temt apply --svc dev-main' first\n"
     )
     assert not [name for name in conf.REGION_ENV if name in os.environ]
     assert os.environ["AWS_PROFILE"] == "work"
@@ -1312,7 +1313,7 @@ def test_main_says_where_the_profile_can_be_chosen_without_a_service(
     monkeypatch.setattr(images, "prune", fail)
     assert cli.main(["temt", "ami", "prune"]) == 1
     assert capsys.readouterr().err.endswith(
-        f"; give --profile, write AwsProfile in {defaults_path()}, or set AWS_PROFILE\n"
+        f"; give --profile, write AwsProfile in {tilde(defaults_path())}, or set AWS_PROFILE\n"
     )
 
 

@@ -4,6 +4,7 @@ import copy
 import datetime
 import errno
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,8 @@ import tomlkit
 from temt import conf, ltdata
 from temt.conf import Conf, Ingress, Role, SecurityGroup
 from temt.msg import TemtError, UsageError
-from temt.names import LABEL_RULE, Service, defaults_path, tilde
+from temt.names import LABEL_RULE, Service, defaults_path
+from temt.table import tilde
 
 TEMPLATE = conf.LAUNCH_TEMPLATE
 # NetworkInterfaces の DeviceIndex が 0 の要素の見出し
@@ -56,21 +58,21 @@ def test_unknown_key_reports_the_key(service: Service) -> None:
     write(service, 'AwsRegion = "us-east-1"\nFoo = "bar"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: unknown key: Foo"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: unknown key: Foo"
 
 
 def test_unknown_key_with_a_control_character_is_shown_safely(service: Service) -> None:
     write(service, '"\\u001b[2J" = "x"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: unknown key: ?[2J"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: unknown key: ?[2J"
 
 
 def test_unknown_key_in_a_table_reports_the_table_too(service: Service) -> None:
     write(service, '[launch-template]\nFoo = "bar"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: unknown key: launch-template.Foo"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: unknown key: launch-template.Foo"
 
 
 @pytest.mark.parametrize(
@@ -125,7 +127,7 @@ def test_table_written_as_a_string_rejected(service: Service) -> None:
 
 def test_broken_toml_rejected(service: Service) -> None:
     write(service, 'AwsProfile = "work"\nAwsRegion =\n')
-    with pytest.raises(TemtError, match=str(service.conf_path)):
+    with pytest.raises(TemtError, match=re.escape(tilde(service.conf_path))):
         conf.load(service)
 
 
@@ -172,21 +174,16 @@ def test_load_without_a_file_tells_to_run_apply(service: Service) -> None:
         conf.load(service)
 
 
-def test_load_shows_a_conf_dir_with_a_control_character_safely(
-    home_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ホームから来るパスも、表示できない文字を ? にして誤りに入れる。
-
-    TEMT_CONF_DIR は表示できない文字を断るので、ホームのほうに入れる。
-    """
+def test_load_shows_the_home_as_a_tilde(home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ホームの下のパスは ~ で始めて出すので、ホームに表示できない文字があっても、誤りには
+    入らない。"""
     home = home_dir / "\x1b[2J"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     with pytest.raises(TemtError) as caught:
         conf.load(Service("dev-main"))
     assert str(caught.value) == (
-        f"no config file: {home_dir}/?[2J/.config/temt/dev-main.toml; "
-        "run 'temt apply --svc dev-main' first"
+        "no config file: ~/.config/temt/dev-main.toml; run 'temt apply --svc dev-main' first"
     )
 
 
@@ -264,7 +261,7 @@ def test_the_old_shorthand_keys_are_unknown(service: Service, key: str) -> None:
     write(service, f'[launch-template]\n{key} = "x"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: unknown key: launch-template.{key}"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: unknown key: launch-template.{key}"
 
 
 @pytest.mark.parametrize(
@@ -309,7 +306,7 @@ def test_an_error_in_the_launch_template_names_the_file_and_the_position(
     write(service, written)
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: {message}"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: {message}"
 
 
 @pytest.mark.parametrize(
@@ -345,7 +342,7 @@ def test_a_repeated_matching_key_is_an_error(service: Service, written: str, mes
     write(service, written)
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: {message}"
+    assert str(caught.value) == f"{tilde(service.conf_path)}: {message}"
 
 
 def test_one_block_device_may_omit_the_device_name(service: Service) -> None:
@@ -1139,7 +1136,9 @@ def test_a_port_that_is_not_a_range(service: Service, written: str, message: str
     write(service, INGRESS + f'Port = {written}\nCidr = "203.0.113.10/32"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == (f"{service.conf_path}: security-group.ingress[0].Port {message}")
+    assert str(caught.value) == (
+        f"{tilde(service.conf_path)}: security-group.ingress[0].Port {message}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1176,7 +1175,9 @@ def test_a_cidr_with_a_control_character_is_shown_safely(
     write(service, INGRESS + f'Port = 22\nCidr = "{written}"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: security-group.ingress[0].Cidr {message}"
+    assert (
+        str(caught.value) == f"{tilde(service.conf_path)}: security-group.ingress[0].Cidr {message}"
+    )
 
 
 @pytest.mark.parametrize("missing", ["Port", "Cidr"])
@@ -1188,7 +1189,7 @@ def test_a_rule_without_a_port_or_a_cidr(service: Service, missing: str) -> None
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[0].{missing} is missing"
+        f"{tilde(service.conf_path)}: security-group.ingress[0].{missing} is missing"
     )
 
 
@@ -1206,7 +1207,7 @@ def test_a_description_that_aws_will_not_take(service: Service, written: str, me
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[0].Description {message}"
+        f"{tilde(service.conf_path)}: security-group.ingress[0].Description {message}"
     )
 
 
@@ -1227,8 +1228,8 @@ def test_two_rules_for_the_same_port_and_cidr(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[1] repeats the protocol, port and CIDR "
-        "of ingress[0]"
+        f"{tilde(service.conf_path)}: security-group.ingress[1] repeats the protocol, port and "
+        "CIDR of ingress[0]"
     )
 
 
@@ -1273,7 +1274,8 @@ def test_an_icmp_rule_with_a_port(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[0].Port must not be given with Protocol icmp"
+        f"{tilde(service.conf_path)}: security-group.ingress[0].Port must not be given with "
+        "Protocol icmp"
     )
 
 
@@ -1281,7 +1283,10 @@ def test_a_udp_rule_without_a_port(service: Service) -> None:
     write(service, INGRESS + 'Protocol = "udp"\nCidr = "203.0.113.10/32"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{service.conf_path}: security-group.ingress[0].Port is missing"
+    assert (
+        str(caught.value)
+        == f"{tilde(service.conf_path)}: security-group.ingress[0].Port is missing"
+    )
 
 
 def test_an_unknown_protocol(service: Service) -> None:
@@ -1289,7 +1294,8 @@ def test_an_unknown_protocol(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[0].Protocol must be one of tcp, udp, icmp"
+        f"{tilde(service.conf_path)}: security-group.ingress[0].Protocol must be one of "
+        "tcp, udp, icmp"
     )
 
 
@@ -1666,7 +1672,8 @@ def test_a_statement_with_an_unknown_variable(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: role.policy.jupyter[0] uses an unknown variable: ${{temt:app}}"
+        f"{tilde(service.conf_path)}: role.policy.jupyter[0] uses an unknown variable: "
+        "${temt:app}"
     )
 
 
@@ -1737,7 +1744,7 @@ def test_a_policy_name_that_breaks_the_rule(service: Service, name: str, shown: 
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: role.policy.{shown}: the policy name {LABEL_RULE}"
+        f"{tilde(service.conf_path)}: role.policy.{shown}: the policy name {LABEL_RULE}"
     )
 
 
@@ -1789,7 +1796,7 @@ def test_managed_policies_that_are_not_arns(service: Service, written: str) -> N
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: role.ManagedPolicyArns must be an array of non-empty strings"
+        f"{tilde(service.conf_path)}: role.ManagedPolicyArns must be an array of non-empty strings"
     )
 
 
@@ -2172,7 +2179,7 @@ def test_a_repeated_key_in_the_common_file_names_it(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{defaults_path()}: launch-template.NetworkInterfaces has two elements with "
+        f"{tilde(defaults_path())}: launch-template.NetworkInterfaces has two elements with "
         "DeviceIndex = 0"
     )
 
@@ -2192,8 +2199,8 @@ def test_a_rule_written_in_both_files_is_an_error(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{service.conf_path}: security-group.ingress[1] repeats a rule in {defaults_path()}; "
-        f"remove one of them"
+        f"{tilde(service.conf_path)}: security-group.ingress[1] repeats a rule in "
+        f"{tilde(defaults_path())}; remove one of them"
     )
 
 
@@ -2215,7 +2222,10 @@ def test_an_error_in_the_common_file_names_it(service: Service) -> None:
     write(service, "")
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{defaults_path()}: launch-template.InstanceType must be a string"
+    assert (
+        str(caught.value)
+        == f"{tilde(defaults_path())}: launch-template.InstanceType must be a string"
+    )
 
 
 def test_without_a_config_file_the_common_file_still_counts(service: Service) -> None:
@@ -2256,7 +2266,7 @@ def test_a_broken_symlink_as_the_common_file_is_an_error(service: Service) -> No
     write(service, "")
     with pytest.raises(TemtError) as caught:
         conf.load(service)
-    assert str(caught.value) == f"{defaults_path()}: broken symlink"
+    assert str(caught.value) == f"{tilde(defaults_path())}: broken symlink"
     with pytest.raises(TemtError, match="broken symlink"):
         conf.common_values()
 

@@ -31,7 +31,8 @@ from temt import aws, conf, instances, msg, options, resources, table
 from temt.aws import error_code
 from temt.manifest import find_app, local_apps, read_manifest
 from temt.msg import TemtError
-from temt.names import DEPLOY_KEY, is_label, tilde
+from temt.names import DEPLOY_KEY, is_label
+from temt.table import tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

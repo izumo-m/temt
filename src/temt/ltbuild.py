@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from temt import aws, conf, ltdata, policy
 from temt.aws import field
 from temt.msg import TemtError
-from temt.table import printable
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -91,7 +91,7 @@ def _substituted(service: Service, values: Conf) -> dict[str, Any]:
         return policy.substitute(copy.deepcopy(values.launch_template), policy.variables(service))
     except ValueError as error:
         raise TemtError(
-            f"{printable(str(service.conf_path))}: {conf.LAUNCH_TEMPLATE} {error}"
+            f"{printable(tilde(service.conf_path))}: {conf.LAUNCH_TEMPLATE} {error}"
         ) from None
 
 
@@ -100,7 +100,7 @@ def _image(ec2: EC2Client, service: Service, data: dict[str, Any]) -> Mapping[st
     key = conf.launch_template_key("ImageId")
     value = data.get("ImageId")
     if not isinstance(value, str) or not value:
-        raise UnusableImage(f"no {key} in {printable(str(service.conf_path))}")
+        raise UnusableImage(f"no {key} in {printable(tilde(service.conf_path))}")
     try:
         found = aws.image(ec2, value, conf.source(service, key))
     except TemtError as error:
@@ -164,7 +164,7 @@ def _root(
     mappings = data.get(BLOCK_DEVICES) or []
     device = image.get("RootDeviceName")
     image_id = field(image, "ImageId")
-    where = printable(str(service.conf_path))
+    where = printable(tilde(service.conf_path))
     for one in mappings:
         if "DeviceName" not in one:
             if not isinstance(device, str) or not device:
@@ -188,16 +188,15 @@ def _root(
         return root
     key = conf.launch_template_key(f"{BLOCK_DEVICES}[DeviceName={device}].Ebs.VolumeSize")
     found = aws.root_volume(image)
+    source = printable(tilde(conf.source(service, conf.launch_template_key(BLOCK_DEVICES))))
     if found is None:
         raise TemtError(
-            f"the AMI {image_id} has no EBS root volume; remove Ebs.VolumeSize from "
-            f"{printable(str(conf.source(service, conf.launch_template_key(BLOCK_DEVICES))))}"
+            f"the AMI {image_id} has no EBS root volume; remove Ebs.VolumeSize from {source}"
         )
     if size < found.size:
         raise TemtError(
             f"{key} {size} is smaller than the root volume of {image_id} ({found.size} GiB); "
-            f"raise it or remove it in "
-            f"{printable(str(conf.source(service, conf.launch_template_key(BLOCK_DEVICES))))}"
+            f"raise it or remove it in {source}"
         )
     return root
 
@@ -229,9 +228,10 @@ def _group_id(ec2: EC2Client, service: Service, vpc_id: str | None, name: str) -
         ]
     ).get("SecurityGroups", [])
     if not found:
+        source = conf.source(service, conf.launch_template_key(NETWORK_INTERFACES))
         raise TemtError(
             f"no security group named {printable(name)} in {vpc_id}; fix Groups in "
-            f"{printable(str(conf.source(service, conf.launch_template_key(NETWORK_INTERFACES))))}"
+            f"{printable(tilde(source))}"
         )
     return field(found[0], "GroupId")
 

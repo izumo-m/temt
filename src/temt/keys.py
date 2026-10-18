@@ -14,8 +14,8 @@ from pathlib import Path
 from temt import msg, proc
 from temt.change import ADD, Change
 from temt.msg import TemtError
-from temt.names import exists, keys_dir, make_dir, tilde
-from temt.table import printable
+from temt.names import exists, keys_dir, make_dir
+from temt.table import printable, tilde
 
 KEYGEN = "ssh-keygen"
 SSH = "ssh"
@@ -42,7 +42,7 @@ def public_path(path: Path) -> Path:
 def generate(path: Path, comment: str) -> None:
     """パスフレーズ無しの鍵をその場所に作る。公開鍵は <path>.pub になる。"""
     if path.exists():
-        raise TemtError(f"key already exists: {printable(str(path))}")
+        raise TemtError(f"key already exists: {printable(tilde(path))}")
     make_dir(path.parent)
     _ = proc.run([KEYGEN, "-q", "-t", KEY_TYPE, "-N", "", "-C", comment, "-f", str(path)])
 

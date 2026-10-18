@@ -26,6 +26,7 @@ from temt import apply, aws, conf, home, keys, policy, resources
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, defaults_path, keys_dir, ssh_dir
+from temt.table import tilde
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
@@ -663,11 +664,11 @@ def test_everything_is_made_when_nothing_exists(
     assert details(shown, "security-group") == [f"+ in {VPC}"]
     # 更新では、書いたものと作ったものを、この順に知らせる
     reports = [
-        f'wrote AwsRegion = "{REGION}" in {service.conf_path}',
-        f'wrote launch-template.ImageId = "{IMAGE}" in {service.conf_path}',
+        f'wrote AwsRegion = "{REGION}" in {tilde(service.conf_path)}',
+        f'wrote launch-template.ImageId = "{IMAGE}" in {tilde(service.conf_path)}',
         f'wrote launch-template.IamInstanceProfile = {{ Name = "${{temt:name}}" }} in '
-        f"{service.conf_path}",
-        f"wrote the default [[role.policy.{conf.EC2}]] in {service.conf_path}",
+        f"{tilde(service.conf_path)}",
+        f"wrote the default [[role.policy.{conf.EC2}]] in {tilde(service.conf_path)}",
         "created ~/.ssh/temt (mode 700)",
         f"wrote ~/.local/bin/{NAME}",
         f"role {NAME}: created",
@@ -1005,7 +1006,7 @@ def test_a_group_name_that_is_not_in_the_vpc_stops(aws_stubs: Stubs, service: Se
 
     aws_stubs.done()
     assert str(caught.value) == (
-        f"no security group named web in {VPC}; fix Groups in {service.conf_path}"
+        f"no security group named web in {VPC}; fix Groups in {tilde(service.conf_path)}"
     )
     assert not service.command_path.exists()
 
@@ -1560,8 +1561,8 @@ def test_it_stops_before_writing_to_aws_when_the_image_is_gone(
 
     aws_stubs.done()
     assert str(caught.value) == (
-        f"no such AMI: {IMAGE}; remove launch-template.ImageId from {service.conf_path} and run "
-        "apply again to pick one"
+        f"no such AMI: {IMAGE}; remove launch-template.ImageId from "
+        f"{tilde(service.conf_path)} and run apply again to pick one"
     )
     assert not keys.default_path().exists()
 
@@ -1627,7 +1628,7 @@ def test_it_stops_before_writing_to_aws_when_the_volume_size_is_too_small(
     place = defaults_path() if common else service.conf_path
     assert str(caught.value) == (
         f"launch-template.{VOLUME_SIZE} 6 is smaller than the root volume of {IMAGE} (8 GiB); "
-        f"raise it or remove it in {place}"
+        f"raise it or remove it in {tilde(place)}"
     )
     assert not keys.default_path().exists()
 
@@ -1643,7 +1644,8 @@ def test_it_stops_when_the_image_has_no_ebs_root_volume(aws_stubs: Stubs, servic
 
     aws_stubs.done()
     assert str(caught.value) == (
-        f"the AMI {IMAGE} has no EBS root volume; remove Ebs.VolumeSize from {service.conf_path}"
+        f"the AMI {IMAGE} has no EBS root volume; remove Ebs.VolumeSize from "
+        f"{tilde(service.conf_path)}"
     )
 
 
@@ -1807,7 +1809,7 @@ def test_the_option_is_written_as_the_profile(
 
     aws_stubs.done()
     assert conf.load(service).AwsProfile == "work"
-    assert f'wrote AwsProfile = "work" in {service.conf_path}' in capsys.readouterr().out
+    assert f'wrote AwsProfile = "work" in {tilde(service.conf_path)}' in capsys.readouterr().out
     # ssh の設定は設定ファイルを正とするので、ProxyCommand に --profile は入らない
     assert "--profile" not in (ssh_dir() / "config").read_text(encoding="utf-8")
 
@@ -2368,7 +2370,7 @@ def test_a_first_apply_that_is_declined_makes_nothing(
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.err == (
-        f"no config file: {service.conf_path}; create service {NAME}? [y/N] "
+        f"no config file: {tilde(service.conf_path)}; create service {NAME}? [y/N] "
         "apply these changes? [y/N] "
     )
     out = captured.out
@@ -2397,7 +2399,9 @@ def test_a_first_apply_asks_before_reading_aws(
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == f"no config file: {service.conf_path}; create service {NAME}? [y/N] "
+    assert (
+        captured.err == f"no config file: {tilde(service.conf_path)}; create service {NAME}? [y/N] "
+    )
     assert not service.conf_path.exists()
     assert not ssh_dir().exists()
     assert not service.command_path.exists()

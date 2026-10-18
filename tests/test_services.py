@@ -8,6 +8,7 @@ import pytest
 from temt import names, services
 from temt.msg import TemtError, UsageError
 from temt.names import Service, conf_dir, defaults_path
+from temt.table import tilde
 
 
 def written(svc: str, text: str) -> Path:
@@ -139,8 +140,8 @@ def test_list_skips_what_it_cannot_read(home_dir: Path, capsys: pytest.CaptureFi
     out, err = capsys.readouterr()
     assert out.splitlines() == ["SERVICE", "web"]
     warnings = err.splitlines()
-    assert warnings[0] == f"temt: warning: skipped: {odd}: invalid service name: Odd"
-    assert warnings[1].startswith(f"temt: warning: skipped: {broken}: ")
+    assert warnings[0] == f"temt: warning: skipped: {tilde(odd)}: invalid service name: Odd"
+    assert warnings[1].startswith(f"temt: warning: skipped: {tilde(broken)}: ")
     assert len(warnings) == 2
 
 
@@ -182,7 +183,7 @@ def test_list_skips_a_file_that_is_not_utf8(
         services.list_services(None, "SERVICE")
     out, err = capsys.readouterr()
     assert out.splitlines() == ["SERVICE", "web"]
-    assert err.startswith(f"temt: warning: skipped: {bad}: not valid UTF-8: ")
+    assert err.startswith(f"temt: warning: skipped: {tilde(bad)}: not valid UTF-8: ")
 
 
 def test_list_skips_a_directory(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -195,7 +196,7 @@ def test_list_skips_a_directory(home_dir: Path, capsys: pytest.CaptureFixture[st
     out, err = capsys.readouterr()
     assert out.splitlines() == ["SERVICE", "web"]
     assert err.startswith("temt: warning: skipped: ")
-    assert str(odd) in err
+    assert tilde(odd) in err
 
 
 def test_list_skips_a_broken_symlink(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -208,7 +209,7 @@ def test_list_skips_a_broken_symlink(home_dir: Path, capsys: pytest.CaptureFixtu
         services.list_services(None, "SERVICE")
     out, err = capsys.readouterr()
     assert out.splitlines() == ["SERVICE", "web"]
-    assert err == f"temt: warning: skipped: {broken}: broken symlink\n"
+    assert err == f"temt: warning: skipped: {tilde(broken)}: broken symlink\n"
 
 
 def test_list_with_a_conf_dir_that_is_a_file(
@@ -244,7 +245,7 @@ def test_list_skips_an_unreadable_file(home_dir: Path, capsys: pytest.CaptureFix
         services.list_services(None, "SERVICE")
     out, err = capsys.readouterr()
     assert out.splitlines() == ["SERVICE", "web"]
-    assert err == f"temt: warning: skipped: {locked}: Permission denied\n"
+    assert err == f"temt: warning: skipped: {tilde(locked)}: Permission denied\n"
 
 
 def test_list_of_a_service_shows_only_its_row(
@@ -290,7 +291,7 @@ def test_list_stops_at_a_broken_common_file(
     written("db", "")
     defaults_path().write_text('Foo = "x"\n', encoding="utf-8")
 
-    with pytest.raises(TemtError, match=f"^{defaults_path()}: unknown key: Foo$"):
+    with pytest.raises(TemtError, match=f"^{tilde(defaults_path())}: unknown key: Foo$"):
         services.list_services(None, "SERVICE")
 
     assert capsys.readouterr() == ("", "")

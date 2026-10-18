@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from temt.msg import TemtError, UsageError
-from temt.table import printable
+from temt.table import printable, tilde
 
 # コマンドの名前。リソースの名前とサービスのコマンド名 temt-<svc> の頭にも付く
 PREFIX = "temt"
@@ -125,7 +125,7 @@ def resolved(path: Path) -> Path:
     except OSError as e:
         found = None if e.errno == errno.ELOOP else _loose(path)
     if found is None:
-        raise TemtError(f"symlink loop in {printable(str(path))}")
+        raise TemtError(f"symlink loop in {printable(tilde(path))}")
     return found
 
 
@@ -168,7 +168,7 @@ def ssh_dir() -> Path:
     if resolved(path) == resolved(user_ssh_dir()):
         raise TemtError(
             f"{SSH_DIR_ENV} must not be {printable(tilde(user_ssh_dir()))} itself: "
-            f"{printable(str(path))}"
+            f"{printable(tilde(path))}"
         )
     return path
 
@@ -284,14 +284,6 @@ def places() -> dict[str, Path]:
     書かなければ、proxy は ssh を打ったシェルの値を受け継ぎ、別の場所を読む。
     """
     return {CONF_DIR_ENV: conf_dir(), SSH_DIR_ENV: ssh_dir()}
-
-
-def tilde(path: Path) -> str:
-    """ホームの下のパスを ~ で始まる形にする。ssh の設定に書くため。"""
-    try:
-        return f"~/{path.relative_to(Path.home())}"
-    except ValueError:
-        return str(path)
 
 
 @dataclass(frozen=True)

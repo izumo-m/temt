@@ -11,6 +11,7 @@ from temt import ltbuild
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import Service
+from temt.table import tilde
 
 NAME = "temt-dev-main"
 VPC = "vpc-0123456789abcdef0"
@@ -166,7 +167,7 @@ def test_no_image_stops(ec2: EC2Client, service: Service) -> None:
     """ImageId が無ければ、AWS を読まずに止まる。apply は手順 2 で書いている。"""
     with Stubber(ec2), pytest.raises(TemtError) as caught:
         _ = ltbuild.build(ec2, service, values(ImageId=None))
-    assert str(caught.value) == f"no launch-template.ImageId in {service.conf_path}"
+    assert str(caught.value) == f"no launch-template.ImageId in {tilde(service.conf_path)}"
 
 
 def test_an_ami_that_is_gone_stops(ec2: EC2Client, service: Service) -> None:
@@ -217,7 +218,7 @@ def test_a_group_name_not_in_the_vpc_stops(ec2: EC2Client, service: Service) -> 
             _ = ltbuild.build(ec2, service, values(NetworkInterfaces=[primary]))
         stub.assert_no_pending_responses()
     assert str(caught.value) == (
-        f"no security group named web in {VPC}; fix Groups in {service.conf_path}"
+        f"no security group named web in {VPC}; fix Groups in {tilde(service.conf_path)}"
     )
 
 
@@ -332,14 +333,15 @@ def test_a_volume_size_smaller_than_the_ami_stops(
     assert failed(ec2, service, conf, groups=False) == (
         f"launch-template.BlockDeviceMappings[DeviceName={ROOT_DEVICE}].Ebs.VolumeSize 6 is "
         f"smaller than the root volume of {IMAGE} (8 GiB); raise it or remove it in "
-        f"{service.conf_path}"
+        f"{tilde(service.conf_path)}"
     )
 
 
 def test_a_volume_size_without_an_ebs_root_volume_stops(ec2: EC2Client, service: Service) -> None:
     conf = values(BlockDeviceMappings=[{"Ebs": {"VolumeSize": 30}}])
     assert failed(ec2, service, conf, image=an_image(size=None), groups=False) == (
-        f"the AMI {IMAGE} has no EBS root volume; remove Ebs.VolumeSize from {service.conf_path}"
+        f"the AMI {IMAGE} has no EBS root volume; remove Ebs.VolumeSize from "
+        f"{tilde(service.conf_path)}"
     )
 
 
@@ -359,7 +361,7 @@ def test_a_device_name_that_collides_after_filling_stops(ec2: EC2Client, service
         ]
     )
     assert failed(ec2, service, conf, groups=False) == (
-        f"{service.conf_path}: launch-template.BlockDeviceMappings has two elements for "
+        f"{tilde(service.conf_path)}: launch-template.BlockDeviceMappings has two elements for "
         f"{ROOT_DEVICE} (an element without DeviceName means {ROOT_DEVICE})"
     )
 
@@ -368,7 +370,7 @@ def test_an_ami_without_a_root_device_name_stops(ec2: EC2Client, service: Servic
     """AMI がルートデバイスの名前を持たなければ、省いた DeviceName を埋められない。"""
     conf = values(BlockDeviceMappings=[{"Ebs": {"VolumeSize": 30}}])
     assert failed(ec2, service, conf, image=an_image(device=None), groups=False) == (
-        f"{service.conf_path}: the AMI {IMAGE} has no root device name; write DeviceName in "
+        f"{tilde(service.conf_path)}: the AMI {IMAGE} has no root device name; write DeviceName in "
         "launch-template.BlockDeviceMappings"
     )
 

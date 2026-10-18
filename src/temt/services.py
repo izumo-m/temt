@@ -88,21 +88,21 @@ def list_services(service: Service | None, spec: str | None) -> None:
         try:
             found = Service(path.name.removesuffix(SUFFIX))
         except TemtError as e:
-            msg.warn(f"skipped: {table.printable(str(path))}: {e}")
+            msg.warn(f"skipped: {table.printable(table.tilde(path))}: {e}")
             skipped += 1
             continue
         try:
             # 行き先の無いシンボリックリンクは、conf.load に渡すと apply を促してしまう。
             # 循環するリンクなどは、exists が理由とパスを添えて TemtError にする
             if path.is_symlink() and not exists(path):
-                raise TemtError(f"{table.printable(str(path))}: broken symlink")
+                raise TemtError(f"{table.printable(table.tilde(path))}: broken symlink")
             rows.append(_row(found, conf.load(found)))
         except TemtError as e:
             # ここで上がる TemtError の文言は、どれもパスを含む
             msg.warn(f"skipped: {e}")
             skipped += 1
         except OSError as e:
-            msg.warn(f"skipped: {table.printable(str(path))}: {e.strerror}")
+            msg.warn(f"skipped: {table.printable(table.tilde(path))}: {e.strerror}")
             skipped += 1
     table.write(chosen, rows)
     if skipped:

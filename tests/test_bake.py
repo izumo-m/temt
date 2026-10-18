@@ -21,6 +21,7 @@ from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef
 from temt import app, bake, cli, conf, home, lock, resources, wait
 from temt.msg import TemtError
 from temt.names import Service, defaults_path
+from temt.table import tilde
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
@@ -412,13 +413,13 @@ def test_it_bakes_a_running_instance(
     lines = told(captured.out.removeprefix(listing))
     assert f"creating the AMI {NEW} ({IMAGE_NAME}) from {INSTANCE}" in lines
     assert (
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {configured.conf_path} (was {OLD})"
+        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} (was {OLD})"
         in lines
     )
     assert f"launch template {TEMPLATE}: updated (version 2, {NEW})" in lines
     # 設定ファイルを書き換えるのは、AMI が使えるようになってから
     assert lines.index(f"the AMI {NEW} is available") < lines.index(
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {configured.conf_path} (was {OLD})"
+        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} (was {OLD})"
     )
     assert lines[-1] == f"baked {IMAGE_NAME} ({NEW}); the next start boots from it"
     # 停止を 1 回、AMI を 1 回待った
@@ -1582,8 +1583,8 @@ def test_it_bakes_with_an_image_name_in_the_config_file(
     aws_stubs.done()
     assert image_id(configured) == IMAGE_NAME
     assert (
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {configured.conf_path} (was {OLD_NAME})"
-        in told(capsys.readouterr().out)
+        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} "
+        f"(was {OLD_NAME})" in told(capsys.readouterr().out)
     )
 
 

@@ -10,6 +10,7 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TextIO
 
 from temt.msg import UsageError
@@ -67,6 +68,15 @@ def printable(value: str) -> str:
     return "".join(char if char.isprintable() else UNPRINTABLE for char in value)
 
 
+def tilde(path: Path) -> str:
+    """ホームの下のパスを ~ で始まる形にする。端末に出すときと、ssh の設定に書くときに
+    使う。"""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
 def aws_error(e: Exception) -> str:
     """botocore の例外の文を 1 行にしたもの。
 
@@ -88,7 +98,7 @@ def aws_error(e: Exception) -> str:
 def _filename(value: object) -> str:
     """OSError の持つパスを表示する形。バイト列なら、Python がファイル名を読むように読む。"""
     if isinstance(value, (str, bytes, os.PathLike)):
-        return printable(os.fsdecode(value))
+        return printable(tilde(Path(os.fsdecode(value))))
     return printable(str(value))
 
 

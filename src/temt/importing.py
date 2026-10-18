@@ -20,8 +20,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 from temt import aws, bake, conf, lock, ltdata, msg, resources
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import PREFIX, make_dir, tilde
-from temt.table import printable
+from temt.names import PREFIX, make_dir
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

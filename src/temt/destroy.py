@@ -17,8 +17,8 @@ from botocore.exceptions import ClientError
 from temt import aws, conf, home, instances, lock, msg, resources, terminate
 from temt.conf import Conf
 from temt.msg import TemtError
-from temt.names import ssh_dir, tilde
-from temt.table import aws_error, printable
+from temt.names import ssh_dir
+from temt.table import aws_error, printable, tilde
 
 if TYPE_CHECKING:
     from types_boto3_ec2.client import EC2Client
@@ -36,7 +36,8 @@ def _values(service: Service) -> Conf:
     """
     if not service.conf_path.exists():
         raise TemtError(
-            f"no config file: {printable(str(service.conf_path))}; destroy needs AwsRegion from it"
+            f"no config file: {printable(tilde(service.conf_path))}; "
+            "destroy needs AwsRegion from it"
         )
     return conf.load(service)
 

@@ -21,8 +21,8 @@ from temt import aws, change, conf, home, keys, ltbuild, ltdata, msg, policy, re
 from temt.change import ADD, ARROW, UPDATE, Change
 from temt.conf import Conf
 from temt.msg import TemtError
-from temt.names import ssh_dir, tilde, user_ssh_dir
-from temt.table import printable
+from temt.names import ssh_dir, user_ssh_dir
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -238,7 +238,7 @@ def _role_policies(
         made[policy.policy_name(name)] = policy.document(
             statements,
             policy.variables(service),
-            f"{printable(str(service.conf_path))}: role.policy.{name}",
+            f"{printable(tilde(service.conf_path))}: role.policy.{name}",
         )
     analyzer = session.client("accessanalyzer")
     errors = 0
@@ -338,7 +338,7 @@ def _detect(
 def _write(service: Service, values: Conf, key: str, value: Any) -> None:
     """設定ファイルの項目を書き、知らせる。"""
     if conf.update(service, values, key, value):
-        msg.info(f"wrote {key} = {_quoted(value)} in {printable(str(service.conf_path))}")
+        msg.info(f"wrote {key} = {_quoted(value)} in {printable(tilde(service.conf_path))}")
 
 
 def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> None:
@@ -353,7 +353,7 @@ def _update(service: Service, values: Conf, clients: Clients, plan: Plan) -> Non
     if plan.conf.ec2_default:
         conf.write_ec2_default(service, values)
         msg.info(
-            f"wrote the default [[role.policy.{conf.EC2}]] in {printable(str(service.conf_path))}"
+            f"wrote the default [[role.policy.{conf.EC2}]] in {printable(tilde(service.conf_path))}"
         )
     if plan.new:
         conf.write_example(service)
@@ -391,7 +391,8 @@ def run(service: Service, *, yes: bool) -> None:
     # 打ち間違えた名前でサービスを作り始めないよう、AWS を読む前に聞く
     if not service.conf_path.exists():
         msg.confirm(
-            f"no config file: {printable(str(service.conf_path))}; create service {service.name}?",
+            f"no config file: {printable(tilde(service.conf_path))}; "
+            f"create service {service.name}?",
             yes=yes,
         )
     # 手順 2 は書かれていない ImageId と SubnetId を解くのに AWS を読むので、まず読めた

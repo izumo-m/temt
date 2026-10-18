@@ -40,9 +40,9 @@ from temt.names import (
     STATUS_KEY,
     app_dir,
     is_user_name,
-    tilde,
     user_apps_dir,
 )
+from temt.table import tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

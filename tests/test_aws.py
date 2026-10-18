@@ -20,6 +20,7 @@ from temt import aws, conf
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import Service, defaults_path
+from temt.table import tilde
 
 REGION = "ap-northeast-1"
 DEFAULT_VPC = {"Filters": [{"Name": "is-default", "Values": ["true"]}]}
@@ -161,7 +162,7 @@ def test_env_session_without_a_region() -> None:
     with pytest.raises(TemtError) as caught:
         aws.env_session(None)
     assert str(caught.value) == (
-        f"no region; give --region, write AwsRegion in {defaults_path()}, set AWS_REGION, "
+        f"no region; give --region, write AwsRegion in {tilde(defaults_path())}, set AWS_REGION, "
         f"or write region in the AWS profile"
     )
 
@@ -208,7 +209,7 @@ def test_env_session_looks_further_without_values_in_the_common_file(
 
 def test_env_session_stops_at_a_broken_common_file() -> None:
     write_defaults('Foo = "x"\n')
-    with pytest.raises(TemtError, match=f"^{defaults_path()}: unknown key: Foo$"):
+    with pytest.raises(TemtError, match=f"^{tilde(defaults_path())}: unknown key: Foo$"):
         aws.env_session("us-east-1")
 
 
@@ -254,8 +255,8 @@ def test_public_subnet_without_a_default_vpc(ec2: EC2Client, service: Service) -
     # SubnetId は NetworkInterfaces の DeviceIndex が 0 の要素の中なので、位置付きで書く
     # よう促す
     assert (
-        f"write launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in {service.conf_path}"
-        in str(caught.value)
+        "write launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in "
+        f"{tilde(service.conf_path)}" in str(caught.value)
     )
 
 
@@ -330,7 +331,7 @@ def test_subnet_without_the_subnet(ec2: EC2Client, service: Service) -> None:
         "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId and "
         "launch-template.ImageId, and the other items that point into this account "
         "(Groups, IamInstanceProfile, KeyName, ...), "
-        f"from {service.conf_path} and run apply again"
+        f"from {tilde(service.conf_path)} and run apply again"
     )
 
 
@@ -432,7 +433,7 @@ def test_image_without_the_name(ec2: EC2Client, service: Service) -> None:
         stub.assert_no_pending_responses()
     assert str(caught.value) == (
         f"no such AMI: {IMAGE_NAME}; remove launch-template.ImageId from "
-        f"{service.conf_path} and run apply again to pick one"
+        f"{tilde(service.conf_path)} and run apply again to pick one"
     )
 
 

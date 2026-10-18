@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from temt import aws, conf, ltdata, msg, resources, table
 from temt.aws import field
 from temt.change import ADD, REMOVE, UPDATE
-from temt.names import tilde
+from temt.table import tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

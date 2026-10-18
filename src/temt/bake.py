@@ -24,8 +24,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 from temt import app, aws, conf, instances, lock, ltbuild, ltdata, msg, resources, terminate, wait
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import PREFIX, tilde
-from temt.table import aws_error, printable
+from temt.names import PREFIX
+from temt.table import aws_error, printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -286,7 +286,7 @@ def _point(ec2: EC2Client, service: Service, name: str, image_id: str) -> None:
     if conf.update(service, values, key, name):
         # 待つあいだに行が消されていれば、元の値は無い
         note = "" if was is None else f" (was {printable(str(was))})"
-        msg.info(f"wrote {key} = {name} in {printable(str(service.conf_path))}{note}")
+        msg.info(f"wrote {key} = {name} in {printable(tilde(service.conf_path))}{note}")
     resources.point_image(ec2, service, image_id)
 
 

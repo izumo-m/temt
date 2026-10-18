@@ -163,6 +163,11 @@ operations can be typed in this form.
   silently and the command goes on. The stderr of ssh, and of `install` and `uninstall`
   through it, is not read by temt, so such a reader may still cut ssh off.
 - Progress lines carry the time; error lines carry the program name.
+- A path under the home directory is shown starting with `~/`
+  (`~/.config/temt/<svc>.toml`), in every message and in the paths of an `OSError`
+  (the requester: shorter, and the same as the ssh side; a shell expands it when
+  pasted). Rejected: the path from `/`. A path given as an argument is shown as given
+  (`no app directory: ./web`), and text from Python (an `ImportError`) as it is.
 - Wording is English, ASCII only.
 - Exception: text that is not temt's own wording is shown as is, Japanese included:
   values from the user's side (config file, ssh config, environment variables,

@@ -52,9 +52,8 @@ from temt.names import (
     is_label,
     make_dir,
     replace_text,
-    tilde,
 )
-from temt.table import printable
+from temt.table import printable, tilde
 
 
 class _Unset:
@@ -519,7 +518,7 @@ def _policies(value: Any, path: Path, where: str) -> POLICIES:
     はテーブルになるので、[[...]] と書くよう告げる。
     """
     if not isinstance(value, dict):
-        raise TemtError(f"{printable(str(path))}: {where} must be a table")
+        raise TemtError(f"{printable(tilde(path))}: {where} must be a table")
     made: POLICIES = {}
     for name, statements in value.items():
         place = f"{where}{SEPARATOR}{name}"
@@ -527,18 +526,18 @@ def _policies(value: Any, path: Path, where: str) -> POLICIES:
             # 名前は利用者が書いたまま出さず、引用して ASCII にする。. や改行を含む
             # 名前も、階層と取り違えずに読める
             raise TemtError(
-                f"{printable(str(path))}: {where}{SEPARATOR}{json.dumps(name)}: "
+                f"{printable(tilde(path))}: {where}{SEPARATOR}{json.dumps(name)}: "
                 f"the policy name {LABEL_RULE}"
             )
         if isinstance(statements, dict):
             raise TemtError(
-                f"{printable(str(path))}: {place} must be an array of tables; "
+                f"{printable(tilde(path))}: {place} must be an array of tables; "
                 f"write [[{place}]] once per statement"
             )
         try:
             made[name] = _statements(statements)
         except ValueError as error:
-            raise TemtError(f"{printable(str(path))}: {place}{error}") from None
+            raise TemtError(f"{printable(tilde(path))}: {place}{error}") from None
     return made
 
 
@@ -549,15 +548,17 @@ def _make(cls: type, table: Any, path: Path, prefix: str, *, complete: bool = Fa
     要素は、既定の無い項目をすべて書かなければならない。
     """
     if not isinstance(table, dict):
-        raise TemtError(f"{printable(str(path))}: {prefix.removesuffix(SEPARATOR)} must be a table")
+        raise TemtError(
+            f"{printable(tilde(path))}: {prefix.removesuffix(SEPARATOR)} must be a table"
+        )
     try:
         made = cls(**_read(table, cls, path, prefix))
     except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {prefix}{error}") from None
+        raise TemtError(f"{printable(tilde(path))}: {prefix}{error}") from None
     if complete:
         for one in fields(made):
             if getattr(made, one.name) is UNSET:
-                raise TemtError(f"{printable(str(path))}: {prefix}{one.name} is missing")
+                raise TemtError(f"{printable(tilde(path))}: {prefix}{one.name} is missing")
     return made
 
 
@@ -571,7 +572,7 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
     values: dict[str, Any] = {}
     for key, value in table.items():
         if key not in keys:
-            raise TemtError(f"{printable(str(path))}: unknown key: {prefix}{printable(key)}")
+            raise TemtError(f"{printable(tilde(path))}: unknown key: {prefix}{printable(key)}")
         kind = keys[key]
         where = f"{prefix}{key}"
         table_class = _table_class(kind)
@@ -581,7 +582,7 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
         element = _element(kind)
         if element is not None:
             if not isinstance(value, list):
-                raise TemtError(f"{printable(str(path))}: {where} must be an array of tables")
+                raise TemtError(f"{printable(tilde(path))}: {where} must be an array of tables")
             values[_attribute(key)] = [
                 _make(element, item, path, f"{where}[{index}]{SEPARATOR}", complete=True)
                 for index, item in enumerate(value)
@@ -598,7 +599,7 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
                 isinstance(one, str) and one for one in value
             ):
                 raise TemtError(
-                    f"{printable(str(path))}: {where} must be an array of non-empty strings"
+                    f"{printable(tilde(path))}: {where} must be an array of non-empty strings"
                 )
             if value:
                 values[key] = list(value)
@@ -610,15 +611,15 @@ def _read(table: dict[str, Any], cls: type, path: Path, prefix: str) -> dict[str
             try:
                 values[key] = _port(value)
             except ValueError as error:
-                raise TemtError(f"{printable(str(path))}: {where} {error}") from None
+                raise TemtError(f"{printable(tilde(path))}: {where} {error}") from None
             continue
         if kind is bool:
             if not isinstance(value, bool):
-                raise TemtError(f"{printable(str(path))}: {where} must be true or false")
+                raise TemtError(f"{printable(tilde(path))}: {where} must be true or false")
             values[key] = value
             continue
         if not isinstance(value, str):
-            raise TemtError(f"{printable(str(path))}: {where} must be a string")
+            raise TemtError(f"{printable(tilde(path))}: {where} must be a string")
         if not value:
             continue
         values[key] = value
@@ -633,17 +634,17 @@ def _launch_template(value: Any, path: Path) -> dict[str, Any]:
     テーブルであることだけを確かめ、空の値を落とす。
     """
     if not isinstance(value, dict):
-        raise TemtError(f"{printable(str(path))}: {LAUNCH_TEMPLATE} must be a table")
+        raise TemtError(f"{printable(tilde(path))}: {LAUNCH_TEMPLATE} must be a table")
     try:
         checked = ltdata.check(value, LAUNCH_TEMPLATE)
     except ImportError:
         return ltdata.without_blanks(value)
     except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {error}") from None
+        raise TemtError(f"{printable(tilde(path))}: {error}") from None
     try:
         ltdata.check_keys(checked, LAUNCH_TEMPLATE)
     except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {error}") from None
+        raise TemtError(f"{printable(tilde(path))}: {error}") from None
     return checked
 
 
@@ -652,7 +653,7 @@ def _document(text: str, path: Path) -> dict[str, Any]:
     try:
         return tomlkit.parse(text).unwrap()
     except TOMLKitError as error:
-        raise TemtError(f"{printable(str(path))}: {printable(str(error))}") from None
+        raise TemtError(f"{printable(tilde(path))}: {printable(str(error))}") from None
 
 
 def _built(document: dict[str, Any], path: Path) -> Conf:
@@ -660,7 +661,7 @@ def _built(document: dict[str, Any], path: Path) -> Conf:
     try:
         return Conf(**_read(document, Conf, path, ""))
     except ValueError as error:
-        raise TemtError(f"{printable(str(path))}: {error}") from None
+        raise TemtError(f"{printable(tilde(path))}: {error}") from None
 
 
 def _text(path: Path) -> str | None:
@@ -670,7 +671,7 @@ def _text(path: Path) -> str | None:
     except FileNotFoundError:
         return None
     except UnicodeDecodeError as error:
-        raise TemtError(f"{printable(str(path))}: not valid UTF-8: {error.reason}") from None
+        raise TemtError(f"{printable(tilde(path))}: not valid UTF-8: {error.reason}") from None
 
 
 def _common() -> tuple[dict[str, Any], Conf] | None:
@@ -685,12 +686,12 @@ def _common() -> tuple[dict[str, Any], Conf] | None:
         # 行き先の無いシンボリックリンクを無いものとすると、共通ファイルの AwsProfile を
         # 使わずに環境変数のプロファイルへ黙って移ってしまう
         if path.is_symlink():
-            raise TemtError(f"{printable(str(path))}: broken symlink")
+            raise TemtError(f"{printable(tilde(path))}: broken symlink")
         return None
     document = _document(text, path)
     if DEFAULTS in document:
         # 共通ファイルを読むかどうかは、サービスごとに設定ファイルで決める
-        raise TemtError(f"{printable(str(path))}: {DEFAULTS} cannot be written in this file")
+        raise TemtError(f"{printable(tilde(path))}: {DEFAULTS} cannot be written in this file")
     return document, _built(document, path)
 
 
@@ -761,8 +762,8 @@ def _combined(document: dict[str, Any], path: Path) -> Conf:
     for index, one in enumerate(own.security_group.ingress):
         if rule_key(one) in keys:
             raise TemtError(
-                f"{printable(str(path))}: {SECURITY_GROUP}{SEPARATOR}{INGRESS}[{index}] "
-                f"repeats a rule in {printable(str(defaults_path()))}; remove one of them"
+                f"{printable(tilde(path))}: {SECURITY_GROUP}{SEPARATOR}{INGRESS}[{index}] "
+                f"repeats a rule in {printable(tilde(defaults_path()))}; remove one of them"
             )
     return _built(_merge(Conf, base, document), path)
 
@@ -861,7 +862,7 @@ def load(service: Service, *, missing_ok: bool = False, common: bool = True) -> 
     if text is None:
         if not missing_ok:
             raise TemtError(
-                f"no config file: {printable(str(path))}; "
+                f"no config file: {printable(tilde(path))}; "
                 f"run 'temt apply --svc {service.svc}' first"
             )
         text = ""
