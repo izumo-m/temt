@@ -1,11 +1,18 @@
 """設定ファイルの [launch-template] から、起動テンプレートに入れる中身を組み立てる。
-design/topics/launch-template.md の Extensions to AWS's form と What temt adds。
+design/topics/launch-template.md の Filled when missing、Extensions to AWS's form、
+What temt adds。
 
-apply と diff の手順 4、bake の手順 3、set-port の確かめが使う。変数を置き換え、ImageId を
-AMI の ID に、Groups のセキュリティグループの名前を ID に直し、省いた DeviceName を
-AMI のルートボリュームのデバイス名で埋め、temt が足すタグと Groups を入れる。AWS は
-読むだけで、何も作らない。temt のセキュリティグループがまだ無ければ、その ID の代わりに
-NEW_GROUP を入れる。
+fill は、書かれていない項目を既定で埋める。apply と diff の手順 2、bake の手順 3、
+set-port の確かめ、sg diff と sg show が使う。埋めた値は Conf にだけ入れ、設定ファイルには
+書かない。build は、apply と diff の手順 4、bake の手順 3、set-port の確かめが使う。変数を
+置き換え、ImageId を AMI の ID に、Groups のセキュリティグループの名前を ID に直し、省いた
+DeviceName を AMI のルートボリュームのデバイス名で埋め、temt が足すタグと Groups を
+入れる。AWS は読むだけで、何も作らない。temt のセキュリティグループがまだ無ければ、その
+ID の代わりに NEW_GROUP を入れる。
+
+ImageId を書いていなければ、使う AMI は build の前に決める（design/topics/ami.md の
+Selecting）。--image-id の AMI（given_image）、起動テンプレートの AMI（kept_image）、
+起動テンプレートを作るときに選ぶ AMI（new_image）のどれかで、build に渡す。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。
 """
@@ -20,12 +27,14 @@ from typing import TYPE_CHECKING, Any
 from temt import aws, conf, ltdata, policy
 from temt.aws import field
 from temt.msg import TemtError
+from temt.names import PREFIX
 from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from types_boto3_ec2.client import EC2Client
+    from types_boto3_ssm.client import SSMClient
 
     from temt.conf import Conf
     from temt.names import Service
@@ -39,10 +48,85 @@ GROUP_ID_PREFIX = "sg-"
 NETWORK_INTERFACES = "NetworkInterfaces"
 DEVICE_INDEX = "DeviceIndex"
 BLOCK_DEVICES = "BlockDeviceMappings"
+IMAGE_ID = "ImageId"
+# --image-id。AMI を選び直す方法として、メッセージに書く
+IMAGE_ID_OPTION = "--image-id"
 
 
-class UnusableImage(TemtError):
-    """ImageId が無いか、指す AMI が使えない。bake は、ImageId が揃っていないとして扱う。"""
+@dataclass(frozen=True)
+class Image:
+    """起動テンプレートに入れる AMI。
+
+    found は describe-images が返す AMI。note は、diff と apply が ImageId の行に括弧で
+    添えること。ふつうは AMI の名前で、Ubuntu 24.04 を選んだときはそのわけ。表示できない
+    文字は、行を書くときに置き換える。
+    """
+
+    found: Mapping[str, Any]
+    note: str
+
+
+def _named(found: Mapping[str, Any]) -> Image:
+    """AMI の名前を添える Image。名前が無ければ何も添えない。"""
+    return Image(found, str(found.get("Name") or ""))
+
+
+def given_image(ec2: EC2Client, value: str) -> Image:
+    """--image-id の AMI（ID か名前）。見つからないか使えなければ、それを告げて止める。"""
+    found = aws.find_image(ec2, value)
+    if found is None:
+        raise TemtError(f"no such AMI: {printable(value)}")
+    state = found.get("State")
+    if state not in aws.USABLE_IMAGE_STATES:
+        raise TemtError(f"the AMI {printable(value)} is {state}")
+    return _named(found)
+
+
+def kept_image(ec2: EC2Client, service: Service, data: Mapping[str, Any]) -> Image:
+    """起動テンプレートの既定バージョン（中身 data）の AMI。ImageId を書いていないときに使う。
+
+    AMI が無いか available でなければ（ami delete --force や手で登録を解除したとき）、
+    黙って選び直さず、--image-id で選ぶよう告げて止める。
+    """
+    value = data.get(IMAGE_ID)
+    template = service.launch_template
+    again = f"choose one with {IMAGE_ID_OPTION}"
+    if not isinstance(value, str) or not value:
+        raise TemtError(f"the launch template {template} has no {IMAGE_ID}; {again}")
+    found = aws.find_image(ec2, value)
+    if found is None:
+        raise TemtError(
+            f"the AMI {printable(value)} of the launch template {template} is not found; {again}"
+        )
+    state = found.get("State")
+    if state != aws.AVAILABLE:
+        raise TemtError(
+            f"the AMI {printable(value)} of the launch template {template} is {state}; {again}"
+        )
+    return _named(found)
+
+
+def new_image(ec2: EC2Client, ssm: SSMClient, service: Service, region: str) -> Image:
+    """起動テンプレートを作るときに使う AMI。
+
+    サービスの最新の AMI（aws.newest_image）を選び、それが pending（コピーの途中など）なら
+    止める。1 つも無ければ Ubuntu 24.04 の公開 AMI を選び、そのリージョンにサービスの AMI が
+    無いことを添える。AMI を写し忘れたクローンが、確認の前に気づけるようにする。
+    """
+    newest = aws.newest_image(ec2, service.svc)
+    if newest is not None:
+        if newest.get("State") == aws.PENDING:
+            raise TemtError(
+                f"the newest AMI of {service.name}, {printable(field(newest, 'Name'))} "
+                f"({field(newest, 'ImageId')}), is {aws.PENDING}; run again when it is "
+                f"{aws.AVAILABLE}"
+            )
+        return _named(newest)
+    image_id = aws.ubuntu_image_id(ssm)
+    found = aws.find_image(ec2, image_id)
+    if found is None:
+        raise TemtError(f"no such AMI: {printable(image_id)} (Ubuntu 24.04)")
+    return Image(found, f"Ubuntu 24.04; no {PREFIX}-{service.svc} AMI in {region}")
 
 
 @dataclass(frozen=True)
@@ -50,7 +134,8 @@ class Built:
     """組み立てた中身と、組み立てるときに分かったこと。
 
     data は起動テンプレートに入れる中身（temt のセキュリティグループがまだ無ければ、その
-    ID は NEW_GROUP）。image は ImageId の AMI。vpc_id は NetworkInterfaces の
+    ID は NEW_GROUP）。image は ImageId の AMI で、note は diff の ImageId の行に添えること
+    （Image）。vpc_id は NetworkInterfaces の
     DeviceIndex が 0 の要素の SubnetId の VPC で、決まらなければ None。group_id はその
     VPC にある temt のセキュリティグループの ID で、無ければ None。makes_group は temt の
     セキュリティグループを作るか（Groups を temt が埋めるか、名前で指すか）、uses_group は
@@ -66,6 +151,7 @@ class Built:
     uses_group: bool
     root: Mapping[str, Any] | None
     ipv6: bool = False
+    note: str = ""
 
 
 def primary(data: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -95,21 +181,16 @@ def _substituted(service: Service, values: Conf) -> dict[str, Any]:
         ) from None
 
 
-def _image(ec2: EC2Client, service: Service, data: dict[str, Any]) -> Mapping[str, Any]:
-    """ImageId の AMI。使えなければ、選び直す方法を添えて止める。ID に直して data に入れる。"""
-    key = conf.launch_template_key("ImageId")
-    value = data.get("ImageId")
+def _written_image(ec2: EC2Client, service: Service, data: Mapping[str, Any]) -> Image:
+    """書いた ImageId（変数を置き換えたもの）の AMI。使えなければ、選び直す方法を添えて止める。"""
+    key = conf.launch_template_key(IMAGE_ID)
+    value = data.get(IMAGE_ID)
     if not isinstance(value, str) or not value:
-        raise UnusableImage(f"no {key} in {printable(tilde(service.conf_path))}")
-    try:
-        found = aws.image(ec2, value, conf.source(service, key))
-    except TemtError as error:
-        raise UnusableImage(str(error)) from None
-    data["ImageId"] = field(found, "ImageId")
-    return found
+        raise TemtError(f"no {key} in {printable(tilde(service.conf_path))}")
+    return _named(aws.image(ec2, value, conf.source(service, key)))
 
 
-def _subnet(ec2: EC2Client, service: Service, data: Mapping[str, Any]) -> aws.Subnet | None:
+def subnet(ec2: EC2Client, service: Service, data: Mapping[str, Any]) -> aws.Subnet | None:
     """DeviceIndex が 0 の要素の SubnetId のサブネット。SubnetId が無ければ None。"""
     first = primary(data)
     subnet_id = None if first is None else first.get("SubnetId")
@@ -119,37 +200,56 @@ def _subnet(ec2: EC2Client, service: Service, data: Mapping[str, Any]) -> aws.Su
     return aws.subnet(ec2, subnet_id, conf.source(service, key))
 
 
-# 書かなければ apply が書く項目の位置。design/topics/launch-template.md の Filled when
-# missing。DeviceIndex が 0 の要素のものは、要素に NetworkInterfaceId があれば書かない
-FILLED = (
-    "ImageId",
-    "InstanceType",
-    "MetadataOptions.HttpTokens",
-    "MetadataOptions.InstanceMetadataTags",
-    "InstanceInitiatedShutdownBehavior",
-)
-FILLED_PRIMARY = ("SubnetId", "AssociatePublicIpAddress")
+# 書いていなければ apply と diff が毎回埋める値。design/topics/launch-template.md の
+# Filled when missing。InstanceType の既定は service list も使うので conf が持つ
+SHUTDOWN_BEHAVIOR = "terminate"
+HTTP_TOKENS = "required"
+METADATA_TAGS = "enabled"
+CPU_CREDITS = "unlimited"
+# サブネットに IPv6 の CIDR が結び付いているときに付ける IPv6 アドレスの数
+IPV6_ADDRESSES = 1
 # CPU クレジットを持つ T 系のインスタンスの型（t3.micro、t4g.small など）。旧世代の
 # t1 は CPU クレジットを持たない
 BURSTABLE = re.compile(r"t[2-9]")
 
 
-def unfilled(values: Conf, *, ipv6: bool) -> list[str]:
-    """書かなければ apply が書く項目のうち、まだ書かれていない（共通ファイルにも無い）
-    ものの位置。bake と set-port は、あれば先に apply するよう促す。ipv6 は、サブネットに
-    IPv6 の CIDR が結び付いているか。
+def fill(ec2: EC2Client, service: Service, values: Conf) -> aws.Subnet | None:
+    """書かれていない項目を既定で埋め、values の [launch-template] に入れる。
+
+    設定ファイルには書かない。共通ファイルに書かれた項目は、書かれているものとする。
+    NetworkInterfaces に DeviceIndex が 0 の要素が無ければ足し、その要素に
+    NetworkInterfaceId があれば、SubnetId、AssociatePublicIpAddress、Ipv6AddressCount は
+    入れない。SubnetId と Ipv6AddressCount は、そのリージョンの AWS を見て決める。
+    ImageId は埋めない。
+
+    Ipv6AddressCount を決めるために読んだサブネットを返す。読まなければ None。build に
+    渡せば、同じサブネットを読み直さない。
     """
     data = values.launch_template
-    missing = [key for key in FILLED if conf.lookup_data(data, key) in (None, "")]
-    first = primary(data) or {}
+    data.setdefault("InstanceType", conf.INSTANCE_TYPE)
+    interfaces = data.setdefault(NETWORK_INTERFACES, [])
+    first: dict[str, Any] | None = next(
+        (one for one in interfaces if one.get(DEVICE_INDEX) == 0), None
+    )
+    if first is None:
+        first = {DEVICE_INDEX: 0}
+        interfaces.append(first)
+    found = None
     if "NetworkInterfaceId" not in first:
-        wanted = [*FILLED_PRIMARY, *(["Ipv6AddressCount"] if ipv6 else [])]
-        missing += [f"{conf.PRIMARY}.{key}" for key in wanted if key not in first]
-    instance_type = str(data.get("InstanceType") or "")
-    credits = (data.get("CreditSpecification") or {}).get("CpuCredits")
-    if BURSTABLE.match(instance_type) and not credits:
-        missing.append("CreditSpecification.CpuCredits")
-    return missing
+        if "SubnetId" not in first:
+            first["SubnetId"] = aws.public_subnet(ec2, values.AwsRegion, service.conf_path)
+        first.setdefault("AssociatePublicIpAddress", True)
+        if "Ipv6AddressCount" not in first:
+            found = subnet(ec2, service, data)
+            if found is not None and found.ipv6:
+                first["Ipv6AddressCount"] = IPV6_ADDRESSES
+    metadata = data.setdefault("MetadataOptions", {})
+    metadata.setdefault("HttpTokens", HTTP_TOKENS)
+    metadata.setdefault("InstanceMetadataTags", METADATA_TAGS)
+    data.setdefault("InstanceInitiatedShutdownBehavior", SHUTDOWN_BEHAVIOR)
+    if BURSTABLE.match(str(data["InstanceType"])):
+        data.setdefault("CreditSpecification", {}).setdefault("CpuCredits", CPU_CREDITS)
+    return found
 
 
 def _root(
@@ -305,17 +405,31 @@ def _tags(service: Service, data: dict[str, Any]) -> None:
         one["Tags"] = tags  # pyright: ignore[reportIndexIssue]
 
 
-def build(ec2: EC2Client, service: Service, values: Conf) -> Built:
-    """設定ファイルから、起動テンプレートに入れる中身を組み立てる。"""
+def build(
+    ec2: EC2Client,
+    service: Service,
+    values: Conf,
+    *,
+    image: Image | None = None,
+    known: aws.Subnet | None = None,
+) -> Built:
+    """設定ファイルから、起動テンプレートに入れる中身を組み立てる。
+
+    values は fill で埋めたもの。image は ImageId を書いていないときに使う AMI で、書いて
+    いれば None（書いた ImageId の AMI を引く）。known は fill が読んだサブネットで、あれば
+    読み直さない。
+    """
     data = _substituted(service, values)
-    image = _image(ec2, service, data)
-    subnet = _subnet(ec2, service, data)
-    vpc_id = None if subnet is None else subnet.vpc_id
-    root = _root(service, data, image)
+    if image is None:
+        image = _written_image(ec2, service, data)
+    data[IMAGE_ID] = field(image.found, "ImageId")
+    found = known or subnet(ec2, service, data)
+    vpc_id = None if found is None else found.vpc_id
+    root = _root(service, data, image.found)
     group_id, makes, uses = _groups(ec2, service, data, vpc_id)
     _tags(service, data)
-    ipv6 = subnet is not None and subnet.ipv6
-    return Built(data, image, vpc_id, group_id, makes, uses, root, ipv6)
+    ipv6 = found is not None and found.ipv6
+    return Built(data, image.found, vpc_id, group_id, makes, uses, root, ipv6, image.note)
 
 
 def with_group(data: Mapping[str, Any], group_id: str) -> dict[str, Any]:

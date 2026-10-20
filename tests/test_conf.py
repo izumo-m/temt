@@ -28,6 +28,19 @@ def write(service: Service, text: str) -> None:
     service.conf_path.write_text(text, encoding="utf-8")
 
 
+def rewrite(service: Service, key: str, value: Any) -> bool:
+    """設定ファイルの位置 key に value を書く。書き換えたら True。
+
+    role import と同じく、中身を write_document で書き換えてからファイルに書く。
+    """
+    path = service.conf_path
+    document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    if not conf.write_document(document, key, value, path, "role import"):
+        return False
+    path.write_text(tomlkit.dumps(document), encoding="utf-8")
+    return True
+
+
 def read(service: Service) -> str:
     """設定ファイルの中身。"""
     return service.conf_path.read_text(encoding="utf-8")
@@ -387,53 +400,25 @@ def test_each_conf_has_its_own_table() -> None:
     assert other.role.ManagedPolicyArns == []
 
 
-def test_update_creates_the_file_with_a_header(service: Service) -> None:
-    values = Conf()
-    assert conf.update(service, values, "AwsRegion", "us-east-1") is True
-    assert read(service) == conf.HEADER + 'AwsRegion = "us-east-1"\n'
-
-
-def test_update_makes_the_directory_private(service: Service) -> None:
-    """temt が作るディレクトリは、どれも他人に見せないので 700 で作る。"""
-    conf.update(service, Conf(), "AwsRegion", "us-east-1")
-    assert service.conf_path.parent.stat().st_mode & 0o777 == 0o700
-
-
-def test_update_sets_the_field_too(service: Service) -> None:
-    values = Conf()
-    conf.update(service, values, "AwsProfile", "work")
-    assert values.AwsProfile == "work"
-
-
-def test_update_sets_the_field_in_the_table_too(service: Service) -> None:
-    """配列の要素が無ければ、要素を指すキーとその値を持つ要素を足す。"""
-    values = Conf()
-    conf.update(service, values, conf.primary_key("SubnetId"), "subnet-0123456789abcdef0")
-    assert values.launch_template == {
-        "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-0123456789abcdef0"}]
-    }
-    assert conf.load(service) == values
-
-
-def test_update_adds_the_key_when_it_is_absent(service: Service) -> None:
+def test_rewrite_adds_the_key_when_it_is_absent(service: Service) -> None:
     write(service, '# mine\nAwsProfile = "work"\n')
-    assert conf.update(service, Conf(), "AwsRegion", "us-east-1") is True
+    assert rewrite(service, "AwsRegion", "us-east-1") is True
     assert read(service) == '# mine\nAwsProfile = "work"\nAwsRegion = "us-east-1"\n'
 
 
-def test_update_adds_the_table_when_it_is_absent(service: Service) -> None:
+def test_rewrite_adds_the_table_when_it_is_absent(service: Service) -> None:
     write(service, 'AwsProfile = "work"\n')
-    assert conf.update(service, Conf(), f"{TEMPLATE}.InstanceType", "t3.micro") is True
+    assert rewrite(service, f"{TEMPLATE}.InstanceType", "t3.micro") is True
     assert read(service) == 'AwsProfile = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n'
 
 
-def test_update_adds_the_key_to_the_existing_table(service: Service) -> None:
+def test_rewrite_adds_the_key_to_the_existing_table(service: Service) -> None:
     write(service, '[launch-template]\nInstanceType = "t3.micro"  # c\n')
-    assert conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9") is True
+    assert rewrite(service, f"{TEMPLATE}.ImageId", "ami-9") is True
     assert read(service) == '[launch-template]\nInstanceType = "t3.micro"  # c\nImageId = "ami-9"\n'
 
 
-def test_update_adds_the_key_before_the_comments_of_the_next_table(service: Service) -> None:
+def test_rewrite_adds_the_key_before_the_comments_of_the_next_table(service: Service) -> None:
     """後ろのコメントは次の見出しのものなので、その前に残す。例の見出しを戻しても、
     足した項目はそのテーブルのものにならない。"""
     write(
@@ -441,7 +426,7 @@ def test_update_adds_the_key_before_the_comments_of_the_next_table(service: Serv
         '[launch-template]\nInstanceType = "t3.micro"\n\n# about the rules\n'
         "# [[security-group.ingress]]\n# Port = 22\n[x]\nA = 1\n",
     )
-    assert conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9") is True
+    assert rewrite(service, f"{TEMPLATE}.ImageId", "ami-9") is True
     text = read(service)
     assert text == (
         '[launch-template]\nInstanceType = "t3.micro"\nImageId = "ami-9"\n\n'
@@ -451,26 +436,26 @@ def test_update_adds_the_key_before_the_comments_of_the_next_table(service: Serv
     assert tomlkit.parse(uncommented)["launch-template"]["ImageId"] == "ami-9"
 
 
-def test_update_adds_the_key_to_a_table_that_has_only_comments(service: Service) -> None:
+def test_rewrite_adds_the_key_to_a_table_that_has_only_comments(service: Service) -> None:
     write(service, '[launch-template]\n# InstanceType = "t3.small"\n')
-    conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9")
+    rewrite(service, f"{TEMPLATE}.ImageId", "ami-9")
     assert read(service) == '[launch-template]\nImageId = "ami-9"\n# InstanceType = "t3.small"\n'
 
 
-def test_update_adds_the_key_next_to_a_dotted_key(service: Service) -> None:
+def test_rewrite_adds_the_key_next_to_a_dotted_key(service: Service) -> None:
     """ドット付きキーで書かれたテーブルには、同じ形で足す。読み直しても同じ内容になる。"""
     write(service, 'launch-template.InstanceType = "t3.small"\n')
-    assert conf.update(service, Conf(), f"{TEMPLATE}.ImageId", "ami-9") is True
+    assert rewrite(service, f"{TEMPLATE}.ImageId", "ami-9") is True
     assert read(service) == (
         'launch-template.InstanceType = "t3.small"\nlaunch-template.ImageId = "ami-9"\n'
     )
     assert conf.load(service).launch_template == {"InstanceType": "t3.small", "ImageId": "ami-9"}
 
 
-def test_update_puts_a_top_level_key_before_the_tables(service: Service) -> None:
+def test_rewrite_puts_a_top_level_key_before_the_tables(service: Service) -> None:
     """テーブルの後に足すと、そのテーブルの項目になってしまう。"""
     write(service, 'AwsProfile = "work"\n\n[launch-template]\nInstanceType = "t3.micro"\n')
-    conf.update(service, Conf(), "AwsRegion", "us-east-1")
+    rewrite(service, "AwsRegion", "us-east-1")
     assert read(service) == (
         'AwsProfile = "work"\nAwsRegion = "us-east-1"\n'
         '\n[launch-template]\nInstanceType = "t3.micro"\n'
@@ -478,54 +463,54 @@ def test_update_puts_a_top_level_key_before_the_tables(service: Service) -> None
     assert conf.load(service).AwsRegion == "us-east-1"
 
 
-def test_update_adds_a_newline_when_the_file_lacks_one(service: Service) -> None:
+def test_rewrite_adds_a_newline_when_the_file_lacks_one(service: Service) -> None:
     write(service, 'AwsProfile = "work"')
-    conf.update(service, Conf(), "AwsRegion", "us-east-1")
+    rewrite(service, "AwsRegion", "us-east-1")
     assert read(service) == 'AwsProfile = "work"\nAwsRegion = "us-east-1"\n'
 
 
-def test_update_replaces_the_value(service: Service) -> None:
+def test_rewrite_replaces_the_value(service: Service) -> None:
     write(service, '# mine\nAwsProfile = "a"\nAwsRegion = "us-east-1"\n')
-    assert conf.update(service, Conf(), "AwsProfile", "b") is True
+    assert rewrite(service, "AwsProfile", "b") is True
     assert read(service) == '# mine\nAwsProfile = "b"\nAwsRegion = "us-east-1"\n'
 
 
-def test_update_keeps_the_order_and_the_comments(service: Service) -> None:
+def test_rewrite_keeps_the_order_and_the_comments(service: Service) -> None:
     write(service, '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nAwsProfile = "work"\n')
-    conf.update(service, Conf(), "AwsProfile", "other")
+    rewrite(service, "AwsProfile", "other")
     assert read(service) == (
         '# head\nAwsRegion = "us-east-1"  # trailing\n# middle\nAwsProfile = "other"\n'
     )
 
 
-def test_update_keeps_the_file_when_the_value_is_the_same(service: Service) -> None:
+def test_rewrite_keeps_the_file_when_the_value_is_the_same(service: Service) -> None:
     """利用者が書いた書式をそのまま残す。"""
     write(service, '# mine\nAwsProfile   =   "work"\n')
-    values = Conf()
-    assert conf.update(service, values, "AwsProfile", "work") is False
+    assert rewrite(service, "AwsProfile", "work") is False
     assert read(service) == '# mine\nAwsProfile   =   "work"\n'
-    assert values.AwsProfile == "work"
 
 
-def test_update_keeps_the_file_when_the_table_value_is_the_same(service: Service) -> None:
+def test_rewrite_keeps_the_file_when_the_table_value_is_the_same(service: Service) -> None:
     write(service, '[launch-template]\nInstanceType   =   "t3.micro"\n')
-    assert conf.update(service, Conf(), f"{TEMPLATE}.InstanceType", "t3.micro") is False
+    assert rewrite(service, f"{TEMPLATE}.InstanceType", "t3.micro") is False
     assert read(service) == '[launch-template]\nInstanceType   =   "t3.micro"\n'
 
 
-def test_update_changes_nothing_the_second_time(service: Service) -> None:
-    conf.update(service, Conf(), f"{TEMPLATE}.InstanceType", "t3.micro")
-    assert conf.update(service, Conf(), f"{TEMPLATE}.InstanceType", "t3.micro") is False
+def test_rewrite_changes_nothing_the_second_time(service: Service) -> None:
+    write(service, "")
+    rewrite(service, f"{TEMPLATE}.InstanceType", "t3.micro")
+    assert rewrite(service, f"{TEMPLATE}.InstanceType", "t3.micro") is False
 
 
-def test_update_replaces_an_empty_value(service: Service) -> None:
+def test_rewrite_replaces_an_empty_value(service: Service) -> None:
     write(service, 'AwsProfile = ""\n')
-    assert conf.update(service, Conf(), "AwsProfile", "work") is True
+    assert rewrite(service, "AwsProfile", "work") is True
     assert conf.load(service).AwsProfile == "work"
 
 
-def test_update_writes_a_value_that_needs_quoting(service: Service) -> None:
-    conf.update(service, Conf(), "AwsProfile", "a=b # c")
+def test_rewrite_writes_a_value_that_needs_quoting(service: Service) -> None:
+    write(service, "")
+    rewrite(service, "AwsProfile", "a=b # c")
     assert conf.load(service).AwsProfile == "a=b # c"
 
 
@@ -610,187 +595,73 @@ def test_written_reads_an_inline_array_too(service: Service) -> None:
     assert conf.written(service, conf.primary_key("SubnetId")) == "s"
 
 
-def test_lookup_reads_the_conf_by_position() -> None:
-    values = Conf(
-        launch_template={
-            "NetworkInterfaces": [
-                {"DeviceIndex": 1, "SubnetId": "subnet-2"},
-                {"DeviceIndex": 0, "SubnetId": "subnet-0"},
-            ],
-            "MetadataOptions": {"HttpTokens": "required"},
-        },
-        role=Role(ManagedPolicyArns=["arn:aws:iam::aws:policy/ReadOnlyAccess"]),
-    )
-    assert conf.lookup(values, conf.primary_key("SubnetId")) == "subnet-0"
-    assert conf.lookup(values, conf.launch_template_key("MetadataOptions.HttpTokens")) == (
-        "required"
-    )
-    missing = conf.launch_template_key("NetworkInterfaces[DeviceIndex=2].SubnetId")
-    assert conf.lookup(values, missing) is None
-    assert conf.lookup(values, conf.launch_template_key("ImageId")) is None
-    assert conf.lookup(values, "AwsProfile") is None
-    assert conf.lookup(values, "AwsRegion") is conf.UNSET
-    assert conf.lookup(values, "security-group.ingress") == []
-    assert conf.lookup(values, "role.ManagedPolicyArns") == [
-        "arn:aws:iam::aws:policy/ReadOnlyAccess"
-    ]
+def test_rewrite_adds_a_missing_table_as_dotted_keys(service: Service) -> None:
+    """テーブルの中の無いテーブルは、見出しを足さず、ドット付きキーで最後の項目の次に書く。
 
-
-def test_assign_adds_the_element_and_the_tables() -> None:
-    """無い要素は、要素を指すキーとその値だけで足す。ほかの要素と項目はそのまま。"""
-    values = Conf(launch_template={"NetworkInterfaces": [{"DeviceIndex": 1}]})
-    conf.assign(values, conf.primary_key("SubnetId"), "subnet-0")
-    conf.assign(values, conf.primary_key("AssociatePublicIpAddress"), True)
-    conf.assign(values, conf.launch_template_key("MetadataOptions.HttpTokens"), "required")
-    assert values.launch_template == {
-        "NetworkInterfaces": [
-            {"DeviceIndex": 1},
-            {"DeviceIndex": 0, "SubnetId": "subnet-0", "AssociatePublicIpAddress": True},
-        ],
-        "MetadataOptions": {"HttpTokens": "required"},
-    }
-
-
-def test_update_writes_into_the_element(service: Service) -> None:
-    """要素はキーで探す。ほかの要素と、値に付いたコメントはそのまま残す。"""
-    write(service, TWO_INTERFACES)
-    values = conf.load(service)
-    assert conf.update(service, values, conf.primary_key("SubnetId"), "subnet-9") is True
-    assert read(service) == TWO_INTERFACES.replace('"subnet-0"', '"subnet-9"')
-    assert conf.load(service) == values
-
-
-def test_update_keeps_the_element_when_the_value_is_the_same(service: Service) -> None:
-    text = TWO_INTERFACES.replace('"subnet-0"', '  "subnet-0"')
-    write(service, text)
-    assert conf.update(service, Conf(), conf.primary_key("SubnetId"), "subnet-0") is False
-    assert read(service) == text
-
-
-def test_update_adds_the_element_after_the_last_one(service: Service) -> None:
-    """足した要素の前には空行を置き、後ろのコメント（次の見出しの説明）は足した要素の
-    後ろに残す。
+    雛形の IamInstanceProfile.Name = "..." と同じ形である。後ろのテーブルの配列やテーブル、
+    コメントはそのまま残す。
     """
-    head = (
-        '[launch-template]\nImageId = "a"\n'
-        '\n[[launch-template.NetworkInterfaces]]\nDeviceIndex = 1\nSubnetId = "subnet-2"\n'
-    )
-    rules = '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
-    write(service, head + rules)
-    values = conf.load(service)
-    assert conf.update(service, values, conf.primary_key("SubnetId"), "subnet-0") is True
-    assert read(service) == head + "\n" + PRIMARY + 'SubnetId = "subnet-0"\n' + rules
-    assert conf.load(service) == values
-
-
-def test_update_adds_the_array_of_tables_after_the_last_table(service: Service) -> None:
-    head = (
-        '[launch-template]\nImageId = "a"\n'
-        '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n'
-    )
-    rules = '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
-    write(service, head + rules)
-    values = conf.load(service)
-    conf.update(service, values, conf.primary_key("SubnetId"), "subnet-0")
-    assert read(service) == head + "\n" + PRIMARY + 'SubnetId = "subnet-0"\n' + rules
-    assert conf.load(service) == values
-
-
-def test_update_adds_a_table_after_the_last_table(service: Service) -> None:
-    head = (
-        '[launch-template]\nImageId = "a"\n'
+    head = '[launch-template]\nImageId = "a"\n'
+    rest = (
         "\n" + PRIMARY + 'SubnetId = "subnet-0"\n'
         '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n'
+        '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
     )
-    rules = '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
-    write(service, head + rules)
-    values = conf.load(service)
+    write(service, head + rest)
     key = conf.launch_template_key("CreditSpecification.CpuCredits")
-    conf.update(service, values, key, "unlimited")
-    assert read(service) == (
-        head + '\n[launch-template.CreditSpecification]\nCpuCredits = "unlimited"\n' + rules
-    )
-    assert conf.load(service) == values
-
-
-def test_update_adds_a_table_before_the_comments_of_the_next_table(service: Service) -> None:
-    """中にテーブルが無くても、後ろのコメントは次の見出しのものなので、その前に残す。"""
-    head = '[launch-template]\nImageId = "a"\n'
-    rules = '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
-    write(service, head + rules)
-    key = conf.launch_template_key("MetadataOptions.HttpTokens")
-    conf.update(service, Conf(), key, "required")
-    assert read(service) == (
-        head + '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n' + rules
-    )
+    rewrite(service, key, "unlimited")
+    assert read(service) == head + 'CreditSpecification.CpuCredits = "unlimited"\n' + rest
+    assert conf.load(service).launch_template["CreditSpecification"] == {"CpuCredits": "unlimited"}
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         pytest.param(
-            None,
-            conf.HEADER + '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n',
-            id="no file",
-        ),
-        pytest.param(
             "",
-            '[launch-template.MetadataOptions]\nHttpTokens = "required"\n',
+            '[launch-template]\nMetadataOptions.HttpTokens = "required"\n',
             id="empty file",
         ),
         pytest.param(
             "[launch-template]\n",
-            '[launch-template]\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n',
+            '[launch-template]\nMetadataOptions.HttpTokens = "required"\n',
             id="empty table",
         ),
         pytest.param(
             "[launch-template]\n\n# about the rules\n[x]\nA = 1\n",
-            '[launch-template]\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n'
+            '[launch-template]\nMetadataOptions.HttpTokens = "required"\n'
             "\n# about the rules\n[x]\nA = 1\n",
             id="empty table before comments",
         ),
     ],
 )
-def test_update_adds_no_blank_line_after_an_empty_table(
-    service: Service, text: str | None, expected: str
+def test_rewrite_adds_dotted_keys_before_the_comments_of_the_next_table(
+    service: Service, text: str, expected: str
 ) -> None:
-    """中身の無いテーブルの見出しと、足したテーブルの見出しの間には空行を置かない。
-
-    後ろのコメントは、中身が無くても次の見出しの説明として、足したテーブルの後ろに残す。
-    """
-    if text is not None:
-        write(service, text)
-    conf.update(service, Conf(), conf.launch_template_key("MetadataOptions.HttpTokens"), "required")
+    """後ろのコメントは、中身が無くても次の見出しの説明として、足した行の後ろに残す。"""
+    write(service, text)
+    rewrite(service, conf.launch_template_key("MetadataOptions.HttpTokens"), "required")
     assert read(service) == expected
 
 
-def test_update_writes_into_a_table_of_dotted_keys(service: Service) -> None:
+def test_rewrite_writes_into_a_table_of_dotted_keys(service: Service) -> None:
     """ドット付きのキーで書いたテーブルには、同じ形で足す。"""
     text = '[launch-template]\nImageId = "a"\nMetadataOptions.HttpTokens = "optional"\n'
     write(service, text)
-    values = conf.load(service)
     key = conf.launch_template_key("MetadataOptions.InstanceMetadataTags")
-    assert conf.update(service, values, key, "enabled") is True
+    assert rewrite(service, key, "enabled") is True
     assert read(service) == text + 'MetadataOptions.InstanceMetadataTags = "enabled"\n'
-    assert conf.load(service) == values
+    assert conf.load(service).launch_template["MetadataOptions"] == {
+        "HttpTokens": "optional",
+        "InstanceMetadataTags": "enabled",
+    }
 
 
-def test_update_writes_into_a_dotted_key_in_an_element(service: Service) -> None:
-    text = (
-        '[[launch-template.BlockDeviceMappings]]\nDeviceName = "/dev/sda1"\n'
-        "Ebs.VolumeSize = 8  # mine\n"
-    )
-    write(service, text)
-    key = conf.launch_template_key("BlockDeviceMappings[DeviceName=/dev/sda1].Ebs.VolumeSize")
-    assert conf.update(service, conf.load(service), key, 30) is True
-    assert read(service) == text.replace("= 8", "= 30")
-
-
-def test_update_writes_a_table_as_an_inline_table(service: Service) -> None:
+def test_rewrite_writes_a_table_as_an_inline_table(service: Service) -> None:
     """中かっこの内側に空白を置き、行を改行で終える。"""
     write(service, '[launch-template]\nImageId = "a"\n')
     key = conf.launch_template_key(ltdata.PROFILE)
-    assert conf.update(service, Conf(), key, {"Name": "${temt:name}"}) is True
+    assert rewrite(service, key, {"Name": "${temt:name}"}) is True
     assert read(service) == (
         '[launch-template]\nImageId = "a"\nIamInstanceProfile = { Name = "${temt:name}" }\n'
     )
@@ -813,7 +684,7 @@ def test_an_inline_table_added_before_what_follows_ends_its_line(
     """
     write(service, '[launch-template]\nImageId = "a"\n' + after)
     key = conf.launch_template_key(ltdata.PROFILE)
-    conf.update(service, Conf(), key, {"Name": "${temt:name}"})
+    rewrite(service, key, {"Name": "${temt:name}"})
     assert read(service) == (
         '[launch-template]\nImageId = "a"\nIamInstanceProfile = { Name = "${temt:name}" }\n' + after
     )
@@ -842,16 +713,16 @@ def test_an_item_replaced_by_an_inline_table_keeps_the_comments_after_it(
     rules = '\n# about the rules\n[[security-group.ingress]]\nPort = 22\nCidr = "192.0.2.1/32"\n'
     write(service, '[launch-template]\nImageId = "a"\n' + written + rules)
     key = conf.launch_template_key(ltdata.PROFILE)
-    conf.update(service, Conf(), key, {"Name": "${temt:name}"})
+    rewrite(service, key, {"Name": "${temt:name}"})
     assert read(service) == (
         '[launch-template]\nImageId = "a"\nIamInstanceProfile = { Name = "${temt:name}" }\n' + rules
     )
 
 
-def test_update_writes_an_inline_table_with_spaces_inside(service: Service) -> None:
+def test_rewrite_writes_an_inline_table_with_spaces_inside(service: Service) -> None:
     write(service, '[launch-template]\nImageId = "a"\n')
     key = conf.launch_template_key(ltdata.PROFILE)
-    assert conf.update(service, Conf(), key, {"Name": "${temt:name}"}) is True
+    assert rewrite(service, key, {"Name": "${temt:name}"}) is True
     assert 'IamInstanceProfile = { Name = "${temt:name}" }' in read(service)
     assert conf.load(service).launch_template[ltdata.PROFILE] == {"Name": "${temt:name}"}
 
@@ -872,11 +743,11 @@ def test_update_writes_an_inline_table_with_spaces_inside(service: Service) -> N
         ),
     ],
 )
-def test_update_keeps_a_table_written_in_another_form(service: Service, text: str) -> None:
+def test_rewrite_keeps_a_table_written_in_another_form(service: Service, text: str) -> None:
     """書式が違っても、インラインテーブルでなく書かれていても、中身が同じなら触らない。"""
     write(service, text)
     key = conf.launch_template_key(ltdata.PROFILE)
-    assert conf.update(service, Conf(), key, {"Name": "${temt:name}"}) is False
+    assert rewrite(service, key, {"Name": "${temt:name}"}) is False
     assert read(service) == text
 
 
@@ -888,12 +759,6 @@ def test_update_keeps_a_table_written_in_another_form(service: Service, text: st
             "launch-template.MetadataOptions.HttpTokens",
             "required",
             id="inline table",
-        ),
-        pytest.param(
-            '[launch-template]\nNetworkInterfaces = [{ DeviceIndex = 0, SubnetId = "s" }]\n',
-            "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId",
-            "s",
-            id="inline array",
         ),
         pytest.param(
             'launch-template = { ImageId = "a" }\n',
@@ -908,64 +773,11 @@ def test_the_same_value_in_an_inline_table_is_left_alone(
 ) -> None:
     """インラインテーブルの中でも、同じ値が既に書かれていれば止めずに触らない。
 
-    手で書くよう告げたとおりに書いた後の apply が、また止まらないようにする。
+    手で書くよう告げたとおりに書いた後のコマンドが、また止まらないようにする。
     """
     write(service, text)
-    values = Conf()
-    conf.check_writable(service, key, value)
-    assert conf.update(service, values, key, value) is False
+    assert rewrite(service, key, value) is False
     assert read(service) == text
-    assert conf.lookup(values, key) == value
-
-
-def test_the_first_apply_writes_the_documented_layout(service: Service) -> None:
-    """最初の apply が書く順に書くと、docs/conf.md の例と同じ並びになる。
-
-    最上位の項目はテーブルの前に、[launch-template] の項目はテーブルの前に、テーブルと
-    要素は空行を挟んで書いた順に並ぶ。
-    """
-    values = Conf()
-    for key, value in [
-        ("AwsRegion", "ap-northeast-1"),
-        (conf.launch_template_key("ImageId"), "ami-0123456789abcdef0"),
-        (conf.launch_template_key("InstanceType"), "t3.micro"),
-        (conf.primary_key("SubnetId"), "subnet-1"),
-        (conf.primary_key("AssociatePublicIpAddress"), True),
-        (conf.launch_template_key("MetadataOptions.HttpTokens"), "required"),
-        (conf.launch_template_key("MetadataOptions.InstanceMetadataTags"), "enabled"),
-        (conf.launch_template_key("InstanceInitiatedShutdownBehavior"), "terminate"),
-        (conf.launch_template_key("CreditSpecification.CpuCredits"), "unlimited"),
-        (conf.launch_template_key(ltdata.PROFILE), {"Name": "${temt:name}"}),
-    ]:
-        conf.update(service, values, key, value)
-    assert read(service) == conf.HEADER + (
-        'AwsRegion = "ap-northeast-1"\n'
-        '\n[launch-template]\nImageId = "ami-0123456789abcdef0"\nInstanceType = "t3.micro"\n'
-        'InstanceInitiatedShutdownBehavior = "terminate"\n'
-        'IamInstanceProfile = { Name = "${temt:name}" }\n'
-        "\n" + PRIMARY + 'SubnetId = "subnet-1"\nAssociatePublicIpAddress = true\n'
-        '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n'
-        'InstanceMetadataTags = "enabled"\n'
-        '\n[launch-template.CreditSpecification]\nCpuCredits = "unlimited"\n'
-    )
-    assert conf.load(service) == values
-
-
-def test_a_table_written_back_goes_before_the_example(service: Service) -> None:
-    """消したテーブルを apply が書き戻すときは、最後のテーブルの後ろ、apply が置いた例の
-    コメントの前に置く。
-    """
-    head = (
-        conf.HEADER + 'AwsRegion = "ap-northeast-1"\n'
-        '\n[launch-template]\nImageId = "a"\n'
-        "\n" + PRIMARY + 'SubnetId = "subnet-1"\n'
-    )
-    write(service, head + conf.EXAMPLE)
-    key = conf.launch_template_key("MetadataOptions.HttpTokens")
-    conf.update(service, conf.load(service), key, "required")
-    assert read(service) == (
-        head + '\n[launch-template.MetadataOptions]\nHttpTokens = "required"\n' + conf.EXAMPLE
-    )
 
 
 @pytest.mark.parametrize(
@@ -976,18 +788,6 @@ def test_a_table_written_back_goes_before_the_example(service: Service) -> None:
             "launch-template.MetadataOptions.InstanceMetadataTags",
             "enabled",
             id="inline table",
-        ),
-        pytest.param(
-            '[launch-template]\nNetworkInterfaces = [{ DeviceIndex = 0, SubnetId = "s" }]\n',
-            "launch-template.NetworkInterfaces[DeviceIndex=0].AssociatePublicIpAddress",
-            True,
-            id="inline array",
-        ),
-        pytest.param(
-            '[launch-template]\nNetworkInterfaces = [{ DeviceIndex = 1, SubnetId = "s" }]\n',
-            "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId",
-            "subnet-1",
-            id="new element in an inline array",
         ),
         pytest.param(
             'launch-template = { ImageId = "a" }\n',
@@ -1003,7 +803,7 @@ def test_a_table_written_back_goes_before_the_example(service: Service) -> None:
         ),
     ],
 )
-def test_update_does_not_write_into_an_inline_table(
+def test_rewrite_does_not_write_into_an_inline_table(
     service: Service, text: str, key: str, value: Any
 ) -> None:
     """tomlkit では形を保って書き足せないので、書かずに、手で書くよう告げて止める。"""
@@ -1011,23 +811,11 @@ def test_update_does_not_write_into_an_inline_table(
     shown = conf.toml_value(value)
     message = (
         f"cannot write {key} in {tilde(service.conf_path)}, as it would go into an inline "
-        f"table or array; write {key} = {shown} there by hand and run apply again"
+        f"table or array; write {key} = {shown} there by hand and run role import again"
     )
     with pytest.raises(TemtError) as caught:
-        conf.check_writable(service, key, value)
+        _ = rewrite(service, key, value)
     assert str(caught.value) == message
-    with pytest.raises(TemtError) as caught:
-        conf.update(service, Conf(), key, value)
-    assert str(caught.value) == message
-    assert read(service) == text
-
-
-def test_check_writable_writes_nothing(service: Service) -> None:
-    conf.check_writable(service, conf.primary_key("SubnetId"), "subnet-1")
-    assert not service.conf_path.exists()
-    text = '[launch-template]\nImageId = "a"\n'
-    write(service, text)
-    conf.check_writable(service, conf.primary_key("SubnetId"), "subnet-1")
     assert read(service) == text
 
 
@@ -1323,7 +1111,7 @@ RULES = (
     "# about the office\n"
     "\n" + INGRESS + 'Port = [80, 443]\nCidr = "198.51.100.0/24"\n'
     "\n# about the role\n"
-    '[[role.policy.jupyter]]\nAction = "s3:*"\nResource = "*"\n'
+    '[[role.jupyter]]\nAction = "s3:*"\nResource = "*"\n'
 )
 
 
@@ -1391,7 +1179,7 @@ def test_a_description_is_rewritten_and_cleared(service: Service) -> None:
 def test_the_comments_after_a_removed_rule_are_kept(
     service: Service, removed: list[int], expected: str
 ) -> None:
-    role = RULES[RULES.index("[[role.policy.jupyter]]") :]
+    role = RULES[RULES.index("[[role.jupyter]]") :]
     assert edited(service, RULES, removed=removed) == expected + role
 
 
@@ -1533,7 +1321,7 @@ def test_other_forms_that_can_be_edited(service: Service, text: str) -> None:
 
 AFTER = "\n# about the rules\n"
 LAUNCH = '[launch-template]\nImageId = "a"\n'
-POLICY = "[role.policy]\n"
+POLICY = "[role]\n"
 
 
 @pytest.mark.parametrize(
@@ -1542,8 +1330,8 @@ POLICY = "[role.policy]\n"
         pytest.param(LAUNCH + "\n[role]\n\n", LAUNCH + "\n[role]\n" + AFTER, id="empty table"),
         pytest.param("[launch-template]\n\n", "[launch-template]\n" + AFTER, id="empty first"),
         pytest.param(
-            '[[role.policy.x]]\nEffect = "Allow"\n\n',
-            '[[role.policy.x]]\nEffect = "Allow"\n' + AFTER,
+            '[[role.x]]\nEffect = "Allow"\n\n',
+            '[[role.x]]\nEffect = "Allow"\n' + AFTER,
             id="array of tables",
         ),
         pytest.param(POLICY + "\n", POLICY + AFTER, id="table in a table without a heading"),
@@ -1622,7 +1410,7 @@ def test_a_file_changed_while_running(service: Service) -> None:
     assert read(service) == changed
 
 
-STATEMENT = "[[role.policy.jupyter]]\n"
+STATEMENT = "[[role.jupyter]]\n"
 
 
 def test_reads_the_role_policies_as_they_are(service: Service) -> None:
@@ -1632,13 +1420,13 @@ def test_reads_the_role_policies_as_they_are(service: Service) -> None:
         STATEMENT
         + 'Action = ["s3:GetObject", "s3:PutObject"]\n'
         + 'Resource = "arn:aws:s3:::bucket/${temt:name}/*"\n'
-        + '[role.policy.jupyter.Condition.Bool]\n"aws:SecureTransport" = true\n'
+        + '[role.jupyter.Condition.Bool]\n"aws:SecureTransport" = true\n'
         + STATEMENT
         + 'Sid = "Two"\nEffect = "Deny"\nNotAction = "iam:*"\nNotResource = "*"\n'
-        + '[[role.policy.idle]]\nEffect = "Allow"\nAction = "ec2:Describe*"\n'
+        + '[[role.idle]]\nEffect = "Allow"\nAction = "ec2:Describe*"\n'
         + 'Resource = "*"\n',
     )
-    policies = conf.load(service).role.policy
+    policies = conf.load(service).role.policies
     assert policies == {
         "jupyter": [
             {
@@ -1654,17 +1442,16 @@ def test_reads_the_role_policies_as_they_are(service: Service) -> None:
 
 
 def test_no_policy_means_no_role_policy(service: Service) -> None:
-    assert conf.load(service, missing_ok=True).role.policy == {}
+    assert conf.load(service, missing_ok=True).role.policies == {}
     write(service, "[role]\n")
-    assert conf.load(service).role.policy == {}
-    write(service, "[role.policy]\n")
-    assert conf.load(service).role.policy == {}
+    assert conf.load(service).role.policies == {}
+    assert not conf.load(service).role
 
 
 def test_a_statement_key_that_iam_does_not_know_is_left_to_iam(service: Service) -> None:
     """書式は apply が ValidatePolicy で確かめるので、読むときには止めない。"""
     write(service, STATEMENT + 'Resources = "*"\n')
-    assert conf.load(service).role.policy == {"jupyter": [{"Resources": "*"}]}
+    assert conf.load(service).role.policies == {"jupyter": [{"Resources": "*"}]}
 
 
 def test_a_statement_with_an_unknown_variable(service: Service) -> None:
@@ -1672,8 +1459,7 @@ def test_a_statement_with_an_unknown_variable(service: Service) -> None:
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{tilde(service.conf_path)}: role.policy.jupyter[0] uses an unknown variable: "
-        "${temt:app}"
+        f"{tilde(service.conf_path)}: role.jupyter[0] uses an unknown variable: ${{temt:app}}"
     )
 
 
@@ -1682,9 +1468,9 @@ def test_a_statement_with_an_unknown_variable(service: Service) -> None:
     [
         "Sid = 2026-09-27\n",
         'Action = ["s3:GetObject", 12:00:00]\n',
-        '[role.policy.jupyter.Condition.DateLessThan]\n"aws:CurrentTime" = 2026-09-27T00:00:00Z\n',
-        '[role.policy.jupyter.Condition.NumericLessThan]\n"s3:max-keys" = nan\n',
-        '[role.policy.jupyter.Condition.NumericLessThan]\n"s3:max-keys" = inf\n',
+        '[role.jupyter.Condition.DateLessThan]\n"aws:CurrentTime" = 2026-09-27T00:00:00Z\n',
+        '[role.jupyter.Condition.NumericLessThan]\n"s3:max-keys" = nan\n',
+        '[role.jupyter.Condition.NumericLessThan]\n"s3:max-keys" = inf\n',
     ],
 )
 def test_a_statement_with_what_json_does_not_have(service: Service, written: str) -> None:
@@ -1693,30 +1479,31 @@ def test_a_statement_with_what_json_does_not_have(service: Service, written: str
     with pytest.raises(
         TemtError,
         match=(
-            r"role\.policy\.jupyter\[0\] must hold only strings, finite numbers, "
+            r"role\.jupyter\[0\] must hold only strings, finite numbers, "
             r"booleans, arrays and tables$"
         ),
     ):
         conf.load(service)
 
 
-# 角かっこ 1 つのテーブルと、中に階層を作ったテーブルは、どちらも [[...]] と書くよう告げる
+# 角かっこ 1 つのテーブルと、中に階層を作ったテーブルは、どちらも [[role.<ポリシー名>]] と
+# 書くよう告げる
 NOT_AN_ARRAY = (
-    r"role\.policy\.jupyter must be an array of tables; "
-    r"write \[\[role\.policy\.jupyter\]\] once per statement$"
+    r"role\.jupyter must be an array of tables; "
+    r"write \[\[role\.<policy name>\]\] once per statement$"
 )
 
 
 @pytest.mark.parametrize(
     ("written", "message"),
     [
-        ('[role]\npolicy = "x"\n', r"role\.policy must be a table$"),
-        ('[role.policy]\njupyter = "x"\n', r"role\.policy\.jupyter must be an array of tables$"),
-        ("[role.policy.jupyter]\n", NOT_AN_ARRAY),
-        ('[role.policy.jupyter]\nVersion = "2012-10-17"\n', NOT_AN_ARRAY),
-        ('[[role.policy.jupyter.Statement]]\nEffect = "Allow"\n', NOT_AN_ARRAY),
-        ("[role.policy]\njupyter = []\n", r"role\.policy\.jupyter must have at least one table$"),
-        ('[role.policy]\njupyter = ["Allow"]\n', r"role\.policy\.jupyter\[0\] must be a table$"),
+        ('role = "x"\n', r"role must be a table$"),
+        ('[role]\njupyter = "x"\n', r"role\.jupyter must be an array of tables$"),
+        ("[role.jupyter]\n", NOT_AN_ARRAY),
+        ('[role.jupyter]\nVersion = "2012-10-17"\n', NOT_AN_ARRAY),
+        ('[[role.jupyter.Statement]]\nEffect = "Allow"\n', NOT_AN_ARRAY),
+        ("[role]\njupyter = []\n", r"role\.jupyter must have at least one table$"),
+        ('[role]\njupyter = ["Allow"]\n', r"role\.jupyter\[0\] must be a table$"),
     ],
 )
 def test_a_policy_in_a_wrong_shape(service: Service, written: str, message: str) -> None:
@@ -1725,11 +1512,23 @@ def test_a_policy_in_a_wrong_shape(service: Service, written: str, message: str)
         conf.load(service)
 
 
+def test_the_policy_table_is_not_a_policy_list(service: Service) -> None:
+    """[[role.policy.<ポリシー名>]] は、role.policy というポリシーがテーブルになったものと
+    して誤りにする。[[role.policy]] と書くよう案内せず、[[role.<ポリシー名>]] と書くよう
+    告げる。
+    """
+    write(service, '[[role.policy.ec2]]\nAction = "ssm:*"\nResource = "*"\n')
+    with pytest.raises(TemtError) as caught:
+        conf.load(service)
+    assert str(caught.value) == (
+        f"{tilde(service.conf_path)}: role.policy must be an array of tables; "
+        "write [[role.<policy name>]] once per statement"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "shown"),
     [
-        ("Jupyter", '"Jupyter"'),
-        ("Statement", '"Statement"'),
         ("a_b", '"a_b"'),
         ("-a", '"-a"'),
         ("a" * 65, f'"{"a" * 65}"'),
@@ -1740,11 +1539,11 @@ def test_a_policy_in_a_wrong_shape(service: Service, written: str, message: str)
 )
 def test_a_policy_name_that_breaks_the_rule(service: Service, name: str, shown: str) -> None:
     """名前は引用して出す。. を含む名前も階層と取り違えず、ASCII でない名前も ASCII で出す。"""
-    write(service, f'[[role.policy."{name}"]]\nEffect = "Allow"\n')
+    write(service, f'[[role."{name}"]]\nEffect = "Allow"\n')
     with pytest.raises(TemtError) as caught:
         conf.load(service)
     assert str(caught.value) == (
-        f"{tilde(service.conf_path)}: role.policy.{shown}: the policy name {LABEL_RULE}"
+        f"{tilde(service.conf_path)}: role.{shown}: the policy name {LABEL_RULE}"
     )
 
 
@@ -1757,12 +1556,14 @@ def test_the_example_reads_as_a_policy(service: Service) -> None:
         for line in conf.EXAMPLE.splitlines()
     )
     write(service, text)
-    assert list(conf.load(service).role.policy) == ["example"]
+    assert list(conf.load(service).role.policies) == ["example"]
 
 
-def test_an_unknown_key_in_the_role_table(service: Service) -> None:
-    write(service, '[role]\nStatement = "x"\n')
-    with pytest.raises(TemtError, match=r"unknown key: role\.Statement$"):
+@pytest.mark.parametrize("name", ["Statement", "Jupyter", "Version"])
+def test_an_unknown_key_in_the_role_table(service: Service, name: str) -> None:
+    """ポリシー名は英小文字で始まるので、大文字で始まる名前は知らない項目とする。"""
+    write(service, f'[[role.{name}]]\nEffect = "Allow"\n')
+    with pytest.raises(TemtError, match=rf"unknown key: role\.{name}$"):
         conf.load(service)
 
 
@@ -1802,17 +1603,17 @@ def test_managed_policies_that_are_not_arns(service: Service, written: str) -> N
 
 def test_a_role_is_written_when_it_has_policies_or_managed_policies() -> None:
     assert not Role()
-    assert Role(policy={"ec2": [{"Action": "s3:*", "Resource": "*"}]})
+    assert Role(policies={"ec2": [{"Action": "s3:*", "Resource": "*"}]})
     assert Role(ManagedPolicyArns=["arn:aws:iam::aws:policy/ReadOnlyAccess"])
 
 
-# [[role.policy.ec2]] の既定
+# [[role.ec2]] の既定
 
 
 def test_the_ec2_default_is_two_statements_without_effect(service: Service) -> None:
     """既定は、SSM エージェントの権限と、自分の階層のパラメータの読み書き。Effect は省く。"""
     write(service, conf.EC2_DEFAULT)
-    statements = conf.load(service).role.policy[conf.EC2]
+    statements = conf.load(service).role.policies[conf.EC2]
     assert statements == conf.ec2_default()
     assert [list(one) for one in statements] == [["Action", "Resource"], ["Action", "Resource"]]
     # State Manager の権限は含めない
@@ -1830,51 +1631,61 @@ def test_the_ec2_default_is_two_statements_without_effect(service: Service) -> N
     ]
 
 
-def test_the_ec2_default_is_written_when_it_is_missing(service: Service) -> None:
-    """末尾に足し、Conf にも入れる。ほかのポリシーはそのまま残る。"""
-    text = 'AwsRegion = "x"\n' + STATEMENT + 'Action = "s3:*"\nResource = "*"\n'
-    write(service, text)
-    values = conf.load(service)
-    conf.write_ec2_default(service, values)
-    assert read(service) == text + conf.EC2_DEFAULT
-    assert list(values.role.policy) == ["jupyter", conf.EC2]
-    assert values.role.policy[conf.EC2] == conf.ec2_default()
-    assert conf.load(service) == values
+def test_the_scaffold_has_the_documented_layout(service: Service) -> None:
+    """雛形は、先頭の説明、IamInstanceProfile、[[role.ec2]] の既定、例のコメントの順。
 
-
-def test_with_ec2_default_writes_nothing(service: Service) -> None:
-    """足したあとの中身と、それを読んだ Conf を返すだけで、ファイルも Conf も変えない。
-
-    diff が、apply が足せるかを確かめるのに使う。
+    docs/conf.md の雛形の例と同じもの。読めば、temt のインスタンスプロファイルを指し、
+    [[role.ec2]] の既定を持つ。
     """
-    text = 'AwsRegion = "x"\n'
-    write(service, text)
-    values = conf.load(service)
-    added, done = conf.with_ec2_default(service, values)
-    assert added == text + conf.EC2_DEFAULT
-    assert done.role.policy == {conf.EC2: conf.ec2_default()}
-    assert read(service) == text
-    assert values.role.policy == {}
+    text = conf.scaffold(profile=True, ec2=True)
+    assert text == conf.HEADER + conf.SCAFFOLD_PROFILE + conf.EC2_DEFAULT + conf.EXAMPLE
+    assert text.startswith(
+        "# Written by temt apply. Edit and run apply again to update.\n"
+        "\n"
+        "[launch-template]\n"
+        'IamInstanceProfile.Name = "${temt:name}"\n'
+        "\n"
+        "# Permissions of the instance role that are not tied to one app."
+    )
+    docs = (Path(__file__).parent.parent / "docs" / "conf.md").read_text(encoding="utf-8")
+    assert f"```toml\n{text}```\n" in docs
+    values = conf.parse_text(text, service.conf_path)
+    assert values.launch_template == {"IamInstanceProfile": {"Name": "${temt:name}"}}
+    assert values.role.policies == {conf.EC2: conf.ec2_default()}
 
 
-def test_the_ec2_default_gets_a_newline_before_it(service: Service) -> None:
-    write(service, 'AwsRegion = "x"')
-    values = conf.load(service)
-    conf.write_ec2_default(service, values)
-    assert read(service) == 'AwsRegion = "x"\n' + conf.EC2_DEFAULT
+@pytest.mark.parametrize(("profile", "ec2"), [(False, True), (False, False)])
+def test_the_scaffold_leaves_out_what_is_not_asked(profile: bool, ec2: bool) -> None:
+    """IamInstanceProfile と [[role.ec2]] は、書かないこともできる。例のコメントは残す。"""
+    text = conf.scaffold(profile=profile, ec2=ec2)
+    assert "IamInstanceProfile" not in text
+    assert ("[[role.ec2]]" in text) is ec2
+    assert text.startswith(conf.HEADER)
+    assert text.endswith(conf.EXAMPLE)
 
 
-def test_the_ec2_default_cannot_be_added_to_an_inline_table(service: Service) -> None:
-    """インラインテーブルの role には [[role.policy.ec2]] を足せない。書かずに止める。"""
-    text = "role = { policy = {} }\n"
-    write(service, text)
-    values = conf.load(service)
-    with pytest.raises(
-        TemtError, match=r"cannot add the default \[\[role\.policy\.ec2\]\] to .*; add it by hand"
-    ):
-        conf.write_ec2_default(service, values)
-    assert read(service) == text
-    assert values.role.policy == {}
+def test_common_profile_is_the_instance_profile_of_the_common_file(home_dir: Path) -> None:
+    """共通ファイルの IamInstanceProfile。ファイルか項目が無ければ None。"""
+    _ = home_dir
+    assert conf.common_profile() is None
+    write_defaults('AwsRegion = "us-west-2"\n')
+    assert conf.common_profile() is None
+    write_defaults(
+        '[launch-template]\nIamInstanceProfile.Arn = "arn:aws:iam::1:instance-profile/x"\n'
+    )
+    assert conf.common_profile() == {"Arn": "arn:aws:iam::1:instance-profile/x"}
+
+
+def test_create_makes_a_new_file_only(service: Service) -> None:
+    """無ければ作る。既にあれば、上書きせずに止める。"""
+    conf.create(service, "# new\n")
+    assert read(service) == "# new\n"
+    with pytest.raises(TemtError) as caught:
+        conf.create(service, "# other\n")
+    assert str(caught.value) == (
+        f"{tilde(service.conf_path)} was made while running apply; it is left as it is"
+    )
+    assert read(service) == "# new\n"
 
 
 def test_take_region_env_removes_both_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1914,30 +1725,13 @@ def test_written_is_none_without_the_file(service: Service) -> None:
     assert conf.written(service, "AwsRegion") is None
 
 
-def test_assign_changes_only_the_conf(service: Service) -> None:
-    """設定ファイルには書かない。diff が、apply が書く値を後の手順で使うのに使う。"""
-    text = 'AwsProfile = "mine"\n'
-    write(service, text)
-    values = conf.load(service)
-    conf.assign(values, conf.primary_key("SubnetId"), "subnet-0")
-    conf.assign(values, "AwsProfile", "other")
-    assert values.launch_template == {
-        "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-0"}]
-    }
-    assert values.AwsProfile == "other"
-    assert read(service) == text
-
-
 # --- 書き換えの置き換え ---
 
 # 書き換える前の設定ファイル
 BEFORE = 'AwsProfile = "work"\n'
 # 設定ファイルを書き換える関数。どれも replace_text で置き換える
 WRITERS = {
-    "update": lambda service, values: conf.update(service, values, "AwsProfile", "other"),
-    "ec2 default": lambda service, values: conf.write_ec2_default(service, values),
     "ingress": lambda service, values: conf.edit_ingress(service, values, added=[HOME]),
-    "example": lambda service, values: conf.write_example(service),
 }
 
 
@@ -1968,33 +1762,6 @@ def test_a_failed_write_leaves_the_file_as_it_was(
     assert [path.name for path in directory.iterdir()] == ["dev-main.toml"]
 
 
-def test_a_failed_update_leaves_the_conf_as_it_was(
-    service: Service, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """書けずに止まったときは、Conf も元のまま。ファイルと Conf が食い違わない。"""
-    write(service, BEFORE)
-    values = conf.load(service)
-
-    def full(fd: int) -> None:
-        raise OSError(errno.ENOSPC, "No space left on device")
-
-    monkeypatch.setattr(os, "fsync", full)
-    with pytest.raises(OSError, match="No space left on device"):
-        conf.update(service, values, "AwsProfile", "other")
-    assert values.AwsProfile == "work"
-
-
-def test_an_update_refused_for_an_inline_table_leaves_the_conf_as_it_was(
-    service: Service,
-) -> None:
-    write(service, '[launch-template]\nMetadataOptions = { HttpTokens = "optional" }\n')
-    values = conf.load(service)
-    key = conf.launch_template_key("MetadataOptions.InstanceMetadataTags")
-    with pytest.raises(TemtError, match="^cannot write "):
-        conf.update(service, values, key, "enabled")
-    assert values.launch_template == {"MetadataOptions": {"HttpTokens": "optional"}}
-
-
 @pytest.mark.parametrize("writer", WRITERS.values(), ids=WRITERS.keys())
 def test_writing_keeps_the_mode_and_a_symlinked_file(
     service: Service, home_dir: Path, writer: Any
@@ -2015,23 +1782,13 @@ def test_writing_keeps_the_mode_and_a_symlinked_file(
     assert [path.name for path in real.parent.iterdir()] == ["dev-main.toml"]
 
 
-def test_update_makes_a_new_file_with_the_usual_mode(service: Service) -> None:
-    """無いファイルは、umask に従うふつうのモードで作る。"""
-    before = os.umask(0o022)
-    try:
-        conf.update(service, Conf(), "AwsRegion", "us-east-1")
-    finally:
-        os.umask(before)
-    assert service.conf_path.stat().st_mode & 0o777 == 0o644
-
-
 def write_defaults(text: str) -> None:
     """共通ファイルを用意する。"""
     defaults_path().parent.mkdir(parents=True, exist_ok=True)
     defaults_path().write_text(text, encoding="utf-8")
 
 
-EC2_COMMON = '[[role.policy.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n'
+EC2_COMMON = '[[role.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n'
 RULE = '[[security-group.ingress]]\nPort = 22\nCidr = "{}"\n'
 
 
@@ -2086,7 +1843,7 @@ def test_network_interfaces_of_both_files_are_merged_by_device_index(service: Se
     """同じ DeviceIndex の要素は項目ごとに重ね、違う要素は両方を使う（共通ファイルが先）。
     要素の中の Groups は、設定ファイルに書けば丸ごと置き換える。
 
-    apply が SubnetId を設定ファイルの要素に書いても、共通ファイルの要素の項目は効き続ける。
+    設定ファイルの要素に SubnetId を書いても、共通ファイルの要素の項目は効き続ける。
     """
     write_defaults(
         '[[launch-template.NetworkInterfaces]]\nDeviceIndex = 1\nSubnetId = "subnet-common"\n'
@@ -2205,16 +1962,70 @@ def test_a_rule_written_in_both_files_is_an_error(service: Service) -> None:
 
 
 def test_policies_are_joined_by_name(service: Service) -> None:
-    """同じ名前のポリシーは、サービスの設定ファイルのものを使う。"""
+    """同じ名前のポリシーは、置き換えずに、共通ファイルの Statement の後ろに設定ファイルの
+    Statement をつなげる。各 Statement を書いたファイルと、その中での位置を覚える。
+    """
     write_defaults(
-        '[[role.policy.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n\n'
-        '[[role.policy.logs]]\nAction = ["logs:PutLogEvents"]\nResource = "*"\n'
+        '[[role.ec2]]\nAction = ["s3:ListBucket"]\nResource = "*"\n\n'
+        '[[role.logs]]\nAction = ["logs:PutLogEvents"]\nResource = "*"\n'
     )
-    write(service, '[[role.policy.ec2]]\nAction = ["ec2:DescribeTags"]\nResource = "*"\n')
-    assert conf.load(service).role.policy == {
-        "ec2": [{"Action": ["ec2:DescribeTags"], "Resource": "*"}],
+    write(
+        service,
+        '[[role.ec2]]\nAction = ["ec2:DescribeTags"]\nResource = "*"\n\n'
+        '[[role.ec2]]\nAction = ["ec2:DescribeTags"]\nResource = "*"\n\n'
+        '[[role.app]]\nAction = ["s3:GetObject"]\nResource = "*"\n',
+    )
+    role = conf.load(service).role
+    assert role.policies == {
+        "ec2": [
+            {"Action": ["s3:ListBucket"], "Resource": "*"},
+            {"Action": ["ec2:DescribeTags"], "Resource": "*"},
+            {"Action": ["ec2:DescribeTags"], "Resource": "*"},
+        ],
         "logs": [{"Action": ["logs:PutLogEvents"], "Resource": "*"}],
+        "app": [{"Action": ["s3:GetObject"], "Resource": "*"}],
     }
+    path = service.conf_path
+    assert [role.origin("ec2", index, path) for index in range(3)] == [
+        (defaults_path(), 0),
+        (path, 0),
+        (path, 1),
+    ]
+    assert role.origin("logs", 0, path) == (defaults_path(), 0)
+    assert role.origin("app", 0, path) == (path, 0)
+
+
+def test_policies_of_one_file_remember_it(service: Service) -> None:
+    """共通ファイルを読まなくても、各 Statement を書いたファイルを覚える。"""
+    write(service, "Defaults = false\n\n" + EC2_COMMON + "\n" + EC2_COMMON)
+    write_defaults(EC2_COMMON)
+    role = conf.load(service).role
+    assert [role.origin("ec2", index, defaults_path()) for index in range(2)] == [
+        (service.conf_path, 0),
+        (service.conf_path, 1),
+    ]
+
+
+def test_managed_policies_of_the_service_replace_the_common_ones(service: Service) -> None:
+    """ManagedPolicyArns はほかの配列と同じく、設定ファイルに書けば置き換える。"""
+    write_defaults('[role]\nManagedPolicyArns = ["arn:aws:iam::aws:policy/A"]\n')
+    write(service, "")
+    assert conf.load(service).role.ManagedPolicyArns == ["arn:aws:iam::aws:policy/A"]
+    write(service, '[role]\nManagedPolicyArns = ["arn:aws:iam::aws:policy/B"]\n')
+    assert conf.load(service).role.ManagedPolicyArns == ["arn:aws:iam::aws:policy/B"]
+    write(service, "[role]\nManagedPolicyArns = []\n")
+    assert conf.load(service).role.ManagedPolicyArns == ["arn:aws:iam::aws:policy/A"]
+
+
+def test_the_instance_profile_of_the_service_replaces_the_common_one(service: Service) -> None:
+    """IamInstanceProfile はテーブルでも項目ごとに重ねず、丸ごと置き換える。共通ファイルの
+    Arn と設定ファイルの Name が混ざらない。
+    """
+    write_defaults(
+        '[launch-template]\nIamInstanceProfile.Arn = "arn:aws:iam::1:instance-profile/x"\n'
+    )
+    write(service, '[launch-template]\nIamInstanceProfile.Name = "${temt:name}"\n')
+    assert conf.load(service).launch_template == {"IamInstanceProfile": {"Name": "${temt:name}"}}
 
 
 def test_an_error_in_the_common_file_names_it(service: Service) -> None:
@@ -2250,15 +2061,6 @@ def test_common_values_are_only_what_is_written() -> None:
     assert conf.common_values() == {"AwsProfile": "work"}
 
 
-def test_the_default_ec2_policy_is_added_beside_common_policies(service: Service) -> None:
-    write_defaults('[[role.policy.logs]]\nAction = ["logs:PutLogEvents"]\nResource = "*"\n')
-    write(service, 'AwsRegion = "us-east-1"\n')
-    values = conf.load(service)
-    conf.write_ec2_default(service, values)
-    assert set(values.role.policy) == {"logs", conf.EC2}
-    assert "role.policy.logs" not in read(service)
-
-
 def test_a_broken_symlink_as_the_common_file_is_an_error(service: Service) -> None:
     """無いものとすると、環境変数のプロファイルへ黙って移ってしまう。"""
     defaults_path().parent.mkdir(parents=True, exist_ok=True)
@@ -2284,10 +2086,13 @@ def test_source_names_the_file_that_holds_the_value(service: Service) -> None:
     assert conf.source(service, key) == service.conf_path
 
 
-def test_the_common_ec2_policy_keeps_apply_from_adding_the_default(service: Service) -> None:
+def test_a_role_in_the_common_file_counts_for_the_service(service: Service) -> None:
+    """共通ファイルにだけ [role] があっても、そのサービスの [role] として扱う。"""
     write_defaults(EC2_COMMON)
     write(service, 'AwsRegion = "us-east-1"\n')
-    assert conf.EC2 in conf.load(service).role.policy
+    assert conf.load(service).role
+    write(service, "Defaults = false\n")
+    assert not conf.load(service).role
 
 
 def test_the_region_option_comes_before_the_common_file(
@@ -2309,7 +2114,35 @@ def test_the_region_option_must_match_the_written_region(
     monkeypatch.setattr(conf, "OPTION_REGION", "us-east-1")
     assert conf.load(service).AwsRegion == "us-east-1"
     monkeypatch.setattr(conf, "OPTION_REGION", "eu-west-1")
-    with pytest.raises(UsageError, match=r"^dev-main is in us-east-1; --region eu-west-1 differs$"):
+    with pytest.raises(
+        UsageError, match=r"^dev-main has AwsRegion = us-east-1; --region eu-west-1 differs$"
+    ):
+        conf.load(service)
+
+
+def test_the_profile_option_comes_before_the_common_file(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AwsProfile が書かれていなければ、--profile を共通ファイルの AwsProfile より先にする。"""
+    write_defaults('AwsProfile = "common"\n')
+    write(service, "[launch-template]\n")
+    assert conf.load(service).AwsProfile == "common"
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    assert conf.load(service).AwsProfile == "work"
+
+
+def test_the_profile_option_must_match_the_written_profile(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """書かれた AwsProfile は固定で、同じ --profile は通り、違えば引数の誤りにする。"""
+    write_defaults('AwsProfile = "common"\n')
+    write(service, 'AwsProfile = "mine"\n')
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "mine")
+    assert conf.load(service).AwsProfile == "mine"
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    with pytest.raises(
+        UsageError, match=r"^dev-main has AwsProfile = mine; --profile work differs$"
+    ):
         conf.load(service)
 
 

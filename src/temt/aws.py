@@ -1,9 +1,10 @@
 """AWS から読み取る。boto3 を使う。
 
 書き込みはしない。ここにあるのは、設定ファイルの既定を解決するための読み取り、
-apply が AWS に何かを作る前に確かめる読み取り、設定ファイルの ImageId が指す AMI を
-引く読み取りである。3 つめは、bake もテンプレートと比べるのに使う。AMI を引く find_image は、
-show がテンプレートの AMI を、ami delete が引数の AMI を引くのにも使う。Session を
+apply が AWS に何かを作る前に確かめる読み取り、AMI を引く読み取りである。AMI を引く
+find_image は、apply が ImageId、--image-id、起動テンプレートの AMI を、show がテンプレートの
+AMI を、ami delete が引数の AMI を引くのに使う。サービスの最新の AMI を探す newest_image は、
+apply が起動テンプレートを作るときと、show と destroy が見せるときに使う。Session を
 作るのもここで、--svc を付けたコマンドには設定ファイルから、無いコマンドには
 --profile と --region から作る（env_session）。後者が知らせるアカウントも STS から読み、
 environment がそれを 1 行で知らせる。AWS が返した時刻や deploy の記録の時刻を表示の
@@ -29,7 +30,7 @@ from botocore.exceptions import ClientError, ProfileNotFound
 from temt import conf, msg
 from temt.conf import Conf
 from temt.msg import TemtError
-from temt.names import defaults_path
+from temt.names import PREFIX, defaults_path
 from temt.table import printable, tilde
 
 if TYPE_CHECKING:
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
 PROFILE_ENV = ("AWS_DEFAULT_PROFILE", "AWS_PROFILE")
 # temt が管理していることを示すタグのキー。値はサービス名で、AMI では焼いたサービス
 TAG_SERVICE = "temt:service"
+# インスタンスロールに付ける、リージョンのタグのキーの頭。後ろにリージョンが続き、値は空。
+# そのリージョンの設定に [role] があり、apply したことを表す
+TAG_REGION = "temt:region:"
 # プロファイルを選んでいないときの、環境を知らせる行の表示
 NO_PROFILE = "(none)"
 # 読めない時刻の表示
@@ -55,9 +59,13 @@ NO_SUCH_IMAGE = "InvalidAMIID.NotFound"
 MALFORMED_IMAGE = "InvalidAMIID.Malformed"
 # 登録を解除された AMI の状態。解除の直後は、しばらく describe-images に見える
 DEREGISTERED = "deregistered"
-# 起動テンプレートに入れてよい AMI の状態。手で書いた ImageId が作っている途中の AMI を
+# 起動テンプレートに入れてよい AMI の状態。ImageId や --image-id が作っている途中の AMI を
 # 指していても受け付ける。テンプレートは、起動するまで AMI を使わない
 USABLE_IMAGE_STATES = ("available", "pending")
+AVAILABLE = "available"
+PENDING = "pending"
+# サービスの AMI の名前の、temt-<svc>- に続く時刻の桁数（YYMMDDHHMM）
+IMAGE_TIME_DIGITS = 10
 # Canonical が公開している Ubuntu 24.04 の AMI ID
 UBUNTU_AMI_PARAMETER = (
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
@@ -74,9 +82,11 @@ IPV6_ASSOCIATED = "associated"
 
 
 def profile(values: Conf) -> str | None:
-    """使うプロファイル。--profile、設定ファイルの AwsProfile の順に決まる。
+    """使うプロファイル。設定ファイルの AwsProfile、--profile、共通ファイルの AwsProfile の
+    順に決まる。設定ファイルに書いた AwsProfile と違う --profile は、conf.load が引数の誤りに
+    している。
 
-    どちらも無ければ None で、そのときは boto3 にも aws-cli にもプロファイルを渡さず、
+    どれも無ければ None で、そのときは boto3 にも aws-cli にもプロファイルを渡さず、
     資格情報は AWS の既定の規則で決まる。aws-cli の環境は proxy が boto3 に揃える。
     """
     return conf.OPTION_PROFILE or values.AwsProfile
@@ -89,8 +99,7 @@ def session(values: Conf) -> boto3.Session:
     `if profile_name is not None`）。リージョンは、設定ファイルの AwsRegion、--region、
     共通ファイルの AwsRegion の順に conf.load が決めている。どれも無ければ、ここで
     環境変数、AWS のプロファイルの region、conf.REGION_DEFAULT の順に決め、values にも
-    入れる。最初の apply と ami import が、それを AwsRegion に書く。環境変数は main が
-    取り除く前に conf.ENV_REGION に控えてある。
+    入れる。環境変数は main が取り除く前に conf.ENV_REGION に控えてある。
     """
     resolve_region(values)
     return boto3.Session(profile_name=profile(values), region_name=values.AwsRegion)
@@ -146,6 +155,21 @@ def account(session: boto3.Session) -> str:
     return field(session.client("sts").get_caller_identity(), "Account")
 
 
+def confirm(session: boto3.Session, question: str, *, yes: bool) -> None:
+    """--svc を付けたコマンドの確認。question（? を除いた問い）に、扱うリージョンと
+    アカウントを添えて問う。
+
+    --profile や --region を付け忘れて、別のリージョンやアカウントを扱おうとしていれば、
+    ここで気づける。アカウントは問うときだけ STS から引く。yes なら問わないので引かない。
+    """
+    msg.confirm(
+        lambda: (
+            f"{question} in {printable(str(session.region_name))} (account {account(session)})?"
+        ),
+        yes=yes,
+    )
+
+
 def environment(region: str | None) -> boto3.Session:
     """--svc の無いコマンドの Session を作り、使う環境を 1 行で知らせる。"""
     session = env_session(region)
@@ -193,6 +217,20 @@ def tag(item: Mapping[str, Any], key: str) -> str:
         (str(one.get("Value") or "") for one in item.get("Tags") or [] if one.get("Key") == key),
         "",
     )
+
+
+def region_tag(region: str) -> str:
+    """リージョン region のタグのキー。"""
+    return f"{TAG_REGION}{region}"
+
+
+def tagged_regions(item: Mapping[str, Any]) -> list[str]:
+    """AWS の応答の、リージョンのタグが付いたリージョン。付いた順に並べる。"""
+    return [
+        key.removeprefix(TAG_REGION)
+        for one in item.get("Tags") or []
+        if (key := str(one.get("Key") or "")).startswith(TAG_REGION) and key != TAG_REGION
+    ]
 
 
 def field(item: Mapping[str, Any], key: str) -> str:
@@ -288,45 +326,42 @@ def subnet(ec2: EC2Client, subnet_id: str, conf_path: Path) -> Subnet:
     return Subnet(vpc_id=field(item, "VpcId"), ipv6=_has_ipv6(item))
 
 
-@dataclass(frozen=True)
-class Ami:
-    """AMI のうち、選ぶのと見せるのに要るもの。"""
-
-    image_id: str
-    name: str
-    # AWS が返す作成日時。ISO 8601 の文字列なので、新旧はそのまま比べられる
-    created: str
+def _image_name_re(svc: str) -> re.Pattern[str]:
+    """サービスの AMI の名前の形。temt-<svc>- に 10 桁の数字だけが続く。"""
+    return re.compile(re.escape(f"{PREFIX}-{svc}-") + f"[0-9]{{{IMAGE_TIME_DIGITS}}}")
 
 
-def own_ami(ec2: EC2Client, svc: str) -> Ami | None:
-    """自分のアカウントにある、そのサービスの最新の AMI。1 つも無ければ None。"""
+def newest_image(ec2: EC2Client, svc: str) -> Mapping[str, Any] | None:
+    """自分のアカウントにある、そのサービスの最新の AMI。無ければ None。
+
+    名前が temt-<svc>- に 10 桁の数字が続く形にちょうど合い、available か pending の
+    もののうち、作成日時が最新のもの。タグでは探さない。コピーした AMI にはタグが無い
+    ことがある。前方一致にしないのは、サービス dev に dev-main の AMI を混ぜないためである。
+    並べるのは作成日時で、名前の時刻は使わない。コピーした AMI の作成日時はコピーした
+    時刻で、名前の時刻は手元の時刻である。
+    """
     images = ec2.describe_images(
         Owners=["self"],
         Filters=[
-            {"Name": f"tag:{TAG_SERVICE}", "Values": [svc]},
-            {"Name": "state", "Values": ["available"]},
+            # ? は 0 か 1 文字に合う。形にちょうど合うかは、受け取ってから確かめる
+            {"Name": "name", "Values": [f"{PREFIX}-{svc}-" + "?" * IMAGE_TIME_DIGITS]},
+            {"Name": "state", "Values": list(USABLE_IMAGE_STATES)},
         ],
     ).get("Images", [])
+    pattern = _image_name_re(svc)
+    images = [one for one in images if pattern.fullmatch(str(one.get("Name") or ""))]
     if not images:
         return None
-    # 作られた時刻が同じなら ID の辞書順で選び、何度実行しても同じ結果にする
-    newest = max(images, key=lambda image: (field(image, "CreationDate"), field(image, "ImageId")))
-    return Ami(
-        image_id=field(newest, "ImageId"),
-        name=field(newest, "Name"),
-        created=field(newest, "CreationDate"),
-    )
+    # 作成日時が同じなら ID の辞書順で選び、何度実行しても同じ結果にする。AWS が返す作成
+    # 日時は ISO 8601 の文字列なので、新旧はそのまま比べられる
+    return max(images, key=lambda image: (field(image, "CreationDate"), field(image, "ImageId")))
 
 
-def latest_ami(ec2: EC2Client, ssm: SSMClient, svc: str) -> str:
-    """設定ファイルの ImageId に書く、サービスの最新の AMI。
+def ubuntu_image_id(ssm: SSMClient) -> str:
+    """Ubuntu 24.04 の公開 AMI の ID。Canonical の SSM の公開パラメータから読む。
 
-    サービスの AMI があれば、その名前を返す。1 つも無ければ Ubuntu 24.04 の公開 AMI
-    の ID を返す。公開 AMI は自分のアカウントのものではないので、名前では引けない。
+    公開 AMI は自分のアカウントのものではないので、名前では引けない。
     """
-    found = own_ami(ec2, svc)
-    if found is not None:
-        return found.name
     return field(ssm.get_parameter(Name=UBUNTU_AMI_PARAMETER)["Parameter"], "Value")
 
 
@@ -368,25 +403,9 @@ def find_image(ec2: EC2Client, value: str, *, own: bool = False) -> Mapping[str,
 def _pick_again(conf_path: Path) -> str:
     """ImageId の AMI が使えないときに伝えること。"""
     return (
-        f"remove {conf.launch_template_key('ImageId')} from {printable(tilde(conf_path))} "
-        "and run apply again to pick one"
+        f"write another AMI in {conf.launch_template_key('ImageId')} of "
+        f"{printable(tilde(conf_path))}, or remove it and choose one with --image-id"
     )
-
-
-def image_id(ec2: EC2Client, value: str) -> str | None:
-    """設定ファイルの ImageId の値が指す、使える AMI の ID。
-
-    見つからないとき、使える状態でないとき、名前に使えない文字を含むとき、同じ名前の
-    AMI が複数あるときは None。テンプレートと比べるだけの bake が使い、揃っていない
-    ものとして apply を促す。ここでは誤りにしない。何がいけないかは、apply の image が告げる。
-    """
-    try:
-        found = find_image(ec2, value)
-    except TemtError:
-        return None
-    if found is None or found.get("State") not in USABLE_IMAGE_STATES:
-        return None
-    return field(found, "ImageId")
 
 
 def image(ec2: EC2Client, value: str, conf_path: Path) -> Mapping[str, Any]:

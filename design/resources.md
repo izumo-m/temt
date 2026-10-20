@@ -113,10 +113,10 @@ would not separate apps that run with sudo on the same instance. App permissions
 ### Long names
 
 `<name>` is not checked for length ([naming.md](naming.md#resource-names)). IAM cannot
-hold a role of more than 64 characters, so where temt only reads IAM (`apply` and
-`diff` without `[role]`, `destroy`, `role delete`), it treats such a role as absent;
-asking IAM would fail and `destroy` could never finish. With `[role]`, `apply` stops
-with AWS's error where it creates the role.
+hold a role or instance profile of more than 64 characters, so where temt only reads
+IAM (`apply` and `diff` without `[role]`, `destroy`, `role delete`), it treats both as
+absent; asking IAM would fail and `destroy` could never finish. With `[role]`, `apply`
+and `diff` stop with AWS's error where they read the role, before the confirmation.
 
 ### Instance role
 
@@ -169,7 +169,8 @@ while either remains), and delete the role. Untagged ones, or ones of another se
 are left alone; instance profiles of other names (the source's, after `service import`)
 are never targets. If the role is in another instance profile, deletion stops before
 detaching or deleting anything; that includes the instance profile `<name>` when it was
-left alone because of its tags.
+left alone because of its tags. `apply` checks none of this before its confirmation; when
+the deletion cannot go on, it reports what it left and why, as `destroy` does.
 
 ## Security group
 

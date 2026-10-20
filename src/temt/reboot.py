@@ -266,7 +266,7 @@ def run(service: Service, *, is_async: bool, yes: bool) -> None:
         if ssm is not None:
             _require_online(ssm, service, one.id)
         # 手順 3
-        msg.confirm(f"reboot {one.id} ({one.state})?", yes=yes)
+        aws.confirm(session, f"reboot {one.id} ({one.state})", yes=yes)
         # 手順 4
         before = None if ssm is None else _boot_id(ssm, service, one.id)
         # 手順 5

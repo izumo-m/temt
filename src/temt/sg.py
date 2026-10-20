@@ -2,9 +2,9 @@
 
 どちらも表示するだけで、ロックは取らず、設定ファイルにも AWS にも書き込まない。
 sg diff は、次の apply が受信規則をどう変えるかを標準出力に書く。sg show は
-セキュリティグループを表示する。比べるセキュリティグループは、設定ファイルの
-SubnetId が属する VPC にある <名前> のものである。設定ファイルだけを扱う sg list、
-sg add、sg remove は ingress にある。
+セキュリティグループを表示する。比べるセキュリティグループは、SubnetId（書かれて
+いなければ、apply と同じくそのリージョンで選ぶもの）が属する VPC にある <名前> のもので
+ある。設定ファイルだけを扱う sg list、sg add、sg remove は ingress にある。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -14,10 +14,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from temt import aws, conf, ltdata, msg, resources, table
+from temt import aws, conf, ltbuild, msg, resources, table
 from temt.aws import field
 from temt.change import ADD, REMOVE, UPDATE
-from temt.table import tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -28,23 +27,16 @@ if TYPE_CHECKING:
     from temt.names import Service
 
 
-def _vpc(ec2: EC2Client, service: Service, values: Conf, *, quiet: bool = False) -> str | None:
-    """NetworkInterfaces の DeviceIndex が 0 の要素の SubnetId が属する VPC。SubnetId が
-    書かれていなければ None。
+def _vpc(ec2: EC2Client, service: Service, values: Conf) -> str | None:
+    """NetworkInterfaces の DeviceIndex が 0 の要素の SubnetId が属する VPC。
 
-    quiet でなければ、書かれていないことを知らせる。sg show は自分の表に書くので知らせない。
+    SubnetId が書かれていなければ、apply と同じく書かれていない項目を埋めて選ぶ。要素に
+    NetworkInterfaceId があってサブネットが決まらなければ None。
     """
-    first = ltdata.element(values.launch_template.get("NetworkInterfaces") or [], "DeviceIndex", 0)
-    subnet_id = None if first is None else first.get("SubnetId")
-    key = conf.primary_key("SubnetId")
-    if not isinstance(subnet_id, str):
-        if not quiet:
-            msg.info(
-                f"no {key} in {table.printable(tilde(service.conf_path))}; "
-                f"the next apply picks a subnet"
-            )
-        return None
-    return aws.subnet(ec2, subnet_id, conf.source(service, key)).vpc_id
+    found = ltbuild.fill(ec2, service, values) or ltbuild.subnet(
+        ec2, service, values.launch_template
+    )
+    return None if found is None else found.vpc_id
 
 
 def _split(
@@ -99,16 +91,16 @@ def _diff(service: Service) -> None:
 def show(service: Service) -> None:
     """セキュリティグループを表示する。受信規則は数だけを出す。
 
-    SubnetId が書かれていなければ VPC が決まらないので、同じ名前のセキュリティグループを
-    VPC とともに挙げるだけにする。どれを次の apply が使うかは、選ぶサブネットで決まる。
+    サブネットが決まらなければ（NetworkInterfaceId を書いたとき）VPC も決まらないので、
+    同じ名前のセキュリティグループを VPC とともに挙げるだけにする。
     """
     values = conf.load(service)
     ec2 = aws.session(values).client("ec2")
-    vpc_id = _vpc(ec2, service, values, quiet=True)
+    vpc_id = _vpc(ec2, service, values)
     groups = resources.groups(ec2, service)
     msg.tell(f"security group {service.name}:\n")
     if vpc_id is None:
-        msg.rows([("state", "(no subnet yet; the next apply picks one)")])
+        msg.rows([("state", "(no subnet)")])
         _list_groups("groups with this name:", groups)
         return
     mine, others = _split(groups, vpc_id)

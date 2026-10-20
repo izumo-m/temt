@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 import pytest
-from conftest import Clock, Stubs, an_instance, deadline, reservations, taken
+from conftest import WHERE, Clock, Stubs, an_instance, deadline, identified, reservations, taken
 
 from temt import cli, home, lock, stop, wait
 from temt.msg import TemtError
@@ -31,7 +31,7 @@ SEARCH = {
 }
 BY_ID = {"InstanceIds": [INSTANCE]}
 # 手順 3 の問いかけ。標準エラー出力に書く
-PROMPT = f"stop {INSTANCE} (running)? [y/N] "
+PROMPT = f"stop {INSTANCE} (running) {WHERE}? [y/N] "
 # 状態が合わないときに、AWS が stop-instances を断るメッセージ
 REFUSED = f"This instance '{INSTANCE}' is not in a state from which it can be stopped."
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
@@ -98,6 +98,7 @@ def test_it_stops_the_instance_and_waits(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     known_hosts = home.prepare_known_hosts(configured) / INSTANCE
     known_hosts.touch(mode=0o600)
     found(aws_stubs)
@@ -147,6 +148,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     _ = configured
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     found(aws_stubs)
@@ -203,6 +205,7 @@ def test_it_stops_a_pending_instance_and_waits(
     aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """pending でも確認して停止を求め、stopped を待つ。"""
+    identified(aws_stubs)
     found(aws_stubs, "pending")
     aws_stubs.ec2.add_response("stop_instances", stopping(INSTANCE), BY_ID)
     seen(aws_stubs, "pending", "stopped")
@@ -212,7 +215,7 @@ def test_it_stops_a_pending_instance_and_waits(
     aws_stubs.done()
     assert answer.reads == 1
     out, err = capsys.readouterr()
-    assert err == f"stop {INSTANCE} (pending)? [y/N] "
+    assert err == f"stop {INSTANCE} (pending) {WHERE}? [y/N] "
     assert told(out) == [f"stopping {INSTANCE}", f"{INSTANCE} is stopped"]
 
 

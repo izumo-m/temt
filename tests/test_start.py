@@ -870,12 +870,10 @@ def test_it_gives_up_when_the_agent_stays_offline(
     for _ in range(6):
         aws_stubs.ssm.add_response("describe_instance_information", agent(""), AGENT)
 
-    # 動いていたインスタンスなので、status を見るか再起動するよう添える
+    # 何を待って何が起きたかだけを出し、どうするかは添えない
     with pytest.raises(
         TemtError,
-        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come "
-        "online; see 'temt status --svc dev-main' or run 'temt reboot --svc dev-main "
-        "--async'$",
+        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online$",
     ):
         start.run(configured, is_async=False)
 
@@ -883,13 +881,13 @@ def test_it_gives_up_when_the_agent_stays_offline(
     assert clock.slept == [60] * 5
 
 
-def test_it_tells_to_launch_again_when_a_new_agent_stays_offline(
+def test_it_adds_no_hint_when_a_new_agent_stays_offline(
     aws_stubs: Stubs, configured: Service, clock: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """起動したばかりなら、終了して起動し直すよう添える。
+    """起動したばかりでも、何が起きたかだけを出し、起動し直すよう添えない。
 
     apply の直後に起動すると、エージェントがロールの資格情報を取れずに止まったり、
-    消えた古いインスタンスプロファイルが付いたりする。どちらも起動し直せば直る。
+    消えた古いインスタンスプロファイルが付いたりする。直し方は文書に書く。
     """
     monkeypatch.setattr(wait, "INTERVAL", 60)
     applied(aws_stubs)
@@ -903,8 +901,7 @@ def test_it_tells_to_launch_again_when_a_new_agent_stays_offline(
 
     with pytest.raises(
         TemtError,
-        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come "
-        "online; run 'temt terminate --svc dev-main', wait a few minutes, and start again$",
+        match=f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online$",
     ):
         start.run(configured, is_async=False)
 
@@ -923,10 +920,10 @@ def profile_refused(stubs: Stubs, name: str) -> None:
     )
 
 
-def test_it_tells_to_wait_when_ec2_does_not_see_the_instance_profile(
+def test_it_stops_when_ec2_does_not_see_the_instance_profile(
     aws_stubs: Stubs, configured: Service, clock: Clock
 ) -> None:
-    """apply の直後は、待ってやり直さず、少しあけて start し直すよう知らせて止まる。
+    """apply の直後は、待ってやり直さず、何が起きたかだけを知らせて止まる。
 
     いちばん早い時点で起動すると、エージェントがロールの資格情報を取れないことがある。
     """
@@ -936,9 +933,7 @@ def test_it_tells_to_wait_when_ec2_does_not_see_the_instance_profile(
 
     with pytest.raises(
         TemtError,
-        match=f"^EC2 does not see the instance profile {NAME} yet; if you just ran "
-        "'temt apply', wait a minute and start again; otherwise run "
-        "'temt apply --svc dev-main'$",
+        match=f"^EC2 does not see the instance profile {NAME}$",
     ):
         start.run(configured, is_async=False)
 

@@ -10,6 +10,7 @@ import io
 import json
 import shutil
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,13 +19,12 @@ from urllib.parse import quote
 import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
-from conftest import CONFIGURED, REGION, Stubs
+from conftest import CONFIGURED, REGION, WHERE, Stubs, identified
 from types_boto3_ec2.client import EC2Client
-from types_boto3_ssm.client import SSMClient
+from types_boto3_iam.client import IAMClient
 
 from temt import apply, aws, conf, home, keys, policy, resources
-from temt.conf import Conf
-from temt.msg import TemtError
+from temt.msg import TemtError, UsageError
 from temt.names import CONF_DIR_ENV, SSH_DIR_ENV, Service, defaults_path, keys_dir, ssh_dir
 from temt.table import tilde
 
@@ -46,9 +46,13 @@ CONF_SHOWN = "~/.config/temt/dev-main.toml"
 DEFAULTS_SHOWN = "~/.config/temt/defaults.toml"
 WHEN = datetime(2026, 9, 20, tzinfo=UTC)
 
-# apply が書き終えた設定ファイル。新しく作ったときの見出しと例のコメントは除く
-WRITTEN = CONFIGURED + conf.EC2_DEFAULT
-# WRITTEN の IamInstanceProfile の行。apply も、中かっこの内側に空白を置いて書く
+# 書けるものをすべて書いた設定ファイル。apply はこれに何も書かない。ImageId も書き、AMI を
+# 固定する
+PINNED = CONFIGURED.replace("[launch-template]\n", f'[launch-template]\nImageId = "{IMAGE}"\n')
+WRITTEN = PINNED + conf.EC2_DEFAULT
+# apply が新しく作る雛形
+SCAFFOLD = conf.scaffold(profile=True, ec2=True)
+# WRITTEN の IamInstanceProfile の行
 PROFILE_LINE = 'IamInstanceProfile = { Name = "${temt:name}" }\n'
 # WRITTEN の、DeviceIndex が 0 の要素の最後の行。要素に項目を足すときに、この後ろに書く
 LAST_OF_PRIMARY = "AssociatePublicIpAddress = true\n"
@@ -73,14 +77,20 @@ PUBLIC_SUBNETS = {
 SERVICE_IMAGES = {
     "Owners": ["self"],
     "Filters": [
-        {"Name": "tag:temt:service", "Values": ["dev-main"]},
-        {"Name": "state", "Values": ["available"]},
+        {"Name": "name", "Values": ["temt-dev-main-??????????"]},
+        {"Name": "state", "Values": ["available", "pending"]},
     ],
 }
-THE_IMAGE = {"Owners": ["self"], "Filters": [{"Name": "name", "Values": [IMAGE_NAME]}]}
+# Ubuntu 24.04 の公開 AMI の名前
+UBUNTU_NAME = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260901"
+# サービスの AMI が無く Ubuntu 24.04 を選んだときに、ImageId の行に添えること
+UBUNTU_NOTE = f"(Ubuntu 24.04; no {NAME} AMI in {REGION})"
 THE_GROUP = {"Filters": [{"Name": "group-name", "Values": [NAME]}]}
 # temt が管理していることを示すタグ
 MARK = [{"Key": "temt:service", "Value": "dev-main"}]
+# インスタンスロールに付くタグ。temt のタグと、このリージョンのタグ
+REGION_TAG = f"temt:region:{REGION}"
+ROLE_MARK = [*MARK, {"Key": REGION_TAG, "Value": ""}]
 # 別のサービスのものであることを示すタグ
 OTHER_MARK = [{"Key": "temt:service", "Value": "other"}]
 GROUP_TAGS = [{"Key": "Name", "Value": NAME}, *MARK]
@@ -95,13 +105,13 @@ TAGGED = [
 # ProxyCommand の先頭の env。既定の場所を ~ で始まる形で書く
 PLACES = f"env {CONF_DIR_ENV}='~/.config/temt' {SSH_DIR_ENV}='~/.ssh/temt'"
 
-# [[role.policy.ec2]] の既定から作るインラインポリシー temt-ec2 の名前と中身
+# [[role.ec2]] の既定から作るインラインポリシー temt-ec2 の名前と中身
 EC2 = policy.policy_name(conf.EC2)
-EC2_POLICY = policy.document(conf.ec2_default(), policy.variables(Service("dev-main")), "")
-# [[role.policy.jupyter]] を書いた設定ファイルの末尾と、それから作る temt-jupyter の名前と
+EC2_POLICY = policy.document(conf.ec2_default(), policy.variables(Service("dev-main")), ["", ""])
+# [[role.jupyter]] を書いた設定ファイルの末尾と、それから作る temt-jupyter の名前と
 # 中身。Effect は temt が補う
 STATEMENT = (
-    "\n[[role.policy.jupyter]]\n"
+    "\n[[role.jupyter]]\n"
     'Action = "ssm:GetParameter"\n'
     'Resource = "arn:aws:ssm:*:*:parameter/${temt:name}/*"\n'
 )
@@ -133,14 +143,10 @@ def in_primary(lines: str, text: str = WRITTEN) -> str:
 
 
 def before_role(lines: str) -> str:
-    """WRITTEN の [[role.policy.ec2]] の前に lines を足したもの。[launch-template] の
+    """WRITTEN の [[role.ec2]] の前に lines を足したもの。[launch-template] の
     テーブルの続きや、[role] を書くのに使う。
     """
-    return CONFIGURED + lines + conf.EC2_DEFAULT
-
-
-# apply が新しく作る設定ファイルの、見出しと例のコメントの間
-CREATED = WRITTEN
+    return PINNED + lines + conf.EC2_DEFAULT
 
 
 def write_conf(service: Service, text: str = WRITTEN) -> str:
@@ -241,7 +247,7 @@ def missing(stub: Stubber, method: str, code: str, **params: Any) -> None:
     )
 
 
-def a_role(tags: list[dict[str, str]] = MARK) -> dict[str, Any]:
+def a_role(tags: list[dict[str, str]] = ROLE_MARK) -> dict[str, Any]:
     """get-role と create-role が返す形。"""
     return {
         "Role": {
@@ -334,15 +340,34 @@ def public_subnet(stubs: Stubs) -> None:
     )
 
 
-def own_image(stubs: Stubs) -> None:
-    """手順 2 で、書かれていない ImageId に、サービスの AMI を選ぶ。"""
-    image = {"ImageId": IMAGE, "Name": IMAGE_NAME, "CreationDate": "2026-09-20T00:00:00.000Z"}
-    stubs.ec2.add_response("describe_images", {"Images": [image]}, SERVICE_IMAGES)
+def no_template(stubs: Stubs) -> None:
+    """起動テンプレートを読み、無いと分かる。"""
+    missing(
+        stubs.ec2, "describe_launch_template_versions", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE
+    )
 
 
-def chosen(stubs: Stubs, *, ipv6: bool = False) -> None:
-    """手順 2 で、書かれていない ImageId と SubnetId を AWS から選び、サブネットの IPv6 を
-    読む。サービスの AMI はまだ無いので、Ubuntu の公開 AMI になる。
+def own_image(stubs: Stubs, *, state: str = "available", older: bool = False) -> None:
+    """手順 4 で、起動テンプレートが無いので、サービスの最新の AMI を選ぶ。older なら、
+    それより古い available の AMI も並べる。
+    """
+    image = {**an_image(), "State": state, "CreationDate": "2026-09-20T00:00:00.000Z"}
+    images = [image]
+    if older:
+        old = {
+            **an_image(),
+            "ImageId": "ami-0aaaaaaaaaaaaaaaa",
+            "Name": f"{NAME}-2609010000",
+            "State": "available",
+            "CreationDate": "2026-09-01T00:00:00.000Z",
+        }
+        images = [old, image]
+    stubs.ec2.add_response("describe_images", {"Images": images}, SERVICE_IMAGES)
+
+
+def ubuntu(stubs: Stubs) -> None:
+    """手順 4 で、起動テンプレートが無く、サービスの AMI も無いので、Ubuntu 24.04 の公開 AMI を
+    選ぶ。
     """
     stubs.ec2.add_response("describe_images", {"Images": []}, SERVICE_IMAGES)
     stubs.ssm.add_response(
@@ -350,8 +375,30 @@ def chosen(stubs: Stubs, *, ipv6: bool = False) -> None:
         {"Parameter": {"Name": aws.UBUNTU_AMI_PARAMETER, "Value": IMAGE}},
         {"Name": aws.UBUNTU_AMI_PARAMETER},
     )
+    stubs.ec2.add_response(
+        "describe_images", {"Images": [{**an_image(), "Name": UBUNTU_NAME}]}, {"ImageIds": [IMAGE]}
+    )
+
+
+def chosen(stubs: Stubs, *, ipv6: bool = False) -> None:
+    """手順 2 で、書かれていない SubnetId を AWS から選び、サブネットの IPv6 を読む。手順 4 で、
+    起動テンプレートがまだ無いので AMI を選ぶ。サービスの AMI はまだ無いので、Ubuntu の公開
+    AMI になる。手順 5 は起動テンプレートを読み直さない。
+    """
     public_subnet(stubs)
     subnet(stubs, ipv6=ipv6)
+    no_template(stubs)
+    ubuntu(stubs)
+
+
+def kept(stubs: Stubs, data: dict[str, Any]) -> None:
+    """手順 2 で、書かれていない SubnetId を AWS から選び、サブネットの IPv6 を読む。手順 4 で、
+    起動テンプレート（既定バージョンの中身 data）を読み、その AMI を使う。
+    """
+    public_subnet(stubs)
+    subnet(stubs)
+    template_versions(stubs, data)
+    stubs.ec2.add_response("describe_images", {"Images": [an_image()]}, {"ImageIds": [IMAGE]})
 
 
 def built(
@@ -359,20 +406,26 @@ def built(
     *,
     group: str | None = GROUP,
     image: dict[str, Any] | None = None,
-    by_name: bool = False,
+    read_image: bool = True,
     subnet_id: str = SUBNET,
     vpc_id: str = VPC,
     stop: bool = False,
+    read_subnet: bool = False,
 ) -> None:
     """手順 4 で起動テンプレートの中身を組み立てるときに読むもの。
 
-    ImageId の AMI（by_name なら名前で引く）、SubnetId のサブネット、その VPC にある temt の
+    書いた ImageId の AMI（read_image が偽なら、ImageId を書いておらず、AMI は先に決めて
+    あるので読まない）、read_subnet なら SubnetId のサブネット（手順 2
+    で Ipv6AddressCount を決めるために読んでいれば、読み直さない）、その VPC にある temt の
     セキュリティグループ（group が None なら無い）。stop なら、ルートボリュームを確かめて
     止まるので、セキュリティグループは読まない。
     """
-    params = THE_IMAGE if by_name else {"ImageIds": [IMAGE]}
-    stubs.ec2.add_response("describe_images", {"Images": [image or an_image()]}, params)
-    subnet(stubs, subnet_id=subnet_id, vpc_id=vpc_id)
+    if read_image:
+        stubs.ec2.add_response(
+            "describe_images", {"Images": [image or an_image()]}, {"ImageIds": [IMAGE]}
+        )
+    if read_subnet:
+        subnet(stubs, subnet_id=subnet_id, vpc_id=vpc_id)
     if stop:
         return
     found = [] if group is None else [a_group(group, vpc_id)]
@@ -453,6 +506,15 @@ def group_in_place(stubs: Stubs, *rules: dict[str, Any]) -> None:
 
 def template_in_place(stubs: Stubs, data: dict[str, Any], *, number: int = 3) -> None:
     """手順 5 で、既定バージョン number の中身が data の起動テンプレートを読む。"""
+    template_versions(stubs, data, number=number)
+    template_tags(stubs)
+
+
+def template_versions(stubs: Stubs, data: dict[str, Any], *, number: int = 3) -> None:
+    """起動テンプレートのバージョンを読む。既定バージョン number の中身が data。
+
+    ImageId を書いていなければ手順 4 で、書いていれば手順 5 で読む。
+    """
     stubs.ec2.add_response(
         "describe_launch_template_versions",
         {
@@ -467,6 +529,10 @@ def template_in_place(stubs: Stubs, data: dict[str, Any], *, number: int = 3) ->
         },
         THE_TEMPLATE,
     )
+
+
+def template_tags(stubs: Stubs) -> None:
+    """手順 5 で、起動テンプレート自身のタグを読む。"""
     stubs.ec2.add_response(
         "describe_launch_templates",
         {
@@ -518,9 +584,10 @@ def in_place(stubs: Stubs, data: dict[str, Any] | None = None) -> None:
     template_in_place(stubs, template_data() if data is None else data)
 
 
-def nothing_there(stubs: Stubs) -> None:
+def nothing_there(stubs: Stubs, *, template: bool = True) -> None:
     """手順 5 で、ロール、temt-ec2、インスタンスプロファイル、セキュリティグループ、起動
-    テンプレートがどれも無いときに読むもの。
+    テンプレートがどれも無いときに読むもの。template が偽なら、起動テンプレートは手順 4 で
+    読んであるので読まない。
     """
     missing(stubs.iam, "get_role", resources.NO_SUCH_ENTITY, RoleName=NAME)
     missing(stubs.iam, "get_role_policy", resources.NO_SUCH_ENTITY, RoleName=NAME, PolicyName=EC2)
@@ -528,9 +595,14 @@ def nothing_there(stubs: Stubs) -> None:
     missing(stubs.iam, "list_attached_role_policies", resources.NO_SUCH_ENTITY, RoleName=NAME)
     missing(stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME)
     stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": []}, THE_GROUP)
-    missing(
-        stubs.ec2, "describe_launch_template_versions", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE
-    )
+    if template:
+        no_template(stubs)
+
+
+def no_iam(stubs: Stubs) -> None:
+    """[role] の無い apply が、手放すロールとインスタンスプロファイルが無いことを読む。"""
+    missing(stubs.iam, "get_role", resources.NO_SUCH_ENTITY, RoleName=NAME)
+    missing(stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME)
 
 
 def iam_made(stubs: Stubs) -> None:
@@ -538,7 +610,11 @@ def iam_made(stubs: Stubs) -> None:
     stubs.iam.add_response(
         "create_role",
         a_role(),
-        {"RoleName": NAME, "AssumeRolePolicyDocument": resources.TRUST_POLICY, "Tags": MARK},
+        {
+            "RoleName": NAME,
+            "AssumeRolePolicyDocument": resources.TRUST_POLICY,
+            "Tags": ROLE_MARK,
+        },
     )
     stubs.iam.add_response(
         "put_role_policy",
@@ -592,12 +668,26 @@ def made_from_scratch(stubs: Stubs, data: dict[str, Any] | None = None) -> None:
     data は作る起動テンプレートの中身で、省けば template_data()。
     """
     chosen(stubs)
-    built(stubs, group=None)
+    built(stubs, group=None, read_image=False)
     validated(stubs, EC2_POLICY)
-    nothing_there(stubs)
+    nothing_there(stubs, template=False)
     iam_made(stubs)
     group_made(stubs)
     template_made(stubs, template_data() if data is None else data)
+
+
+def scaffold_in_place(stubs: Stubs) -> None:
+    """雛形の設定ファイルで、AWS のものがすべて揃っているときに読むものを積む。
+
+    雛形は ImageId も SubnetId も書かないので、SubnetId はそのたびに AWS から選び、AMI は
+    起動テンプレートのものを使う。
+    """
+    kept(stubs, template_data())
+    built(stubs, read_image=False)
+    validated(stubs, EC2_POLICY)
+    iam_in_place(stubs)
+    group_in_place(stubs)
+    template_tags(stubs)
 
 
 def test_everything_is_made_when_nothing_exists(
@@ -605,18 +695,19 @@ def test_everything_is_made_when_nothing_exists(
 ) -> None:
     """設定ファイルも AWS のものも無いところから、すべてを作る。
 
-    手順 2 は、書かれていない項目を決めて新しいファイルに書き、temt のインスタンス
-    プロファイルを指す IamInstanceProfile と [[role.policy.ec2]] の既定も書く。サービスの
-    AMI はまだ無いので、Ubuntu の公開 AMI を ID で書く。手順 5 は、ロール、そのポリシー、
-    インスタンスプロファイル、セキュリティグループ、起動テンプレートを、この順に作る。
-    起動テンプレートには、作ったセキュリティグループの ID を入れる。
+    手順 2 は、設定ファイルの代わりに雛形を読み、書かれていない項目を決める。雛形は、
+    temt のインスタンスプロファイルを指す IamInstanceProfile と [[role.ec2]] の既定を持つ。
+    サービスの AMI はまだ無いので、Ubuntu の公開 AMI を使う。手順 5 は、ロール、その
+    ポリシー、インスタンスプロファイル、セキュリティグループ、起動テンプレートを、この順に
+    作る。起動テンプレートには、作ったセキュリティグループの ID を入れる。更新では、まず
+    雛形を書く。
     """
     made_from_scratch(aws_stubs)
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == conf.HEADER + CREATED + conf.EXAMPLE
+    assert service.conf_path.read_text(encoding="utf-8") == SCAFFOLD
     # 手順 3。サービスのコマンドが書かれる
     assert service.command_path.read_text(encoding="utf-8").endswith(
         'exec temt --svc dev-main "$@"\n'
@@ -634,20 +725,10 @@ def test_everything_is_made_when_nothing_exists(
     assert user_config.startswith(f"{home.MARK}\nInclude ~/.ssh/temt/config\n")
     out = capsys.readouterr().out
     # 確認の前に、変えるものを手順の順に見せる
-    shown = out[: out.index("wrote AwsRegion")]
-    primary = "launch-template.NetworkInterfaces[DeviceIndex=0]"
+    shown = out[: out.index(f"wrote {CONF_SHOWN}")]
     assert heads(shown) == [
-        ["+", "conf", "AwsRegion"],
-        ["+", "conf", "launch-template.ImageId"],
-        ["+", "conf", "launch-template.InstanceType"],
-        ["+", "conf", f"{primary}.SubnetId"],
-        ["+", "conf", f"{primary}.AssociatePublicIpAddress"],
-        ["+", "conf", "launch-template.MetadataOptions.HttpTokens"],
-        ["+", "conf", "launch-template.MetadataOptions.InstanceMetadataTags"],
-        ["+", "conf", "launch-template.InstanceInitiatedShutdownBehavior"],
-        ["+", "conf", "launch-template.CreditSpecification.CpuCredits"],
-        ["+", "conf", "launch-template.IamInstanceProfile"],
-        ["+", "conf", "role.policy.ec2"],
+        ["+", "conf", "launch-template.IamInstanceProfile.Name"],
+        ["+", "conf", "role.ec2"],
         ["+", "dir", "~/.ssh"],
         ["+", "dir", "~/.ssh/temt"],
         ["+", "dir", "~/.ssh/temt/keys"],
@@ -661,14 +742,13 @@ def test_everything_is_made_when_nothing_exists(
         ["+", "ssh-host", NAME],
         ["+", "ssh-include", "~/.ssh/config"],
     ]
+    assert details(shown, "conf") == ['+ "${temt:name}"', "+ (default)"]
     assert details(shown, "security-group") == [f"+ in {VPC}"]
+    # サービスの AMI がまだ無いので Ubuntu 24.04 を選び、そのわけを添える
+    assert details(shown, "launch-template") == [f"+ ImageId: {IMAGE} {UBUNTU_NOTE}"]
     # 更新では、書いたものと作ったものを、この順に知らせる
     reports = [
-        f'wrote AwsRegion = "{REGION}" in {tilde(service.conf_path)}',
-        f'wrote launch-template.ImageId = "{IMAGE}" in {tilde(service.conf_path)}',
-        f'wrote launch-template.IamInstanceProfile = {{ Name = "${{temt:name}}" }} in '
-        f"{tilde(service.conf_path)}",
-        f"wrote the default [[role.policy.{conf.EC2}]] in {tilde(service.conf_path)}",
+        f"wrote {CONF_SHOWN}",
         "created ~/.ssh/temt (mode 700)",
         f"wrote ~/.local/bin/{NAME}",
         f"role {NAME}: created",
@@ -684,15 +764,16 @@ def test_everything_is_made_when_nothing_exists(
 
 
 def test_a_new_config_file_has_the_documented_layout(aws_stubs: Stubs, service: Service) -> None:
-    """apply が新しく作る設定ファイルは、docs/conf.md の例と同じく、テーブルと要素の間に
-    空行を置く。
-    """
+    """apply が新しく作る設定ファイルは、docs/conf.md の雛形と同じもの。"""
     made_from_scratch(aws_stubs)
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == conf.HEADER + CREATED + conf.EXAMPLE
+    text = service.conf_path.read_text(encoding="utf-8")
+    assert text == SCAFFOLD
+    docs = (Path(__file__).parent.parent / "docs" / "conf.md").read_text(encoding="utf-8")
+    assert f"```toml\n{text}```\n" in docs
 
 
 def test_a_second_apply_finds_no_differences(
@@ -700,10 +781,10 @@ def test_a_second_apply_finds_no_differences(
 ) -> None:
     """作ったものを読んで比べ直しても、違いは無い。確認も求めず、何も書かない。
 
-    例のコメントを足すのは、apply がファイルを作ったときだけである。
+    雛形に書いていない値は、そのたびに同じく決まる。
     """
     made_from_scratch(aws_stubs)
-    in_place(aws_stubs)
+    scaffold_in_place(aws_stubs)
     user_config = Path.home() / ".ssh" / "config"
 
     apply.run(service, yes=True)
@@ -721,60 +802,50 @@ def test_a_second_apply_finds_no_differences(
         user_config.read_text(),
         service.conf_path.read_text(),
     ) == after_first
-    assert after_first[2].count(conf.EXAMPLE) == 1
     captured = capsys.readouterr()
     assert captured.out.endswith(f"{NAME}: no differences\n")
     assert len(captured.out.splitlines()) == 1
     assert captured.err == ""
 
 
-def test_a_file_written_ahead_gets_no_instance_profile(aws_stubs: Stubs, service: Service) -> None:
-    """先に作ったファイルを、apply が完成させる。
+def test_a_file_written_ahead_is_left_as_it_is(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """先に作ったファイルには、何も書かない。書かれていない値は、そのたびに決める。
 
-    書かれていた値とコメントは残る。IamInstanceProfile は、ファイルが無いときにしか書かない
-    ので、インスタンスプロファイル無しで起動するテンプレートになる。インスタンスロールにも
-    インスタンスプロファイルにも触らず（IAM の応答は積んでいない）、[[role.policy.ec2]] も
-    書かない。サービスの AMI があるので、ImageId にはその名前を書く。
+    IamInstanceProfile はファイルが無いときにしか書かないので、インスタンスプロファイル
+    無しで起動するテンプレートになり、そのことを警告する。[role] も無いので、インスタンス
+    ロールとインスタンスプロファイルは、手放すものが無いことを読むだけである。サービスの
+    AMI があるので、それを使う。
     """
+    text = '# mine\n[launch-template]\nInstanceType = "t3.small"\n'
     service.conf_path.parent.mkdir(parents=True, exist_ok=True)
-    service.conf_path.write_text(
-        '# mine\n[launch-template]\nInstanceType = "t3.small"\n', encoding="utf-8"
-    )
-    own_image(aws_stubs)
+    service.conf_path.write_text(text, encoding="utf-8")
     public_subnet(aws_stubs)
     subnet(aws_stubs)
-    built(aws_stubs, group=None, by_name=True)
+    no_template(aws_stubs)
+    own_image(aws_stubs)
+    built(aws_stubs, group=None, read_image=False)
     aws_stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": []}, THE_GROUP)
-    missing(
-        aws_stubs.ec2,
-        "describe_launch_template_versions",
-        resources.NO_SUCH_TEMPLATE,
-        **THE_TEMPLATE,
-    )
+    no_iam(aws_stubs)
     group_made(aws_stubs)
     template_made(aws_stubs, template_data(InstanceType="t3.small", IamInstanceProfile=None))
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    text = service.conf_path.read_text(encoding="utf-8")
-    assert text.startswith(f'# mine\nAwsRegion = "{REGION}"\n\n[launch-template]\n')
-    assert 'InstanceType = "t3.small"\n' in text
-    assert f'ImageId = "{IMAGE_NAME}"\n' in text
-    assert "IamInstanceProfile" not in text
-    assert "role" not in text
-    values = conf.load(service)
-    assert values.launch_template == {
-        "InstanceType": "t3.small",
-        "ImageId": IMAGE_NAME,
-        "NetworkInterfaces": [
-            {"DeviceIndex": 0, "SubnetId": SUBNET, "AssociatePublicIpAddress": True}
-        ],
-        "MetadataOptions": {"HttpTokens": "required", "InstanceMetadataTags": "enabled"},
-        "InstanceInitiatedShutdownBehavior": "terminate",
-        "CreditSpecification": {"CpuCredits": "unlimited"},
-    }
-    assert not values.role
+    assert service.conf_path.read_text(encoding="utf-8") == text
+    captured = capsys.readouterr()
+    assert NO_ROLE_WARNING in captured.err
+    assert "conf" not in [head[1] for head in heads(captured.out)]
+    assert details(captured.out, "launch-template") == [f"+ ImageId: {IMAGE} ({IMAGE_NAME})"]
+
+
+# IamInstanceProfile が書かれていないときの警告
+NO_ROLE_WARNING = (
+    "temt: warning: no instance role (no launch-template.IamInstanceProfile); "
+    "start may wait for the SSM agent until its deadline\n"
+)
 
 
 def test_nothing_changes_when_everything_matches(
@@ -800,7 +871,7 @@ def test_nothing_changes_when_everything_matches(
 
 
 def jupyter_in_place(stubs: Stubs, *findings: dict[str, Any]) -> None:
-    """WRITTEN に [[role.policy.jupyter]] を足した設定ファイルで読むもの。temt-jupyter は
+    """WRITTEN に [[role.jupyter]] を足した設定ファイルで読むもの。temt-jupyter は
     ロールにまだ無く、ほかは揃っている。findings は temt-jupyter の検査の指摘。
     """
     subnet(stubs)
@@ -884,7 +955,7 @@ def test_an_error_in_the_role_statements_stops_before_aws_changes(
     # ロールの応答は積んでいないので、触れていれば Stubber が失敗する
     aws_stubs.done()
     assert (
-        "temt: role.policy.jupyter[0].Action: ERROR INVALID_ACTION: "
+        f"temt: {CONF_SHOWN}: role.jupyter[0].Action: ERROR INVALID_ACTION: "
         "The action ssm:GetParameter does not exist."
     ) in capsys.readouterr().err
     assert not (ssh_dir() / "config").exists()
@@ -1100,55 +1171,365 @@ def test_the_group_of_temt_written_by_its_id_gets_the_rules(
 def test_an_instance_profile_of_another_leaves_iam_alone(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """IamInstanceProfile が temt のものを指さなければ、IAM には何もしない。
+    """[role] が無く、IamInstanceProfile が temt のものを指さなければ、IAM は、手放す
+    ロールとインスタンスプロファイルが無いことを読むだけである。
 
-    IAM と ValidatePolicy の応答は積んでいないので、呼べば Stubber が失敗する。
-    [[role.policy.ec2]] の既定も書かない。
+    ValidatePolicy の応答は積んでいないので、呼べば Stubber が失敗する。
     """
     text = write_conf(
-        service, edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', CONFIGURED)
+        service, edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', PINNED)
     )
     make_key()
     subnet(aws_stubs)
     built(aws_stubs)
     group_in_place(aws_stubs)
     template_in_place(aws_stubs, template_data(IamInstanceProfile={"Name": "other"}))
+    no_iam(aws_stubs)
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
     assert service.conf_path.read_text(encoding="utf-8") == text
-    assert aws_heads(capsys.readouterr().out) == []
+    captured = capsys.readouterr()
+    assert aws_heads(captured.out) == []
+    assert captured.err == ""
 
 
-@pytest.mark.parametrize(
-    "profile",
-    ['IamInstanceProfile = { Name = "other" }\n', ""],
-    ids=["another instance profile", "no instance profile"],
-)
-def test_the_role_table_without_the_instance_profile_of_temt_stops(
-    aws_stubs: Stubs, service: Service, profile: str
-) -> None:
-    """temt のインスタンスプロファイルを指していない（書いていないときも含む）のに [role] が
-    あれば、項目ごとにそのファイルを挙げて、AWS に何も書かずに止まる。共通ファイルの
-    項目も同じである。
+# ほかのリージョンのタグ
+THERE_TAG = "temt:region:us-west-2"
+
+
+@pytest.fixture
+def calls(ec2: EC2Client, iam: IAMClient) -> list[str]:
+    """EC2 と IAM のクライアントが呼んだ API を、呼ばれた順に集める。
+
+    Stubber が見るのはクライアントごとの順序だけなので、クライアントをまたぐ順序は
+    これで確かめる。
     """
-    write_defaults(f'[role]\nManagedPolicyArns = ["{S3_READ}"]\n')
-    _ = write_conf(service, edited(PROFILE_LINE, profile, CONFIGURED) + STATEMENT)
+    made: list[str] = []
+
+    def note(model: Any, **kwargs: Any) -> None:
+        _ = kwargs
+        made.append(model.name)
+
+    for client in (ec2, iam):
+        client.meta.events.register("provide-client-params", note)
+    return made
+
+
+def test_without_role_the_tag_of_the_region_comes_off_and_another_region_keeps_the_role(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str], calls: list[str]
+) -> None:
+    """[role] が無ければ、ロールからこのリージョンのタグを外す。ほかのリージョンのタグが
+    残れば、ロールもインスタンスプロファイルも残す。diff は、外すことと残すことを、使う
+    リージョンを添えて見せる。タグを外すのは、起動テンプレートを揃えた後である。
+    """
+    _ = write_conf(
+        service, edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', PINNED)
+    )
+    set_up_here(service)
+    tags = [*ROLE_MARK, {"Key": THERE_TAG, "Value": ""}]
+    for _ in range(2):
+        subnet(aws_stubs)
+        built(aws_stubs)
+        group_in_place(aws_stubs)
+        template_in_place(
+            aws_stubs,
+            template_data(IamInstanceProfile={"Name": "other"}, InstanceType="t3.small"),
+        )
+        aws_stubs.iam.add_response("get_role", a_role(tags), {"RoleName": NAME})
+
+    apply.diff(service)
+
+    out = capsys.readouterr().out
+    assert details(out, "role") == [f"~ untag {REGION_TAG}; kept: used in us-west-2"]
+    assert aws_heads(out)[-1] == ["~", "role", NAME]
+    new_version(aws_stubs, template_data(IamInstanceProfile={"Name": "other"}))
+    aws_stubs.iam.add_response("get_role", a_role(tags), {"RoleName": NAME})
+    aws_stubs.iam.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [REGION_TAG]})
+    calls.clear()
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert calls[-5:] == [
+        "CreateLaunchTemplateVersion",
+        "ModifyLaunchTemplate",
+        "DeleteLaunchTemplateVersions",
+        "GetRole",
+        "UntagRole",
+    ]
+    assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()[-3:]] == [
+        f"launch template {TEMPLATE}: updated (version 4)",
+        f"role {NAME}: untagged {REGION_TAG}",
+        f"role {NAME}: kept (used in us-west-2)",
+    ]
+
+
+def test_without_role_the_last_region_deletes_the_role_and_the_instance_profile(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[role] が無く、ほかのリージョンのタグも無ければ、ロールとインスタンスプロファイルを
+    消す。diff は、消すロールに付いたポリシーと、インスタンスプロファイルを見せる。
+    """
+    _ = write_conf(
+        service, edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', PINNED)
+    )
+    set_up_here(service)
     subnet(aws_stubs)
     built(aws_stubs)
+    group_in_place(aws_stubs)
+    template_in_place(aws_stubs, template_data(IamInstanceProfile={"Name": "other"}))
+    aws_stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": [EC2]}, {"RoleName": NAME})
+    aws_stubs.iam.add_response(
+        "list_attached_role_policies", attached(SSM_CORE), {"RoleName": NAME}
+    )
+    aws_stubs.iam.add_response(
+        "get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME}
+    )
 
-    with pytest.raises(TemtError) as caught:
+    apply.diff(service)
+
+    aws_stubs.done()
+    out = capsys.readouterr().out
+    assert aws_heads(out) == [["-", "role", NAME], ["-", "instance-profile", NAME]]
+    assert details(out, "role") == [
+        f"- inline policies: {EC2}; managed policies: {SSM_CORE}",
+    ]
+
+
+def test_an_empty_role_releases_the_role_as_no_role_does(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """中身の無い [role] は書かれていないのと同じで、ロールを揃えずに手放す側に回る。"""
+    _ = write_conf(
+        service,
+        edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', PINNED)
+        + "\n[role]\nManagedPolicyArns = []\n",
+    )
+    set_up_here(service)
+    subnet(aws_stubs)
+    built(aws_stubs)
+    group_in_place(aws_stubs)
+    template_in_place(aws_stubs, template_data(IamInstanceProfile={"Name": "other"}))
+    aws_stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+    aws_stubs.iam.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+    missing(
+        aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME
+    )
+
+    apply.diff(service)
+
+    aws_stubs.done()
+    assert aws_heads(capsys.readouterr().out) == [["-", "role", NAME]]
+
+
+def test_without_role_a_role_that_cannot_be_deleted_stops_after_the_template(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """消せるかは確認の前には確かめない。消せないロールなら、apply は起動テンプレートを
+    揃えた後で、destroy と同じ誤りで止まる。
+    """
+    _ = write_conf(
+        service, edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "other" }\n', PINNED)
+    )
+    set_up_here(service)
+    subnet(aws_stubs)
+    built(aws_stubs)
+    group_in_place(aws_stubs)
+    template_in_place(
+        aws_stubs, template_data(IamInstanceProfile={"Name": "other"}, InstanceType="t3.small")
+    )
+    aws_stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
+    aws_stubs.iam.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+    aws_stubs.iam.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+    missing(
+        aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME
+    )
+    new_version(aws_stubs, template_data(IamInstanceProfile={"Name": "other"}))
+    aws_stubs.iam.add_response("get_role", a_role(), {"RoleName": NAME})
+    aws_stubs.iam.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [REGION_TAG]})
+    aws_stubs.iam.add_response(
+        "list_instance_profiles_for_role",
+        {
+            "InstanceProfiles": [
+                {**a_profile([NAME])["InstanceProfile"], "InstanceProfileName": "shared"}
+            ]
+        },
+        {"RoleName": NAME},
+    )
+
+    with pytest.raises(
+        TemtError, match=r"also in the instance profile shared; .* run apply again$"
+    ):
         apply.run(service, yes=True)
 
     aws_stubs.done()
+    out = capsys.readouterr().out
+    assert aws_heads(out) == [["~", "launch-template", TEMPLATE], ["-", "role", NAME]]
+    assert f"launch template {TEMPLATE}: updated (version 4)" in out
+
+
+@pytest.mark.parametrize(
+    ("profile", "data"),
+    [
+        ('IamInstanceProfile = { Name = "other" }\n', {"Name": "other"}),
+        ("", None),
+    ],
+    ids=["another instance profile", "no instance profile"],
+)
+def test_the_role_is_made_whatever_the_instance_profile_points_at(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    profile: str,
+    data: dict[str, str] | None,
+) -> None:
+    """[role] があれば、IamInstanceProfile がどこを指しても（書いていなくても）、temt の
+    インスタンスロールとインスタンスプロファイルを揃える。インスタンスに付けるかは
+    IamInstanceProfile で決まる。書いていなければ、インスタンスロールが付かないことを警告する。
+    """
+    _ = write_conf(service, edited(PROFILE_LINE, profile))
+    make_key()
+    in_place(aws_stubs, template_data(IamInstanceProfile=data))
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    captured = capsys.readouterr()
+    assert aws_heads(captured.out) == []
+    assert captured.err == ("" if profile else NO_ROLE_WARNING)
+
+
+@pytest.mark.parametrize("command", ["apply", "diff"])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        pytest.param(PROFILE_LINE, id="variable"),
+        pytest.param(f'IamInstanceProfile.Name = "{NAME}"\n', id="name"),
+        pytest.param(
+            f'IamInstanceProfile.Arn = "arn:aws:iam::123456789012:instance-profile/{NAME}"\n',
+            id="arn",
+        ),
+    ],
+)
+def test_the_instance_profile_of_temt_without_role_stops(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    profile: str,
+) -> None:
+    """temt のインスタンスプロファイルを指すのに、どのファイルにも [role] が無ければ、AWS を
+    読む前に、IamInstanceProfile を書いたファイルを挙げて止まる。
+    """
+    text = write_conf(service, edited(PROFILE_LINE, profile, PINNED))
+
+    with pytest.raises(TemtError) as caught:
+        if command == "apply":
+            apply.run(service, yes=True)
+        else:
+            apply.diff(service)
+
+    # 応答を 1 つも積んでいないので、AWS を読んでいれば Stubber が失敗する
+    aws_stubs.done()
     assert str(caught.value) == (
-        f"launch-template.IamInstanceProfile does not point at the instance profile {NAME} that "
-        f"temt manages, so [role] cannot be used: role.policy.jupyter in {CONF_SHOWN}, "
-        f"role.ManagedPolicyArns in {DEFAULTS_SHOWN}; remove them, or move the instance role "
-        "under temt with 'temt role import --svc dev-main'"
+        f"{CONF_SHOWN}: launch-template.IamInstanceProfile points at {NAME}, but there is no [role]"
     )
-    assert not service.command_path.exists()
+    assert service.conf_path.read_text(encoding="utf-8") == text
+    assert capsys.readouterr().out == ""
+
+
+def test_the_role_check_names_the_common_file(aws_stubs: Stubs, service: Service) -> None:
+    """IamInstanceProfile を共通ファイルに書いていれば、共通ファイルを挙げる。"""
+    write_defaults('[launch-template]\nIamInstanceProfile.Name = "${temt:name}"\n')
+    _ = write_conf(service, edited(PROFILE_LINE, "", PINNED))
+
+    with pytest.raises(TemtError) as caught:
+        apply.diff(service)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"{DEFAULTS_SHOWN}: launch-template.IamInstanceProfile points at {NAME}, "
+        "but there is no [role]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("top", "role"),
+    [
+        pytest.param("", "\n[role]\nManagedPolicyArns = []\n", id="empty role"),
+        pytest.param("Defaults = false\n", "", id="role only in the common file"),
+    ],
+)
+def test_a_role_that_does_not_count_stops_the_instance_profile_of_temt(
+    aws_stubs: Stubs, service: Service, top: str, role: str
+) -> None:
+    """中身の無い [role] は書かれていないのと同じ。Defaults = false なら共通ファイルの
+    [role] は効かない。どちらも temt のインスタンスプロファイルを指していれば止まる。"""
+    if top:
+        write_defaults(f'[role]\nManagedPolicyArns = ["{S3_READ}"]\n')
+    _ = write_conf(service, top + PINNED + role)
+
+    with pytest.raises(TemtError, match=r"points at temt-dev-main, but there is no \[role\]$"):
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+
+
+@pytest.mark.parametrize("wait", [True, False])
+def test_diff_warns_without_an_instance_profile_unless_ssm_is_not_awaited(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str], wait: bool
+) -> None:
+    """IamInstanceProfile が無ければ、diff も警告する。WaitForSsm = false なら警告しない。"""
+    top = "" if wait else "WaitForSsm = false\n"
+    _ = write_conf(service, top + edited(PROFILE_LINE, "", PINNED))
+    set_up_here(service)
+    subnet(aws_stubs)
+    built(aws_stubs)
+    group_in_place(aws_stubs)
+    template_in_place(aws_stubs, template_data(IamInstanceProfile=None))
+    no_iam(aws_stubs)
+
+    apply.diff(service)
+
+    aws_stubs.done()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (NO_ROLE_WARNING in captured.err) is wait
+
+
+def test_a_role_in_the_common_file_is_joined(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """共通ファイルの同じ名前のポリシーは、置き換えずにつなげる。誤りは、Statement を書いた
+    ファイルと、その中での位置で挙げる。"""
+    write_defaults(STATEMENT)
+    _ = write_conf(service, edited(PROFILE_LINE, PROFILE_LINE, PINNED) + STATEMENT)
+    subnet(aws_stubs)
+    built(aws_stubs)
+    joined = {**ROLE_POLICY, "Statement": ROLE_POLICY["Statement"] * 2}
+
+    def at(index: int) -> dict[str, Any]:
+        path = [{"value": "Statement"}, {"index": index}, {"value": "Action"}]
+        span = {
+            "start": {"line": 0, "column": 0, "offset": 0},
+            "end": {"line": 0, "column": 1, "offset": 1},
+        }
+        return {**a_finding("ERROR", "X"), "locations": [{"path": path, "span": span}]}
+
+    validated(aws_stubs, joined, at(0), at(1))
+
+    with pytest.raises(TemtError, match=r"found 2 error\(s\) in the role policy temt-jupyter$"):
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert capsys.readouterr().err.splitlines() == [
+        f"temt: {DEFAULTS_SHOWN}: role.jupyter[0].Action: ERROR X: details of X",
+        f"temt: {CONF_SHOWN}: role.jupyter[0].Action: ERROR X: details of X",
+    ]
 
 
 def test_managed_policies_are_attached_and_detached(
@@ -1212,13 +1593,13 @@ def test_a_role_or_instance_profile_of_another_service_stops(
     assert not service.command_path.exists()
 
 
-def test_the_ipv6_of_the_subnet_is_written_and_goes_to_the_template(
+def test_the_ipv6_of_the_subnet_goes_to_the_template(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Ipv6AddressCount が無く、サブネットに IPv6 の CIDR が結び付いていれば、1 を書き、
-    起動テンプレートにも入れる。
+    """Ipv6AddressCount が無く、サブネットに IPv6 の CIDR が結び付いていれば、1 を起動
+    テンプレートに入れる。設定ファイルには書かない。
     """
-    _ = write_conf(service)
+    text = write_conf(service)
     make_key()
     subnet(aws_stubs, ipv6=True)
     built(aws_stubs)
@@ -1231,11 +1612,9 @@ def test_the_ipv6_of_the_subnet_is_written_and_goes_to_the_template(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == in_primary("Ipv6AddressCount = 1\n")
+    assert service.conf_path.read_text(encoding="utf-8") == text
     out = capsys.readouterr().out
-    key = "launch-template.NetworkInterfaces[DeviceIndex=0].Ipv6AddressCount"
-    assert details(out, "conf") == ["+ 1"]
-    assert [line.split()[2] for line in out.splitlines() if line.startswith("+   conf")] == [key]
+    assert details(out, "conf") == []
     assert details(out, "launch-template") == [
         "~ NetworkInterfaces[DeviceIndex=0].Ipv6AddressCount: - -> 1"
     ]
@@ -1245,10 +1624,13 @@ def test_the_ipv6_of_the_subnet_is_written_and_goes_to_the_template(
 def test_a_written_ipv6_address_count_is_kept(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Ipv6AddressCount を書いていれば、サブネットを見ずに、その値を使う。"""
+    """Ipv6AddressCount を書いていれば、IPv6 を決めるためにはサブネットを見ず、その値を使う。
+
+    サブネットは、起動テンプレートを組み立てるときに読む。
+    """
     text = write_conf(service, in_primary("Ipv6AddressCount = 0\n"))
     make_key()
-    built(aws_stubs)
+    built(aws_stubs, read_subnet=True)
     validated(aws_stubs, EC2_POLICY)
     iam_in_place(aws_stubs)
     group_in_place(aws_stubs)
@@ -1261,23 +1643,21 @@ def test_a_written_ipv6_address_count_is_kept(
     assert "launch-template" not in capsys.readouterr().out
 
 
-def test_a_deleted_credit_specification_is_written_back(
+def test_a_deleted_credit_specification_is_filled(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """T 系の InstanceType で CreditSpecification の行を消せば、unlimited を書き戻す。"""
+    """T 系の InstanceType で CreditSpecification の行を消せば、unlimited で埋める。
+    起動テンプレートは変わらず、設定ファイルにも書かない。"""
     table = '\n[launch-template.CreditSpecification]\nCpuCredits = "unlimited"\n'
-    _ = write_conf(service, edited(table, ""))
+    text = write_conf(service, edited(table, ""))
     make_key()
     in_place(aws_stubs)
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    # テーブルを足すのは、[launch-template] の中の最後のテーブルの後ろである
-    assert service.conf_path.read_text(encoding="utf-8") == WRITTEN
-    out = capsys.readouterr().out
-    assert details(out, "conf") == ['+ "unlimited"']
-    assert details(out, "launch-template") == []
+    assert service.conf_path.read_text(encoding="utf-8") == text
+    assert aws_heads(capsys.readouterr().out) == []
 
 
 def test_a_credit_specification_left_on_another_type_is_kept(
@@ -1299,126 +1679,15 @@ def test_a_credit_specification_left_on_another_type_is_kept(
     assert details(out, "launch-template") == ["~ InstanceType: t3.micro -> m7i.large"]
 
 
-@pytest.mark.parametrize(
-    ("instance_type", "credits"),
-    [
-        ("t3.micro", "unlimited"),
-        ("t4g.small", "unlimited"),
-        ("t2.nano", "unlimited"),
-        ("m7i.large", None),
-        ("c7g.medium", None),
-        ("t1.micro", None),
-        ("trn1.2xlarge", None),
-    ],
-)
-def test_cpu_credits_are_written_only_for_the_burstable_types(
-    ec2: EC2Client, ssm: SSMClient, service: Service, instance_type: str, credits: str | None
+def test_an_inline_table_is_read_as_it_is(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """CPU クレジットは T 系の型でしか意味を持たないので、ほかの型には書かない。
-
-    t1 は CPU クレジットを持たない。trn1 のように t で始まっても、続くのが数字でなければ
-    T 系ではない。AWS は読まない（Stubber に何も積んでいない）。
-    """
-    values = Conf(
-        AwsRegion=REGION,
-        launch_template={
-            "ImageId": IMAGE,
-            "InstanceType": instance_type,
-            "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": SUBNET, "Ipv6AddressCount": 0}],
-        },
-    )
-    with Stubber(ec2), Stubber(ssm):
-        items = dict(apply._conf_items(ec2, ssm, service, values, new=False))
-    assert items.get("launch-template.CreditSpecification.CpuCredits") == credits
-
-
-def test_an_existing_network_interface_gets_no_subnet(
-    ec2: EC2Client, ssm: SSMClient, service: Service
-) -> None:
-    """DeviceIndex が 0 の要素が既存のネットワークインターフェースを付けるなら、SubnetId、
-    AssociatePublicIpAddress、Ipv6AddressCount は書かず、サブネットも読まない。
-    """
-    values = Conf(
-        AwsRegion=REGION,
-        launch_template={
-            "ImageId": IMAGE,
-            "InstanceType": "t3.micro",
-            "NetworkInterfaces": [
-                {"DeviceIndex": 0, "NetworkInterfaceId": "eni-0123456789abcdef0"}
-            ],
-        },
-    )
-    with Stubber(ec2), Stubber(ssm):
-        items = dict(apply._conf_items(ec2, ssm, service, values, new=True))
-    assert [key for key in items if "NetworkInterfaces" in key] == []
-    assert items["launch-template.IamInstanceProfile"] == {"Name": "${temt:name}"}
-
-
-@pytest.mark.parametrize("command", ["apply", "diff"])
-def test_a_value_that_would_go_into_an_inline_table_stops(
-    aws_stubs: Stubs, service: Service, command: str
-) -> None:
-    """書き足す先がインラインテーブルの中なら、手で書くよう告げて、何も書かずに止まる。"""
+    """インラインテーブルで書いた項目にも、書かれていない値を埋める。ファイルには書かない。"""
     text = write_conf(
         service,
         edited(
             PROFILE_LINE,
             PROFILE_LINE + 'MetadataOptions = { HttpTokens = "required" }\n',
-            edited(METADATA_TABLE, ""),
-        ),
-    )
-    # 手順 2 は、MetadataOptions の前に IPv6 を見る
-    subnet(aws_stubs)
-
-    with pytest.raises(TemtError) as caught:
-        if command == "apply":
-            apply.run(service, yes=True)
-        else:
-            apply.diff(service)
-
-    aws_stubs.done()
-    key = "launch-template.MetadataOptions.InstanceMetadataTags"
-    assert str(caught.value) == (
-        f"cannot write {key} in {CONF_SHOWN}, as it would go into an inline table or array; "
-        f'write {key} = "enabled" there by hand and run apply again'
-    )
-    assert service.conf_path.read_text(encoding="utf-8") == text
-    assert not service.command_path.exists()
-
-
-def test_a_value_that_would_go_into_an_inline_array_stops(
-    aws_stubs: Stubs, service: Service
-) -> None:
-    """NetworkInterfaces をインラインの配列で書けば、その要素にも書き足せない。"""
-    element = (
-        f'\n[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\nSubnetId = "{SUBNET}"\n'
-        + LAST_OF_PRIMARY
-    )
-    inline = f'NetworkInterfaces = [{{ DeviceIndex = 0, SubnetId = "{SUBNET}" }}]\n'
-    text = write_conf(service, edited(PROFILE_LINE, PROFILE_LINE + inline, edited(element, "")))
-
-    with pytest.raises(TemtError) as caught:
-        apply.run(service, yes=True)
-
-    # 書き足す項目より前に AWS を読むものは無い
-    aws_stubs.done()
-    key = "launch-template.NetworkInterfaces[DeviceIndex=0].AssociatePublicIpAddress"
-    assert str(caught.value) == (
-        f"cannot write {key} in {CONF_SHOWN}, as it would go into an inline table or array; "
-        f"write {key} = true there by hand and run apply again"
-    )
-    assert service.conf_path.read_text(encoding="utf-8") == text
-
-
-def test_a_table_written_with_dotted_keys_is_written_into(
-    aws_stubs: Stubs, service: Service
-) -> None:
-    """ドット付きのキーで書いたテーブルには、同じ書き方で書き足す。"""
-    _ = write_conf(
-        service,
-        edited(
-            PROFILE_LINE,
-            PROFILE_LINE + 'MetadataOptions.HttpTokens = "required"\n',
             edited(METADATA_TABLE, ""),
         ),
     )
@@ -1428,71 +1697,123 @@ def test_a_table_written_with_dotted_keys_is_written_into(
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == edited(
-        PROFILE_LINE,
-        PROFILE_LINE
-        + 'MetadataOptions.HttpTokens = "required"\n'
-        + 'MetadataOptions.InstanceMetadataTags = "enabled"\n',
-        edited(METADATA_TABLE, ""),
-    )
+    assert service.conf_path.read_text(encoding="utf-8") == text
+    assert aws_heads(capsys.readouterr().out) == []
 
 
-def test_a_new_config_file_gets_values_from_the_common_file(
+def test_a_new_service_reads_the_scaffold_over_the_common_file(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """共通ファイルの値は既定と同じく書き、共通ファイルの ec2 があれば既定の ec2 を書かない。
-
-    AwsProfile は --profile で選んだときだけ書くので、共通ファイルにあっても書かない。
-    """
-    write_defaults(
-        'AwsProfile = ""\n[launch-template]\nInstanceType = "t3.small"\n' + conf.EC2_DEFAULT
-    )
+    """雛形は共通ファイルの上に重ねて読む。共通ファイルの値は雛形に写さない。"""
+    write_defaults('AwsProfile = ""\n[launch-template]\nInstanceType = "t3.small"\n')
     made_from_scratch(aws_stubs, template_data(InstanceType="t3.small"))
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    written = edited('InstanceType = "t3.micro"', 'InstanceType = "t3.small"', CONFIGURED)
-    assert service.conf_path.read_text(encoding="utf-8") == conf.HEADER + written + conf.EXAMPLE
+    assert service.conf_path.read_text(encoding="utf-8") == SCAFFOLD
 
 
-def test_a_new_config_file_gets_the_instance_profile_of_the_common_file(
-    aws_stubs: Stubs, service: Service
+def test_the_instance_profile_of_the_common_file_is_left_out_of_the_scaffold(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """共通ファイルに IamInstanceProfile があれば、temt のものの代わりにそれを書く。
-
-    temt のインスタンスプロファイルを指さないので、IAM には何もせず（応答を積んでいない）、
-    [[role.policy.ec2]] の既定も書かない。
+    """共通ファイルに IamInstanceProfile があれば、雛形にその行を書かず、共通ファイルの値を
+    使う。temt のインスタンスプロファイルを指さないので、[[role.ec2]] の既定も書かず、IAM
+    は、手放すものが無いことを読むだけである。
     """
     write_defaults('[launch-template]\nIamInstanceProfile = { Name = "shared" }\n')
     chosen(aws_stubs)
-    built(aws_stubs, group=None)
+    built(aws_stubs, group=None, read_image=False)
     aws_stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": []}, THE_GROUP)
-    missing(
-        aws_stubs.ec2,
-        "describe_launch_template_versions",
-        resources.NO_SUCH_TEMPLATE,
-        **THE_TEMPLATE,
-    )
+    no_iam(aws_stubs)
     group_made(aws_stubs)
     template_made(aws_stubs, template_data(IamInstanceProfile={"Name": "shared"}))
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    written = edited(PROFILE_LINE, 'IamInstanceProfile = { Name = "shared" }\n', CONFIGURED)
-    assert service.conf_path.read_text(encoding="utf-8") == conf.HEADER + written + conf.EXAMPLE
+    assert service.conf_path.read_text(encoding="utf-8") == conf.scaffold(profile=False, ec2=False)
+    assert "conf" not in [head[1] for head in heads(capsys.readouterr().out)]
 
 
-def test_nothing_is_written_when_detecting_stops(
-    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
+def test_the_scaffold_is_written_even_without_other_differences(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """検出の途中で止まれば、確認の前なので、設定ファイルも手元のファイルも書かない。
+    """雛形が書く値が無く、AWS も手元も揃っていても、設定ファイルが無ければ雛形を書く。"""
+    write_defaults('[launch-template]\nIamInstanceProfile = { Name = "shared" }\n')
+    set_up_here(service)
+    kept(aws_stubs, template_data(IamInstanceProfile={"Name": "shared"}))
+    built(aws_stubs, read_image=False)
+    group_in_place(aws_stubs)
+    template_tags(aws_stubs)
+    no_iam(aws_stubs)
 
-    手順 2 が SubnetId を解けずに止まると、--profile の AwsProfile も書かれない。
-    """
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    own_image(aws_stubs)
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == conf.scaffold(profile=False, ec2=False)
+    out = capsys.readouterr().out
+    assert "no differences" not in out
+    assert f"wrote {CONF_SHOWN}" in out
+
+
+def test_the_scaffold_has_the_ec2_default_for_the_common_instance_profile_of_temt(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """共通ファイルの IamInstanceProfile が temt のインスタンスプロファイルを指していれば、
+    雛形にその行は書かず、[[role.ec2]] の既定だけを書く。"""
+    write_defaults('[launch-template]\nIamInstanceProfile.Name = "${temt:name}"\n')
+    made_from_scratch(aws_stubs)
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == conf.scaffold(profile=False, ec2=True)
+    assert [head for head in heads(capsys.readouterr().out) if head[1] == "conf"] == [
+        ["+", "conf", "role.ec2"]
+    ]
+
+
+def test_the_ec2_policy_of_the_common_file_is_joined_to_the_scaffold(
+    aws_stubs: Stubs, service: Service
+) -> None:
+    """共通ファイルの [[role.ec2]] の後ろに、雛形の既定がつながる。"""
+    write_defaults(STATEMENT.replace("jupyter", "ec2"))
+    joined = {
+        **EC2_POLICY,
+        "Statement": [*ROLE_POLICY["Statement"], *EC2_POLICY["Statement"]],
+    }
+    chosen(aws_stubs)
+    built(aws_stubs, group=None, read_image=False)
+    validated(aws_stubs, joined)
+    nothing_there(aws_stubs, template=False)
+    aws_stubs.iam.add_response(
+        "create_role",
+        a_role(),
+        {
+            "RoleName": NAME,
+            "AssumeRolePolicyDocument": resources.TRUST_POLICY,
+            "Tags": ROLE_MARK,
+        },
+    )
+    aws_stubs.iam.add_response(
+        "put_role_policy",
+        {},
+        {"RoleName": NAME, "PolicyName": EC2, "PolicyDocument": json.dumps(joined)},
+    )
+    aws_stubs.iam.add_client_error(
+        "create_instance_profile", service_error_code="AccessDenied", http_status_code=403
+    )
+
+    with pytest.raises(ClientError):
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == SCAFFOLD
+
+
+def test_nothing_is_written_when_detecting_stops(aws_stubs: Stubs, service: Service) -> None:
+    """検出の途中で止まれば、確認の前なので、雛形も手元のファイルも書かない。"""
     aws_stubs.ec2.add_response("describe_vpcs", {"Vpcs": []}, DEFAULT_VPC)
 
     with pytest.raises(TemtError, match="no default VPC"):
@@ -1503,28 +1824,32 @@ def test_nothing_is_written_when_detecting_stops(
     assert not service.command_path.exists()
 
 
-@pytest.mark.parametrize("command", ["apply", "diff"])
-def test_it_stops_before_writing_when_the_ec2_default_cannot_be_added(
-    aws_stubs: Stubs, service: Service, command: str
+def test_a_config_file_made_meanwhile_is_not_overwritten(
+    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """手順 2 で [[role.policy.ec2]] を足せなければ、何も作らず、例も足さない。"""
-    text = write_conf(service, "role = { policy = {} }\n" + CONFIGURED)
-    subnet(aws_stubs)
+    """確かめてから書くまでに設定ファイルができていれば、雛形で上書きせずに止まる。"""
+    chosen(aws_stubs)
+    built(aws_stubs, group=None, read_image=False)
+    validated(aws_stubs, EC2_POLICY)
+    nothing_there(aws_stubs, template=False)
+    confirm = apply.msg.confirm
+    asked: list[None] = []
 
-    with pytest.raises(
-        TemtError,
-        match=(
-            r"^cannot add the default \[\[role\.policy\.ec2\]\] to "
-            r"~/\.config/temt/dev-main\.toml; "
-        ),
-    ):
-        if command == "apply":
-            apply.run(service, yes=True)
-        else:
-            apply.diff(service)
+    def made_meanwhile(question: Callable[[], str], *, yes: bool) -> None:
+        confirm(question, yes=yes)
+        asked.append(None)
+        # 1 度めはサービスを作るか、2 度めは変更を反映するかの確認
+        if len(asked) == 2:
+            _ = write_conf(service, "# mine\n")
+
+    monkeypatch.setattr(apply.msg, "confirm", made_meanwhile)
+
+    with pytest.raises(TemtError) as caught:
+        apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == text
+    assert str(caught.value) == f"{CONF_SHOWN} was made while running apply; it is left as it is"
+    assert service.conf_path.read_text(encoding="utf-8") == "# mine\n"
     assert not service.command_path.exists()
 
 
@@ -1561,8 +1886,8 @@ def test_it_stops_before_writing_to_aws_when_the_image_is_gone(
 
     aws_stubs.done()
     assert str(caught.value) == (
-        f"no such AMI: {IMAGE}; remove launch-template.ImageId from "
-        f"{tilde(service.conf_path)} and run apply again to pick one"
+        f"no such AMI: {IMAGE}; write another AMI in launch-template.ImageId of "
+        f"{tilde(service.conf_path)}, or remove it and choose one with --image-id"
     )
     assert not keys.default_path().exists()
 
@@ -1793,40 +2118,38 @@ def test_moving_the_ssh_dir_warns_about_the_hosts_left_behind(
     ) in capsys.readouterr().err
 
 
-def test_the_option_is_written_as_the_profile(
+def test_the_option_is_not_written_as_the_profile(
     aws_stubs: Stubs,
     service: Service,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--profile で選んだプロファイルは、次からのコマンドも使うよう設定ファイルに書く。"""
+    """--profile はその実行のあいだだけ効き、設定ファイルには書かない。"""
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    _ = write_conf(service)
+    before = write_conf(service)
     make_key()
     in_place(aws_stubs)
 
     apply.run(service, yes=True)
 
     aws_stubs.done()
-    assert conf.load(service).AwsProfile == "work"
-    assert f'wrote AwsProfile = "work" in {tilde(service.conf_path)}' in capsys.readouterr().out
-    # ssh の設定は設定ファイルを正とするので、ProxyCommand に --profile は入らない
+    assert service.conf_path.read_text(encoding="utf-8") == before
+    assert "AwsProfile" not in capsys.readouterr().out
+    # ProxyCommand にも --profile は入らない
     assert "--profile" not in (ssh_dir() / "config").read_text(encoding="utf-8")
 
 
-def test_a_new_config_file_gets_the_option_as_the_profile(
+def test_the_scaffold_stays_when_a_resource_fails(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """設定ファイルが無いときは、AwsProfile を先に書いてから、決めた項目を書く。
-
-    更新の途中（手順 5 の起動テンプレートの更新）で止まっても、手順 2 は書き終えているので、
-    書いた項目と例は残る。鍵は手順 6 で作るので、まだ作らない。
+    """雛形は更新の最初に書くので、手順 5 の更新で止まっても残る。AwsProfile も AwsRegion も
+    書かない。鍵は手順 6 で作るので、まだ作らない。
     """
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     chosen(aws_stubs)
-    built(aws_stubs, group=None)
+    built(aws_stubs, group=None, read_image=False)
     validated(aws_stubs, EC2_POLICY)
-    nothing_there(aws_stubs)
+    nothing_there(aws_stubs, template=False)
     iam_made(aws_stubs)
     group_made(aws_stubs)
     aws_stubs.ec2.add_client_error(
@@ -1839,45 +2162,7 @@ def test_a_new_config_file_gets_the_option_as_the_profile(
     aws_stubs.done()
     assert not keys.default_path().exists()
     assert not (ssh_dir() / "config").exists()
-    assert (
-        service.conf_path.read_text(encoding="utf-8")
-        == conf.HEADER + 'AwsProfile = "work"\n' + CREATED + conf.EXAMPLE
-    )
-
-
-def test_the_option_replaces_the_written_profile(
-    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """書かれていたプロファイルと違えば、その行を書き換える。"""
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    _ = write_conf(service, 'AwsProfile = "other"\n' + WRITTEN)
-    make_key()
-    in_place(aws_stubs)
-
-    apply.run(service, yes=True)
-
-    aws_stubs.done()
-    assert conf.load(service).AwsProfile == "work"
-    assert service.conf_path.read_text(encoding="utf-8").count("AwsProfile") == 1
-
-
-def test_the_same_profile_is_not_written_again(
-    aws_stubs: Stubs,
-    service: Service,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--profile が書かれている値と同じなら、設定ファイルは変えない。"""
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    before = write_conf(service, 'AwsProfile = "work"\n' + WRITTEN)
-    make_key()
-    in_place(aws_stubs)
-
-    apply.run(service, yes=True)
-
-    aws_stubs.done()
-    assert service.conf_path.read_text(encoding="utf-8") == before
-    assert "wrote AwsProfile" not in capsys.readouterr().out
+    assert service.conf_path.read_text(encoding="utf-8") == SCAFFOLD
 
 
 def test_the_written_profile_is_left_alone_without_the_option(
@@ -1984,16 +2269,16 @@ def test_diff_shows_what_apply_makes_and_writes_nothing(
     assert not keys.default_path().exists()
 
 
-def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
+def test_diff_fills_what_is_not_written(
     aws_stubs: Stubs,
     service: Service,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """手順 2 で書く項目を出し、書いたものとしてその後の手順で使う。設定ファイルは変えない。
+    """書かれていない値は、apply と同じく決めて比べる。設定ファイルも --profile も書かない。
 
     SubnetId が書かれていなければ、apply と同じく公開サブネットを選ぶ。選んだものが
-    テンプレートのものと同じなので、テンプレートの違いは出ない。
+    テンプレートのものと同じなので、違いは出ない。
     """
     before = write_conf(service, edited(f'SubnetId = "{SUBNET}"\n', ""))
     set_up_here(service)
@@ -2004,10 +2289,9 @@ def test_diff_shows_the_items_that_apply_writes_in_the_config_file(
     apply.diff(service)
 
     aws_stubs.done()
-    out = capsys.readouterr().out
-    subnet_key = "launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId"
-    assert heads(out) == [["+", "conf", "AwsProfile"], ["+", "conf", subnet_key]]
-    assert details(out, "conf") == ['+ "work"', f'+ "{SUBNET}"']
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith(f"{NAME}: no differences\n")
     assert service.conf_path.read_text(encoding="utf-8") == before
 
 
@@ -2145,37 +2429,14 @@ def test_diff_and_apply_agree_on_a_new_instance_type(
     assert "wrote" not in shown
 
 
-def test_diff_shows_the_ec2_default_that_apply_writes(
-    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """[[role.policy.ec2]] が無ければ、既定を書くことを出し、その後の手順は既定で比べる。
-
-    ロールのポリシーは既定と同じなので、違いとしては出ない。設定ファイルは変えない。
-    """
-    _ = write_conf(service)
-    make_key()
-    in_place(aws_stubs)
-    apply.run(service, yes=True)
-    before = write_conf(service, CONFIGURED)
-    in_place(aws_stubs)
-    _ = capsys.readouterr()
-
-    apply.diff(service)
-
-    aws_stubs.done()
-    assert capsys.readouterr().out == f"+   conf   role.policy.{conf.EC2}   (default)\n"
-    assert service.conf_path.read_text(encoding="utf-8") == before
-
-
 def test_diff_writes_what_it_found_before_it_stops(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """apply が止まるところでは、それまでに検出した変更を出してから、同じエラーで終わる。
 
-    空の InstanceType は書かれていないものとして読むので、apply は既定を書き直す。
     既定の鍵の秘密鍵しか無ければ、手順 6 で止まる。
     """
-    _ = write_conf(service, edited('InstanceType = "t3.micro"', 'InstanceType = ""'))
+    _ = write_conf(service, edited('InstanceType = "t3.micro"', 'InstanceType = "t3.small"'))
     keys_dir().mkdir(parents=True)
     keys.default_path().write_text("a private key\n", encoding="utf-8")
     in_place(aws_stubs)
@@ -2185,25 +2446,13 @@ def test_diff_writes_what_it_found_before_it_stops(
 
     aws_stubs.done()
     out = capsys.readouterr().out
-    assert ["~", "conf", conf.launch_template_key("InstanceType")] in heads(out)
-    assert '"" -> "t3.micro"' in out
+    assert details(out, "launch-template") == ["~ InstanceType: t3.micro -> t3.small"]
 
 
 def no_default_vpc(stubs: Stubs) -> str:
     """手順 2 で SubnetId を選ぼうとして、既定 VPC が無い。設定ファイルの中身を返す。"""
     stubs.ec2.add_response("describe_vpcs", {"Vpcs": []}, DEFAULT_VPC)
     return edited(f'SubnetId = "{SUBNET}"\n', "")
-
-
-def into_an_inline_table(stubs: Stubs) -> str:
-    """手順 2 で、InstanceMetadataTags を MetadataOptions のインラインテーブルに書けない。"""
-    # MetadataOptions の前に IPv6 を見る
-    subnet(stubs)
-    return edited(
-        PROFILE_LINE,
-        PROFILE_LINE + 'MetadataOptions = { HttpTokens = "required" }\n',
-        edited(METADATA_TABLE, ""),
-    )
 
 
 def no_subnet(stubs: Stubs) -> str:
@@ -2220,41 +2469,25 @@ def no_subnet(stubs: Stubs) -> str:
     ("stop", "message"),
     [
         pytest.param(no_default_vpc, f"^no default VPC in {REGION}; ", id="no default VPC"),
-        pytest.param(
-            into_an_inline_table,
-            "^cannot write launch-template.MetadataOptions.InstanceMetadataTags in ",
-            id="inline table",
-        ),
         pytest.param(no_subnet, f"^no such subnet: {SUBNET}; ", id="no subnet"),
     ],
 )
-def test_diff_writes_the_conf_items_found_before_step_2_stops(
+def test_diff_stops_in_step_2_without_writing_anything(
     aws_stubs: Stubs,
     service: Service,
     capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
     stop: Any,
     message: str,
 ) -> None:
-    """手順 2 の中で止まっても、それまでに決めた項目は、検出した順に出してから終わる。
-
-    止まった項目と、その後の項目は出さない。設定ファイルは変えない。
-    """
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
-    text = write_conf(
-        service, edited('InstanceType = "t3.micro"', 'InstanceType = ""', stop(aws_stubs))
-    )
+    """手順 2 で書かれていない値を決められなければ、何も出さずに止まる。設定ファイルは
+    変えない。"""
+    text = write_conf(service, stop(aws_stubs))
 
     with pytest.raises(TemtError, match=message):
         apply.diff(service)
 
     aws_stubs.done()
-    out = capsys.readouterr().out
-    assert heads(out) == [
-        ["+", "conf", "AwsProfile"],
-        ["~", "conf", conf.launch_template_key("InstanceType")],
-    ]
-    assert details(out, "conf") == ['+ "work"', '~ "" -> "t3.micro"']
+    assert capsys.readouterr().out == ""
     assert service.conf_path.read_text(encoding="utf-8") == text
 
 
@@ -2292,6 +2525,7 @@ def test_apply_shows_the_changes_and_writes_nothing_when_declined(
 ) -> None:
     """変えるものを diff と同じ形で標準出力に見せてから、標準エラー出力で確認を求める。
     y と答えなければ、設定ファイルにも AWS にも手元にも書かない。"""
+    identified(aws_stubs)
     before = write_conf(service)
     make_key()
     in_place(aws_stubs)
@@ -2304,7 +2538,7 @@ def test_apply_shows_the_changes_and_writes_nothing_when_declined(
     captured = capsys.readouterr()
     assert f"+   command       ~/.local/bin/{NAME}" in captured.out
     assert "[y/N]" not in captured.out
-    assert captured.err == "apply these changes? [y/N] "
+    assert captured.err == f"apply these changes {WHERE}? [y/N] "
     assert service.conf_path.read_text(encoding="utf-8") == before
     assert not service.command_path.exists()
     assert not (ssh_dir() / "config").exists()
@@ -2358,10 +2592,13 @@ def test_a_first_apply_that_is_declined_makes_nothing(
 ) -> None:
     """設定ファイルが無い初回の apply でも、y と答えなければ、設定ファイルも鍵も
     ディレクトリもサービスのコマンドも作らない。"""
+    # サービスを作るかと、変更を反映するかの、2 度の確認に添える
+    identified(aws_stubs)
+    identified(aws_stubs)
     chosen(aws_stubs)
-    built(aws_stubs, group=None)
+    built(aws_stubs, group=None, read_image=False)
     validated(aws_stubs, EC2_POLICY)
-    nothing_there(aws_stubs)
+    nothing_there(aws_stubs, template=False)
     monkeypatch.setattr(sys, "stdin", Terminal("y\n\n"))
 
     with pytest.raises(TemtError, match="cancelled"):
@@ -2370,8 +2607,8 @@ def test_a_first_apply_that_is_declined_makes_nothing(
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.err == (
-        f"no config file: {tilde(service.conf_path)}; create service {NAME}? [y/N] "
-        "apply these changes? [y/N] "
+        f"no config file: {tilde(service.conf_path)}; create service {NAME} {WHERE}? [y/N] "
+        f"apply these changes {WHERE}? [y/N] "
     )
     out = captured.out
     assert "+   conf " in out
@@ -2391,6 +2628,7 @@ def test_a_first_apply_asks_before_reading_aws(
 ) -> None:
     """設定ファイルが無ければ、AWS を読む前に、サービスを作るかを聞く。y と答えなければ、
     何も表示せず、何も作らない。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
 
     with pytest.raises(TemtError, match="cancelled"):
@@ -2399,8 +2637,8 @@ def test_a_first_apply_asks_before_reading_aws(
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert (
-        captured.err == f"no config file: {tilde(service.conf_path)}; create service {NAME}? [y/N] "
+    assert captured.err == (
+        f"no config file: {tilde(service.conf_path)}; create service {NAME} {WHERE}? [y/N] "
     )
     assert not service.conf_path.exists()
     assert not ssh_dir().exists()
@@ -2427,6 +2665,7 @@ def test_apply_goes_on_when_the_answer_is_yes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """端末で y と答えれば、検出した差分で更新する。"""
+    identified(aws_stubs)
     _ = write_conf(service)
     make_key()
     in_place(aws_stubs)
@@ -2470,6 +2709,7 @@ def test_a_removed_default_key_is_made_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Host ブロックは変わらなくても、それが指す既定の鍵が無ければ、作る。"""
+    identified(aws_stubs)
     _ = write_conf(service)
     make_key()
     in_place(aws_stubs)
@@ -2555,6 +2795,7 @@ def test_an_ssh_config_edited_while_asking_is_not_overwritten(
     手で書いたものを、検出したときの中身で上書きしないためである。それより前の手順は
     更新し終えている。
     """
+    identified(aws_stubs)
     _ = write_conf(service, RESIZED)
     home.prepare_dirs()
     (ssh_dir() / "config").write_text("# mine\n", encoding="utf-8")
@@ -2569,4 +2810,226 @@ def test_an_ssh_config_edited_while_asking_is_not_overwritten(
     aws_stubs.done()
     assert (ssh_dir() / "config").read_text(encoding="utf-8") == (
         "# mine\n\nHost mine\n    User root\n"
+    )
+
+
+# --- 使う AMI ---
+
+# ImageId を書いていない設定ファイル。AMI は起動テンプレートが持つ
+UNPINNED = CONFIGURED + conf.EC2_DEFAULT
+# 起動テンプレートを替える先の AMI
+OTHER_IMAGE = "ami-0fedcba9876543210"
+OTHER_NAME = "temt-dev-main-2609100900"
+OTHER = {**an_image(), "ImageId": OTHER_IMAGE, "Name": OTHER_NAME}
+OTHER_BY_NAME = {"Owners": ["self"], "Filters": [{"Name": "name", "Values": [OTHER_NAME]}]}
+
+
+def unpinned_in_place(stubs: Stubs, data: dict[str, Any], image: dict[str, Any]) -> None:
+    """UNPINNED の設定ファイルで、AWS のものが揃っているときに読むもの。手順 4 で起動
+    テンプレート（既定バージョンの中身 data）を読み、その AMI image を ID で引く。
+    """
+    subnet(stubs)
+    template_versions(stubs, data)
+    stubs.ec2.add_response("describe_images", {"Images": [image]}, {"ImageIds": [data["ImageId"]]})
+    built(stubs, read_image=False)
+    validated(stubs, EC2_POLICY)
+    iam_in_place(stubs)
+    group_in_place(stubs)
+    template_tags(stubs)
+
+
+def test_apply_keeps_the_image_of_the_template(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ImageId を書いていなければ、bake などが替えた起動テンプレートの AMI をそのまま使い、
+    違いにしない。
+    """
+    _ = write_conf(service, UNPINNED)
+    set_up_here(service)
+    unpinned_in_place(aws_stubs, template_data(ImageId=OTHER_IMAGE), OTHER)
+
+    apply.diff(service)
+
+    aws_stubs.done()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith(f"{NAME}: no differences\n")
+
+
+def switched(stubs: Stubs) -> None:
+    """--image-id OTHER_NAME で、起動テンプレートの AMI を IMAGE から替えるときに読むもの。
+
+    --image-id の AMI を名前で引くので、手順 4 では起動テンプレートを読まない。
+    """
+    subnet(stubs)
+    stubs.ec2.add_response("describe_images", {"Images": [OTHER]}, OTHER_BY_NAME)
+    built(stubs, read_image=False)
+    validated(stubs, EC2_POLICY)
+    iam_in_place(stubs)
+    group_in_place(stubs)
+    template_in_place(stubs, template_data())
+
+
+def test_image_id_switches_the_image_of_the_template(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--image-id を付ければ、起動テンプレートがあっても、その AMI に替える。diff は、同じ
+    --image-id の apply が変えるものを、AMI の名前を添えて出す。
+    """
+    _ = write_conf(service, UNPINNED)
+    set_up_here(service)
+    switched(aws_stubs)
+    switched(aws_stubs)
+    new_version(aws_stubs, template_data(ImageId=OTHER_IMAGE))
+
+    apply.diff(service, image=OTHER_NAME)
+    assert capsys.readouterr().out == (
+        f"~   launch-template   {TEMPLATE}   ImageId: {IMAGE} -> {OTHER_IMAGE} ({OTHER_NAME})\n"
+    )
+    apply.run(service, image=OTHER_NAME, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == UNPINNED
+
+
+def test_image_id_chooses_the_image_of_a_new_template(
+    aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """起動テンプレートを作るときも、--image-id の AMI を使う。ID でも引ける。"""
+    _ = write_conf(service, UNPINNED)
+    set_up_here(service)
+    subnet(aws_stubs)
+    aws_stubs.ec2.add_response("describe_images", {"Images": [OTHER]}, {"ImageIds": [OTHER_IMAGE]})
+    built(aws_stubs, group=None, read_image=False)
+    validated(aws_stubs, EC2_POLICY)
+    nothing_there(aws_stubs)
+
+    apply.diff(service, image=OTHER_IMAGE)
+
+    aws_stubs.done()
+    assert details(capsys.readouterr().out, "launch-template") == [
+        f"+ ImageId: {OTHER_IMAGE} ({OTHER_NAME})"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("common", "where"),
+    [
+        pytest.param(False, CONF_SHOWN, id="config file"),
+        pytest.param(True, DEFAULTS_SHOWN, id="common"),
+    ],
+)
+def test_image_id_is_a_usage_error_while_image_id_is_written(
+    aws_stubs: Stubs, service: Service, common: bool, where: str
+) -> None:
+    """ImageId を書けば AMI は固定なので、--image-id は AWS を呼ぶ前に引数の誤りにする。"""
+    if common:
+        write_defaults(f'[launch-template]\nImageId = "{IMAGE}"\n')
+        _ = write_conf(service, UNPINNED)
+    else:
+        _ = write_conf(service)
+
+    with pytest.raises(UsageError) as caught:
+        apply.run(service, image=OTHER_NAME, yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"--image-id is not allowed; launch-template.ImageId in {where} fixes the AMI"
+    )
+
+
+def test_image_id_is_a_usage_error_before_asking_to_create(
+    aws_stubs: Stubs, service: Service
+) -> None:
+    """設定ファイルが無く共通ファイルに ImageId があれば、--image-id は作るかを聞く前（アカウントを
+    引く前）に引数の誤りにする。
+    """
+    write_defaults(f'[launch-template]\nImageId = "{IMAGE}"\n')
+
+    with pytest.raises(UsageError) as caught:
+        apply.run(service, image=OTHER_NAME, yes=False)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"--image-id is not allowed; launch-template.ImageId in {DEFAULTS_SHOWN} fixes the AMI"
+    )
+    assert not service.conf_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("answer", "message"),
+    [
+        pytest.param({"Images": []}, f"no such AMI: {OTHER_NAME}", id="missing"),
+        pytest.param(
+            {"Images": [{**OTHER, "State": "failed"}]},
+            f"the AMI {OTHER_NAME} is failed",
+            id="failed",
+        ),
+    ],
+)
+def test_an_unusable_image_id_stops(
+    aws_stubs: Stubs, service: Service, answer: dict[str, Any], message: str
+) -> None:
+    _ = write_conf(service, UNPINNED)
+    subnet(aws_stubs)
+    aws_stubs.ec2.add_response("describe_images", answer, OTHER_BY_NAME)
+
+    with pytest.raises(TemtError) as caught:
+        apply.diff(service, image=OTHER_NAME)
+
+    aws_stubs.done()
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        pytest.param({"Images": []}, "is not found", id="missing"),
+        pytest.param(
+            {"Images": [{**an_image(), "State": "deregistered"}]},
+            "is not found",
+            id="deregistered",
+        ),
+        pytest.param({"Images": [{**an_image(), "State": "failed"}]}, "is failed", id="failed"),
+        pytest.param({"Images": [{**an_image(), "State": "pending"}]}, "is pending", id="pending"),
+    ],
+)
+def test_apply_stops_when_the_image_of_the_template_is_lost(
+    aws_stubs: Stubs, service: Service, answer: dict[str, Any], why: str
+) -> None:
+    """ImageId を書いていないのに、起動テンプレートの AMI が無いか available でなければ、
+    黙って選び直さず、--image-id で選ぶよう告げて止まる。
+    """
+    _ = write_conf(service, UNPINNED)
+    subnet(aws_stubs)
+    template_versions(aws_stubs, template_data())
+    aws_stubs.ec2.add_response("describe_images", answer, {"ImageIds": [IMAGE]})
+
+    with pytest.raises(TemtError) as caught:
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"the AMI {IMAGE} of the launch template {TEMPLATE} {why}; choose one with --image-id"
+    )
+
+
+def test_a_new_template_waits_for_a_pending_newest_image(
+    aws_stubs: Stubs, service: Service
+) -> None:
+    """起動テンプレートを作るとき、サービスの最新の AMI が pending（コピーの途中など）なら
+    止まる。古い AMI に戻らない。
+    """
+    _ = write_conf(service, UNPINNED)
+    subnet(aws_stubs)
+    no_template(aws_stubs)
+    own_image(aws_stubs, state="pending", older=True)
+
+    with pytest.raises(TemtError) as caught:
+        apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        f"the newest AMI of {NAME}, {IMAGE_NAME} ({IMAGE}), is pending; run again when it is "
+        "available"
     )

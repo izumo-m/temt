@@ -34,6 +34,26 @@ def subnet(stubs: Stubs) -> None:
     )
 
 
+def public_subnet(stubs: Stubs) -> None:
+    """SubnetId が書かれていないので、apply と同じく既定 VPC のサブネットを選んで読む。"""
+    stubs.ec2.add_response(
+        "describe_vpcs",
+        {"Vpcs": [{"VpcId": VPC}]},
+        {"Filters": [{"Name": "is-default", "Values": ["true"]}]},
+    )
+    stubs.ec2.add_response(
+        "describe_subnets",
+        {"Subnets": [{"SubnetId": SUBNET, "AvailabilityZone": "ap-northeast-1a", "VpcId": VPC}]},
+        {
+            "Filters": [
+                {"Name": "vpc-id", "Values": [VPC]},
+                {"Name": "map-public-ip-on-launch", "Values": ["true"]},
+            ]
+        },
+    )
+    subnet(stubs)
+
+
 def groups(stubs: Stubs, *found: dict[str, Any]) -> None:
     stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": list(found)}, THE_GROUPS)
 
@@ -124,18 +144,18 @@ def test_diff_without_the_group_adds_every_rule(
 def test_diff_without_a_subnet(
     service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """SubnetId が無ければセキュリティグループも決まらないので、AWS を読まずにすべてを
-    足すものとする。"""
+    """SubnetId が書かれていなければ、apply と同じくそのリージョンでサブネットを選び、その
+    VPC のセキュリティグループと比べる。"""
     service.conf_path.parent.mkdir(parents=True)
     service.conf_path.write_text(INGRESS + 'Port = 22\nCidr = "198.51.100.7/32"\n')
+    public_subnet(aws_stubs)
+    groups(aws_stubs, a_group())
+    rules(aws_stubs, a_rule("sgr-1", 22, "198.51.100.7/32"))
     sg.diff(service)
     aws_stubs.done()
     out, err = capsys.readouterr()
-    assert out == "+   22/tcp   198.51.100.7/32   -\n"
-    assert (
-        "no launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in "
-        "~/.config/temt/dev-main.toml; the next apply picks a subnet\n"
-    ) in err
+    assert out == ""
+    assert err.endswith(f"security group {NAME}: no differences\n")
 
 
 def test_diff_reads_the_subnet_of_the_primary_interface(
@@ -164,19 +184,39 @@ def test_diff_reads_the_subnet_of_the_primary_interface(
 def test_diff_without_the_primary_interface(
     service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """DeviceIndex が 0 の要素が無ければ、ほかの要素に SubnetId があっても、無いものとする。"""
+    """DeviceIndex が 0 の要素が無ければ、ほかの要素に SubnetId があっても、apply と同じく
+    サブネットを選ぶ。"""
     service.conf_path.parent.mkdir(parents=True)
     service.conf_path.write_text(
         "[[launch-template.NetworkInterfaces]]\n"
         "DeviceIndex = 1\n"
-        f'SubnetId = "{SUBNET}"\n'
+        'SubnetId = "subnet-00000000000000001"\n'
         "\n" + INGRESS + 'Port = 22\nCidr = "198.51.100.7/32"\n'
     )
+    public_subnet(aws_stubs)
+    groups(aws_stubs)
     sg.diff(service)
     aws_stubs.done()
     out, err = capsys.readouterr()
     assert out == "+   22/tcp   198.51.100.7/32   -\n"
-    assert "no launch-template.NetworkInterfaces[DeviceIndex=0].SubnetId in " in err
+    assert f"no security group {NAME} in {VPC}; the next apply creates it\n" in err
+
+
+def test_diff_without_a_subnet_of_its_own(
+    service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DeviceIndex が 0 の要素が既にあるネットワークインターフェースを指せば、サブネットも
+    VPC も決まらないので、すべてを足すものとする。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(
+        "[[launch-template.NetworkInterfaces]]\n"
+        "DeviceIndex = 0\n"
+        'NetworkInterfaceId = "eni-0123456789abcdef0"\n'
+        "\n" + INGRESS + 'Port = 22\nCidr = "198.51.100.7/32"\n'
+    )
+    sg.diff(service)
+    aws_stubs.done()
+    assert capsys.readouterr().out == "+   22/tcp   198.51.100.7/32   -\n"
 
 
 def test_diff_names_the_file_with_a_missing_subnet(
@@ -294,15 +334,36 @@ def test_show_reads_the_subnet_of_the_primary_interface(
 def test_show_without_a_subnet(
     service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """VPC が決まらないので、同じ名前のセキュリティグループを挙げるだけにする。"""
+    """SubnetId が書かれていなければ、apply と同じくサブネットを選び、その VPC で探す。"""
     service.conf_path.parent.mkdir(parents=True)
     service.conf_path.write_text('AwsRegion = "ap-northeast-1"\n')
+    public_subnet(aws_stubs)
+    groups(aws_stubs)
+    sg.show(service)
+    aws_stubs.done()
+    assert capsys.readouterr().out.splitlines() == [
+        f"security group {NAME}:",
+        f"  state: (not found in {VPC}; the next apply creates it)",
+    ]
+
+
+def test_show_without_a_subnet_of_its_own(
+    service: Service, aws_stubs: Stubs, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """VPC が決まらなければ（NetworkInterfaceId を書いたとき）、同じ名前のセキュリティ
+    グループを挙げるだけにする。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(
+        "[[launch-template.NetworkInterfaces]]\n"
+        "DeviceIndex = 0\n"
+        'NetworkInterfaceId = "eni-0123456789abcdef0"\n'
+    )
     groups(aws_stubs, a_group(), a_group(group_id="sg-00000000000000002", vpc_id="vpc-other"))
     sg.show(service)
     aws_stubs.done()
     assert capsys.readouterr().out.splitlines() == [
         f"security group {NAME}:",
-        "  state: (no subnet yet; the next apply picks one)",
+        "  state: (no subnet)",
         "groups with this name:",
         f"  {GROUP}  {VPC}",
         "  sg-00000000000000002  vpc-other",

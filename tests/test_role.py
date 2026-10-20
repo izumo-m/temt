@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from conftest import REGION, Stubs, an_instance, reservations
+from conftest import REGION, WHERE, Stubs, an_instance, identified, reservations
 
 from temt import cli, conf, ltbuild, resources, role
 from temt.msg import TemtError, UsageError
@@ -49,12 +49,9 @@ USERS = {
     ]
 }
 
-# ami import が書いた形の設定ファイル。元のインスタンスプロファイルを指していて、temt の
+# service import が書いた形の設定ファイル。元のインスタンスプロファイルを指していて、temt の
 # [role] は無い
 IMPORTED = f"""\
-AwsRegion = "{REGION}"
-Defaults = false
-
 [launch-template]
 ImageId = "temt-dev-main-2609231234"
 InstanceType = "t3.small"
@@ -97,9 +94,6 @@ KMS_POLICY = {
 # role import が IMPORTED を書き換えた中身。[role] は最後に足し、IamInstanceProfile は
 # その場で書き換える
 REWRITTEN = f"""\
-AwsRegion = "{REGION}"
-Defaults = false
-
 [launch-template]
 ImageId = "temt-dev-main-2609231234"
 InstanceType = "t3.small"
@@ -117,28 +111,28 @@ Ipv6AddressCount = 0
 [role]
 ManagedPolicyArns = ["{MANAGED}", "{CUSTOMER}"]
 
-[[role.policy.s3access]]
+[[role.s3access]]
 Sid = "Read"
 Effect = "Allow"
 Action = ["s3:GetObject", "s3:ListBucket"]
 Resource = ["arn:aws:s3:::web-data", "arn:aws:s3:::web-data/*"]
 
-[[role.policy.s3access]]
+[[role.s3access]]
 Effect = "Deny"
 Action = "s3:DeleteObject"
 Resource = "*"
 
-[[role.policy.kms-decrypt]]
+[[role.kms-decrypt]]
 Effect = "Allow"
 Action = "kms:Decrypt"
 Resource = "arn:aws:kms:ap-northeast-1:123456789012:key/0123abcd"
 
-[role.policy.kms-decrypt.Condition.StringEquals]
+[role.kms-decrypt.Condition.StringEquals]
 "kms:ViaService" = "s3.ap-northeast-1.amazonaws.com"
 """
 
 IMPORT_PROMPT = "rewrite ~/.config/temt/dev-main.toml? [y/N] "
-DELETE_PROMPT = f"delete them for {NAME}? [y/N] "
+DELETE_PROMPT = f"delete them for {NAME} {WHERE}? [y/N] "
 LEFT_HINT = (
     "fix by hand the resource policies that name the role web-role (S3 bucket policies, "
     "KMS key policies, ...); then run 'temt diff --svc dev-main' and "
@@ -182,7 +176,7 @@ def answer(monkeypatch: pytest.MonkeyPatch) -> Terminal:
 
 @pytest.fixture
 def imported(service: Service) -> Service:
-    """ami import が書いた設定ファイルのあるサービス。"""
+    """service import が書いた設定ファイルのあるサービス。"""
     service.conf_path.parent.mkdir(parents=True, exist_ok=True)
     service.conf_path.write_text(IMPORTED, encoding="utf-8")
     return service
@@ -274,7 +268,7 @@ def test_import_rewrites_role_and_the_instance_profile(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """インラインポリシーは Statement ごとに [[role.policy.<ポリシー名>]] に、管理ポリシーは
+    """インラインポリシーは Statement ごとに [[role.<ポリシー名>]] に、管理ポリシーは
     ARN のまま ManagedPolicyArns に写し、IamInstanceProfile を temt のものにする。
 
     名前は規則に合わせて小文字にし、使えない文字をハイフンにする。AWS には何も書かない。
@@ -291,8 +285,8 @@ def test_import_rewrites_role_and_the_instance_profile(
     assert captured.err == IMPORT_PROMPT
     assert told(captured.out) == [
         "role import web-role into ~/.config/temt/dev-main.toml (replacing [role]):",
-        "  [[role.policy.s3access]] (2 statements)",
-        "  [[role.policy.kms-decrypt]] (1 statement)",
+        "  [[role.s3access]] (2 statements)",
+        "  [[role.kms-decrypt]] (1 statement)",
         f"  ManagedPolicyArns: {MANAGED}",
         f"  ManagedPolicyArns: {CUSTOMER}",
         f'  launch-template.IamInstanceProfile: {{ Arn = "{SOURCE_PROFILE_ARN}" }} -> '
@@ -313,7 +307,7 @@ def test_import_writes_a_config_file_that_apply_reads(aws_stubs: Stubs, imported
     values = conf.load(imported)
     assert ltbuild.points_at_temt(values.launch_template, imported)
     assert values.role.ManagedPolicyArns == [MANAGED, CUSTOMER]
-    assert values.role.policy == {
+    assert values.role.policies == {
         "s3access": S3_POLICY["Statement"],
         "kms-decrypt": [KMS_POLICY["Statement"]],
     }
@@ -333,7 +327,7 @@ def test_import_replaces_the_whole_role_table(
     imported.conf_path.write_text(
         IMPORTED
         + '\n[role]\nManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]\n'
-        + '\n[[role.policy.old]]\nAction = "s3:GetObject"\nResource = "*"\n',
+        + '\n[[role.old]]\nAction = "s3:GetObject"\nResource = "*"\n',
         encoding="utf-8",
     )
     source_read(aws_stubs, {"S3Access": S3_POLICY}, ())
@@ -342,7 +336,7 @@ def test_import_replaces_the_whole_role_table(
 
     aws_stubs.done()
     values = conf.load(imported)
-    assert values.role.policy == {"s3access": S3_POLICY["Statement"]}
+    assert values.role.policies == {"s3access": S3_POLICY["Statement"]}
     assert values.role.ManagedPolicyArns == []
     assert "old" not in text_of(imported)
     assert "ReadOnlyAccess" not in text_of(imported)
@@ -357,7 +351,7 @@ COMMENTED = (
 [role]
 ManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
 
-[[role.policy.old]]
+[[role.old]]
 Action = "s3:GetObject"
 Resource = "*"
 
@@ -374,7 +368,7 @@ Cidr = "203.0.113.0/24"
     [
         pytest.param(
             {"S3Access": S3_POLICY},
-            "# 権限\n[role]\n\n[[role.policy.s3access]]\n",
+            "# 権限\n[role]\n\n[[role.s3access]]\n",
             id="replaced",
         ),
         pytest.param({}, None, id="removed"),
@@ -403,17 +397,17 @@ def test_import_keeps_the_comments_around_role(
         assert "Ipv6AddressCount = 0\n\n# 権限\n\n# 受け付ける通信\n" in text
     else:
         assert role_table in text
-        assert text.index("[[role.policy.s3access]]") < text.index("# 受け付ける通信")
+        assert text.index("[[role.s3access]]") < text.index("# 受け付ける通信")
     assert conf.load(imported).security_group.ingress[0].Port == (443, 443)
 
 
 def test_import_drops_role_when_the_role_has_no_policy(aws_stubs: Stubs, imported: Service) -> None:
     """ポリシーが 1 つも無いロールなら、[role] を消し、IamInstanceProfile だけを書き換える。
 
-    ec2 が無いので、次の apply が既定の [[role.policy.ec2]] を書く。
+    [role] が無く IamInstanceProfile が temt を指すので、次の apply が止まって知らせる。
     """
     imported.conf_path.write_text(
-        IMPORTED + '\n[[role.policy.old]]\nAction = "s3:GetObject"\nResource = "*"\n',
+        IMPORTED + '\n[[role.old]]\nAction = "s3:GetObject"\nResource = "*"\n',
         encoding="utf-8",
     )
     source_read(aws_stubs, {})
@@ -446,6 +440,8 @@ def test_import_adds_the_instance_profile_when_none_is_written(
     role.import_role(imported, SOURCE, yes=True)
 
     aws_stubs.done()
+    # 雛形と同じく、ドット付きキーで書く
+    assert 'IamInstanceProfile.Name = "${temt:name}"\n' in text_of(imported)
     values = conf.load(imported)
     assert values.launch_template["IamInstanceProfile"] == {"Name": "${temt:name}"}
     assert values.role.ManagedPolicyArns == [MANAGED]
@@ -461,7 +457,6 @@ def test_import_adds_the_instance_profile_before_a_table_that_follows_at_once(
     """[launch-template] の項目の直後に空行を置かずにテーブルが続いても、足した行は改行で
     終え、後ろのテーブルはそのまま残る。"""
     imported.conf_path.write_text(
-        f'AwsRegion = "{REGION}"\nDefaults = false\n\n'
         '[launch-template]\nImageId = "temt-dev-main-2609231234"\n'
         "[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\n",
         encoding="utf-8",
@@ -472,9 +467,8 @@ def test_import_adds_the_instance_profile_before_a_table_that_follows_at_once(
 
     aws_stubs.done()
     assert text_of(imported) == (
-        f'AwsRegion = "{REGION}"\nDefaults = false\n\n'
         '[launch-template]\nImageId = "temt-dev-main-2609231234"\n'
-        'IamInstanceProfile = { Name = "${temt:name}" }\n'
+        'IamInstanceProfile.Name = "${temt:name}"\n'
         "[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\n"
     )
 
@@ -490,8 +484,8 @@ def test_import_counts_the_statements_of_each_policy(
 
     aws_stubs.done()
     assert told(capsys.readouterr().out)[1:3] == [
-        "  [[role.policy.s3access]] (2 statements)",
-        "  [[role.policy.kms-decrypt]] (1 statement)",
+        "  [[role.s3access]] (2 statements)",
+        "  [[role.kms-decrypt]] (1 statement)",
     ]
 
 
@@ -519,7 +513,7 @@ def test_import_rewrites_an_instance_profile_written_as_a_table(
         "IamInstanceProfile": {"Name": "${temt:name}"},
         "MetadataOptions": {"HttpTokens": "required"},
     }
-    assert values.role.policy == {"s3access": S3_POLICY["Statement"]}
+    assert values.role.policies == {"s3access": S3_POLICY["Statement"]}
 
 
 # 書き換える IamInstanceProfile の後ろに置いた、次の見出しの説明のコメントと、その見出し
@@ -593,7 +587,7 @@ def test_import_takes_the_role_by_arn(aws_stubs: Stubs, imported: Service, given
     role.import_role(imported, given, yes=True)
 
     aws_stubs.done()
-    assert conf.load(imported).role.policy == {"s3access": S3_POLICY["Statement"]}
+    assert conf.load(imported).role.policies == {"s3access": S3_POLICY["Statement"]}
 
 
 def test_import_refuses_a_role_of_another_account(
@@ -764,8 +758,7 @@ def test_import_stops_when_it_cannot_write_the_instance_profile(
     """[launch-template] をインラインテーブルで書いていれば、書き足せないので、確認の前に
     止める。"""
     imported.conf_path.write_text(
-        f'AwsRegion = "{REGION}"\nlaunch-template = {{ InstanceType = "t3.small" }}\n',
-        encoding="utf-8",
+        'launch-template = { InstanceType = "t3.small" }\n', encoding="utf-8"
     )
     before = text_of(imported)
     source_read(aws_stubs, {"S3Access": S3_POLICY})
@@ -777,11 +770,10 @@ def test_import_stops_when_it_cannot_write_the_instance_profile(
     assert answer.reads == 0
     assert text_of(imported) == before
     # 書けない設定ファイルと、手で書いてからやり直す role import を告げる
-    key = "launch-template.IamInstanceProfile"
+    key = "launch-template.IamInstanceProfile.Name"
     assert str(caught.value) == (
         f"cannot write {key} in ~/.config/temt/dev-main.toml, as it would go into an inline "
-        f'table or array; write {key} = {{ Name = "${{temt:name}}" }} there by hand and run '
-        "role import again"
+        f'table or array; write {key} = "${{temt:name}}" there by hand and run role import again'
     )
 
 
@@ -905,6 +897,7 @@ def test_delete_deletes_the_pair_tagged_for_the_service(
 
     確認には、ロールと一緒に消すインラインポリシーと、外す管理ポリシーも挙げる。
     """
+    identified(aws_stubs)
     found_pair(aws_stubs)
     no_users(aws_stubs)
     profile_held(aws_stubs)
@@ -955,22 +948,12 @@ def test_delete_deletes_the_pair_tagged_for_the_service(
     assert text_of(imported) == IMPORTED
 
 
-@pytest.mark.parametrize(
-    "written",
-    [
-        pytest.param('{ Name = "${temt:name}" }', id="variable"),
-        pytest.param(f'{{ Name = "{NAME}" }}', id="name"),
-        pytest.param(f'{{ Arn = "arn:aws:iam::123456789012:instance-profile/{NAME}" }}', id="arn"),
-    ],
-)
-def test_delete_stops_while_the_config_file_points_at_them(
-    aws_stubs: Stubs, imported: Service, answer: Terminal, written: str
+def test_delete_stops_while_the_config_file_has_role(
+    aws_stubs: Stubs, imported: Service, answer: Terminal
 ) -> None:
-    """次の apply がまた作るので、設定ファイルを先に直すよう告げる。AWS は読まない。"""
+    """[role] があれば次の apply がまた作るので、先に [role] を消すよう告げる。AWS は読まない。"""
     imported.conf_path.write_text(
-        IMPORTED.replace(
-            f'{{ Arn = "arn:aws:iam::123456789012:instance-profile/{SOURCE_PROFILE}" }}', written
-        ),
+        IMPORTED + '\n[[role.app]]\nAction = "s3:GetObject"\nResource = "*"\n',
         encoding="utf-8",
     )
 
@@ -981,28 +964,128 @@ def test_delete_stops_while_the_config_file_points_at_them(
     aws_stubs.done()
     assert answer.reads == 0
     assert str(caught.value) == (
-        "launch-template.IamInstanceProfile in ~/.config/temt/dev-main.toml points at "
-        f"{NAME}, and the next apply would make it again; change it first"
+        f"[role] in ~/.config/temt/dev-main.toml makes {NAME}, and the next apply would make "
+        "it again; remove [role] first"
     )
 
 
-def test_delete_names_the_defaults_file_that_points_at_them(
-    aws_stubs: Stubs, service: Service
+# このリージョンと、ほかのリージョンのタグ
+HERE = {"Key": f"temt:region:{REGION}", "Value": ""}
+THERE = {"Key": "temt:region:us-west-2", "Value": ""}
+
+
+def test_delete_stops_while_another_region_has_role(
+    aws_stubs: Stubs, imported: Service, answer: Terminal
 ) -> None:
-    """指しているのが共通ファイルなら、そのファイルの名前を挙げる。"""
+    """ロールにほかのリージョンのタグが残っていれば、そこの設定にはまだ [role] があるので、
+    何も消さずに止まる。このリージョンのタグは数えない。
+    """
+    found_pair(aws_stubs, role_tags=[*OURS, HERE, THERE])
+
+    with pytest.raises(TemtError) as caught:
+        role.delete(imported, yes=False)
+
+    aws_stubs.done()
+    assert answer.reads == 0
+    assert str(caught.value) == (
+        f"the role {NAME} is used in us-west-2 (tagged temt:region:us-west-2); remove [role] "
+        "and run apply there first"
+    )
+
+
+def test_delete_deletes_a_role_with_only_the_tag_of_its_region(
+    aws_stubs: Stubs, imported: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """このリージョンのタグしか無ければ、ほかに使うリージョンは無いので消す。"""
+    found_pair(aws_stubs, role_tags=[*OURS, HERE])
+    no_users(aws_stubs)
+    profile_held(aws_stubs)
+    in_profiles(aws_stubs)
+    role_held(aws_stubs)
+    profile_deleted(aws_stubs)
+    role_deleted(aws_stubs)
+
+    role.delete(imported, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[-2:] == [
+        f"instance profile {NAME}: deleted",
+        f"role {NAME}: deleted",
+    ]
+
+
+def test_delete_counts_a_name_too_long_for_iam_as_absent(
+    aws_stubs: Stubs, home_dir: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """<名前> が IAM のロール名の上限より長ければ、IAM を呼ばずに、どちらも無いものとする。
+
+    応答を積んでいないので、呼べば Stubber が失敗する。
+    """
+    _ = home_dir
+    service = Service("a" * 60)
     service.conf_path.parent.mkdir(parents=True)
     service.conf_path.write_text(f'AwsRegion = "{REGION}"\n', encoding="utf-8")
-    defaults_path().write_text(
-        '[launch-template]\nIamInstanceProfile = { Name = "${temt:name}" }\n', encoding="utf-8"
-    )
 
-    with pytest.raises(
-        TemtError,
-        match=r"^launch-template\.IamInstanceProfile in ~/\.config/temt/defaults\.toml points at ",
-    ):
+    role.delete(service, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out) == [
+        f"role {service.name}: absent",
+        f"instance profile {service.name}: absent",
+    ]
+
+
+def test_delete_names_the_defaults_file_that_has_role(aws_stubs: Stubs, service: Service) -> None:
+    """[role] が共通ファイルにあれば、そのファイルの名前を挙げる。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(f'AwsRegion = "{REGION}"\n', encoding="utf-8")
+    defaults_path().write_text(f'[role]\nManagedPolicyArns = ["{MANAGED}"]\n', encoding="utf-8")
+
+    with pytest.raises(TemtError, match=r"^\[role\] in ~/\.config/temt/defaults\.toml makes "):
         role.delete(service, yes=True)
 
     aws_stubs.done()
+
+
+def test_delete_names_the_defaults_file_beside_an_empty_role(
+    aws_stubs: Stubs, service: Service
+) -> None:
+    """設定ファイルの中身の無い [role] は書かれていないのと同じなので、共通ファイルを挙げる。"""
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text(f'AwsRegion = "{REGION}"\n\n[role]\n', encoding="utf-8")
+    defaults_path().write_text(f'[role]\nManagedPolicyArns = ["{MANAGED}"]\n', encoding="utf-8")
+
+    with pytest.raises(TemtError, match=r"^\[role\] in ~/\.config/temt/defaults\.toml makes "):
+        role.delete(service, yes=True)
+
+    aws_stubs.done()
+
+
+def test_delete_does_not_look_at_the_instance_profile_pointed_at(
+    aws_stubs: Stubs, imported: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[role] が無ければ、IamInstanceProfile が <名前> を指していても止めない。次の apply が
+    止まるので分かる。
+    """
+    imported.conf_path.write_text(
+        IMPORTED.replace(
+            f'{{ Arn = "arn:aws:iam::123456789012:instance-profile/{SOURCE_PROFILE}" }}',
+            '{ Name = "${temt:name}" }',
+        ),
+        encoding="utf-8",
+    )
+    missing(aws_stubs.iam, "get_role", resources.NO_SUCH_ENTITY, RoleName=NAME)
+    missing(
+        aws_stubs.iam, "get_instance_profile", resources.NO_SUCH_ENTITY, InstanceProfileName=NAME
+    )
+
+    role.delete(imported, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out) == [
+        f"role {NAME}: absent",
+        f"instance profile {NAME}: absent",
+    ]
 
 
 def test_delete_stops_while_an_instance_uses_the_instance_profile(
@@ -1168,6 +1251,7 @@ def test_delete_changes_nothing_when_the_answer_is_not_y(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     found_pair(aws_stubs)
     no_users(aws_stubs)

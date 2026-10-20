@@ -20,10 +20,10 @@ import tomlkit
 from botocore.exceptions import ClientError
 from tomlkit.items import Table
 
-from temt import aws, conf, instances, ltbuild, ltdata, msg, resources
+from temt import aws, conf, instances, ltdata, msg, resources
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import LABEL_RULE, PREFIX, is_label, replace_text
+from temt.names import LABEL_RULE, PREFIX, defaults_path, is_label, replace_text
 from temt.table import printable, tilde
 
 if TYPE_CHECKING:
@@ -102,20 +102,17 @@ def _read_role(iam: IAMClient, name: str) -> tuple[dict[str, list[dict[str, Any]
 
 
 def _role_table(inline: Mapping[str, list[dict[str, Any]]], managed: list[str]) -> Any:
-    """[role] のテーブル。インラインポリシーは [[role.policy.<ポリシー名>]] に、管理
-    ポリシーは ManagedPolicyArns にする。
+    """[role] のテーブル。インラインポリシーは [[role.<ポリシー名>]] に、管理ポリシーは
+    ManagedPolicyArns にする。
     """
     table = tomlkit.table()
     if managed:
-        table["ManagedPolicyArns"] = managed
-    if inline:
-        policies = tomlkit.table(is_super_table=True)
-        for label, statements in inline.items():
-            aot = tomlkit.aot()
-            for statement in statements:
-                aot.append(statement)
-            policies[label] = aot
-        table["policy"] = policies
+        table[conf.MANAGED_POLICY_ARNS] = managed
+    for label, statements in inline.items():
+        aot = tomlkit.aot()
+        for statement in statements:
+            aot.append(statement)
+        table[label] = aot
     return table
 
 
@@ -125,21 +122,23 @@ def _rewritten(text: str, path: Path, inline: Mapping[str, Any], managed: list[s
     """
     document = tomlkit.parse(text)
     conf.replace_table(
-        document, "role", _role_table(inline, managed) if inline or managed else None
+        document, conf.ROLE, _role_table(inline, managed) if inline or managed else None
     )
     written = tomlkit.dumps(document)
     profile = conf.launch_template_key(ltdata.PROFILE)
     changed = tomlkit.parse(written)
     current = (changed.get(conf.LAUNCH_TEMPLATE) or {}).get(ltdata.PROFILE)
-    if isinstance(current, Table):
+    if current is None or isinstance(current, Table):
         # テーブルかドット付きキーで書かれていれば、中の Name を書き換え、Arn を消す。
-        # 丸ごと置き換えると、後ろのコメントが消える
-        if "Arn" in current:
+        # 丸ごと置き換えると、後ろのコメントが消える。無ければ、雛形と同じくドット付きキー
+        # IamInstanceProfile.Name で書く
+        if current is not None and "Arn" in current:
             del current["Arn"]
         _ = conf.write_document(
             changed, f"{profile}{conf.SEPARATOR}Name", "${temt:name}", path, "role import"
         )
         return tomlkit.dumps(changed)
+    # インラインテーブルで書かれていれば、その場で値を置き換える
     if not conf.write_document(changed, profile, {"Name": "${temt:name}"}, path, "role import"):
         return written
     return tomlkit.dumps(changed)
@@ -170,7 +169,7 @@ def import_role(service: Service, role: str, *, yes: bool) -> None:
     before = conf.written(service, key)
     lines = [
         *(
-            f"[[role.policy.{label}]] ({len(found)} "
+            f"[[{conf.ROLE}.{label}]] ({len(found)} "
             f"{'statement' if len(found) == 1 else 'statements'})"
             for label, found in inline.items()
         ),
@@ -216,22 +215,28 @@ def _users(ec2: EC2Client, service: Service) -> list[str]:
 def delete(service: Service, *, yes: bool) -> None:
     """temt のインスタンスロールとインスタンスプロファイル <名前> を消す。
 
-    temt:service=<svc> が付いているものだけを消す。設定ファイルがそれを指しているあいだ、
-    それを使うインスタンスがあるあいだ、ロールがほかのインスタンスプロファイルにも
-    入っているあいだは、消さずに止める。
+    temt:service=<svc> が付いているものだけを消す。[role] が書かれているあいだ（次の
+    apply が作り直す）、ロールにほかのリージョンのタグが残っているあいだ（そこの設定には
+    [role] がある）、このリージョンでそれを使うインスタンスがあるあいだ、ロールがほかの
+    インスタンスプロファイルにも入っているあいだは、消さずに止める。[role] が無いのに
+    IamInstanceProfile が <名前> を指していれば、次の apply が止まるので、ここでは見ない。
+    <名前> が長すぎれば、IAM を呼ばずに、どちらも無いものとする。
     """
     values = conf.load(service)
     session = aws.session(values)
     iam = session.client("iam")
     ec2 = session.client("ec2")
-    if ltbuild.points_at_temt(values.launch_template, service):
+    if values.role:
+        # 中身の無い [role] は書かれていないのと同じなので、中身のあるファイルを挙げる
+        own = conf.load(service, common=False).role
+        where = service.conf_path if own else defaults_path()
         raise TemtError(
-            f"{conf.launch_template_key(ltdata.PROFILE)} in "
-            f"{printable(tilde(conf.source(service, conf.launch_template_key(ltdata.PROFILE))))} "
-            f"points at {service.name}, and the next apply would make it again; change it first"
+            f"[{conf.ROLE}] in {printable(tilde(where))} makes "
+            f"{service.name}, and the next apply would make it again; remove [{conf.ROLE}] first"
         )
-    role = resources.read_tags(iam, "role", service)
-    profile = resources.read_tags(iam, "instance profile", service)
+    too_long = resources.too_long(service)
+    role = None if too_long else resources.read_tags(iam, "role", service)
+    profile = None if too_long else resources.read_tags(iam, "instance profile", service)
     if role is None and profile is None:
         msg.info(f"role {service.name}: {resources.ABSENT}")
         msg.info(f"instance profile {service.name}: {resources.ABSENT}")
@@ -241,6 +246,13 @@ def delete(service: Service, *, yes: bool) -> None:
             raise TemtError(
                 f"the {what} {service.name} is not tagged {aws.TAG_SERVICE}={service.svc}; "
                 f"delete it by hand"
+            )
+    if role is not None:
+        regions = [one for one in aws.tagged_regions({"Tags": role}) if one != values.AwsRegion]
+        if regions:
+            raise TemtError(
+                f"the role {service.name} is used in {', '.join(regions)} (tagged "
+                f"{aws.region_tag(regions[0])}); remove [{conf.ROLE}] and run apply there first"
             )
     if profile is not None:
         used = _users(ec2, service)
@@ -265,15 +277,12 @@ def delete(service: Service, *, yes: bool) -> None:
                 f"the role {service.name} is also in the instance profile {others[0]}; "
                 f"remove it from there by hand and run role delete again"
             )
-        inline = resources.inline_policies(iam, service)
-        managed = resources.attached_policies(iam, service)
-        policies = [
-            *([f"inline policies: {', '.join(inline)}"] if inline else []),
-            *([f"managed policies: {', '.join(managed)}"] if managed else []),
-        ]
-        lines.append(f"role {service.name}" + (f" ({'; '.join(policies)})" if policies else ""))
+        policies = resources.held(
+            resources.inline_policies(iam, service), resources.attached_policies(iam, service)
+        )
+        lines.append(f"role {service.name}" + (f" ({policies})" if policies else ""))
     msg.tell(f"role delete {service.name}:\n" + "".join(f"  {line}\n" for line in lines))
-    msg.confirm(f"delete them for {service.name}?", yes=yes)
+    aws.confirm(session, f"delete them for {service.name}", yes=yes)
     if profile is not None:
         _ = resources.delete_instance_profile(iam, service, command="role delete")
     if role is not None:

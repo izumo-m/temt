@@ -21,14 +21,9 @@ def test_service_name_rejected(svc: str) -> None:
         Service(svc)
 
 
-def test_name_of_64_characters_accepted() -> None:
-    # temt- で 5 文字を使う
-    assert len(Service("a" * 59).name) == names.NAME_MAX
-
-
-def test_longer_name_rejected() -> None:
-    with pytest.raises(UsageError):
-        Service("a" * 60)
+def test_a_long_name_is_not_checked() -> None:
+    """<名前> の長さは調べない。長すぎれば、AWS が作るところで断る。"""
+    assert len(Service("a" * 60).name) == 65
 
 
 def test_derived_names() -> None:

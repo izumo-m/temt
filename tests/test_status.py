@@ -337,10 +337,9 @@ def test_main_runs_it(
     statuses(aws_stubs)
     assert cli.main(["temt", "--profile", "work", "status", "--svc", "dev-main"]) == 0
     aws_stubs.done()
-    # --profile はその実行だけに効き、読んだ設定にも設定ファイルにも混ざらない。設定
-    # ファイルに書くのは apply だけである
+    # --profile はその実行だけに効き、設定ファイルには書かない
     assert conf.OPTION_PROFILE == "work"
-    assert aws_stubs.passed[0].AwsProfile is None
+    assert aws_stubs.passed[0].AwsProfile == "work"
     assert configured.conf_path.read_text(encoding="utf-8") == before
     out, err = capsys.readouterr()
     assert out == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"

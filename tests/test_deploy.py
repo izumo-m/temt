@@ -12,17 +12,27 @@ import shutil
 import subprocess
 import tarfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import Stubs, an_instance, deadline, reservations, taken
+from conftest import (
+    REGION,
+    WHERE,
+    Stubs,
+    an_instance,
+    deadline,
+    identified,
+    reservations,
+    taken,
+)
 
-from temt import app, bake, conf, deploy, home, lock, proc
+from temt import app, bake, conf, deploy, home, lock, proc, proxy
 from temt.instances import Instance
 from temt.manifest import Manifest, read_manifest
-from temt.msg import TemtError
+from temt.msg import TemtError, UsageError
 from temt.names import Service
 
 NAME = "temt-dev-main"
@@ -78,13 +88,19 @@ class Ssh:
     asked: list[list[str]] = field(default_factory=list)
     # インスタンスにいるユーザー。id -u で確かめられる
     users: tuple[str, ...] = ("ubuntu",)
+    # 呼ばれたときの環境。呼ばれた順に並ぶ
+    envs: list[Mapping[str, str] | None] = field(default_factory=list)
 
-    def stream(self, argv: list[str], data: bytes | None = None) -> int:
+    def stream(
+        self, argv: list[str], data: bytes | None = None, *, env: Mapping[str, str] | None = None
+    ) -> int:
         self.calls.append((argv, data))
+        self.envs.append(env)
         return self.codes.pop(0) if self.codes else 0
 
-    def read(self, argv: list[str]) -> tuple[int, str]:
+    def read(self, argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
         self.asked.append(argv)
+        self.envs.append(env)
         if argv[3].startswith("id -u -- "):
             return (0, "1000\n") if argv[3].split()[-1] in self.users else (1, "")
         if self.reached is None:
@@ -492,6 +508,46 @@ def test_deploy_sends_installs_and_records(
     ]
 
 
+def test_deploy_and_remove_pass_the_region_and_the_profile_to_proxy(
+    aws_stubs: Stubs,
+    configured: Service,
+    jupyter: Path,
+    ssh: Ssh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """temt が実行する ssh には、決めたリージョンとプロファイルを proxy 向けの環境変数で渡す。
+
+    利用者の環境はそのまま渡し、プロファイルを選んでいなければ渡さない。
+    """
+    monkeypatch.setenv("TEMT_LOGIN", "direct")
+    monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "stale")
+    ready(aws_stubs)
+    recorded(aws_stubs)
+    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
+    aws_stubs.done()
+    assert len(ssh.envs) == 3
+    for env in ssh.envs:
+        assert env is not None
+        assert env[proxy.PASSED_REGION_ENV] == REGION
+        assert proxy.PASSED_PROFILE_ENV not in env
+        assert env["TEMT_LOGIN"] == "direct"
+
+    ssh.envs.clear()
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    monkeypatch.setattr(conf, "OPTION_REGION", "us-west-2")
+    ready(aws_stubs)
+    has_record(aws_stubs)
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
+    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
+    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
+    aws_stubs.done()
+    assert ssh.envs
+    for env in ssh.envs:
+        assert env is not None
+        assert env[proxy.PASSED_REGION_ENV] == "us-west-2"
+        assert env[proxy.PASSED_PROFILE_ENV] == "work"
+
+
 def test_deploy_keeps_the_baked_version_of_the_record(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
@@ -659,17 +715,18 @@ def test_deploy_with_bake_asks_first_and_bakes_last(
 ) -> None:
     asked: list[str] = []
     monkeypatch.setattr(
-        "temt.msg.confirm", lambda question, *, yes: asked.append(f"{question} {yes}")
+        "temt.msg.confirm", lambda question, *, yes: asked.append(f"{question()} {yes}")
     )
     ready(aws_stubs)
     recorded(aws_stubs)
+    identified(aws_stubs)
 
     deploy.run(configured, "jupyter", user=None, baking=True, yes=True)
 
     aws_stubs.done()
     assert baking.made == ["check", f"make {INSTANCE}"]
     assert asked == [
-        f"deploy jupyter 1.2 to {INSTANCE} as root and bake {INSTANCE} (running)? True"
+        f"deploy jupyter 1.2 to {INSTANCE} as root and bake {INSTANCE} (running) {WHERE}? True"
     ]
     out = capsys.readouterr().out
     assert f"deploy jupyter 1.2 to {INSTANCE} as root and bake {NAME}:\n" in out
@@ -734,8 +791,8 @@ def test_deploy_tells_when_ssh_fails_while_checking_the_user(
 ) -> None:
     read = ssh.read
 
-    def failing(argv: list[str]) -> tuple[int, str]:
-        return (255, "") if argv[3].startswith("id ") else read(argv)
+    def failing(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
+        return (255, "") if argv[3].startswith("id ") else read(argv, env=env)
 
     monkeypatch.setattr(proc, "read", failing)
     ready(aws_stubs)
@@ -982,14 +1039,17 @@ def test_remove_with_bake_tells_the_user_in_the_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asked: list[str] = []
-    monkeypatch.setattr("temt.msg.confirm", lambda question, *, yes: asked.append(question))
+    monkeypatch.setattr("temt.msg.confirm", lambda question, *, yes: asked.append(question()))
     ready(aws_stubs)
+    identified(aws_stubs)
     has_record(aws_stubs, "ubuntu")
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user=None, baking=True, yes=True)
     aws_stubs.done()
-    assert asked == [f"remove jupyter from {INSTANCE} as ubuntu and bake {INSTANCE} (running)?"]
+    assert asked == [
+        f"remove jupyter from {INSTANCE} as ubuntu and bake {INSTANCE} (running) {WHERE}?"
+    ]
 
 
 def test_remove_deletes_the_record_when_the_app_is_not_there(
@@ -1267,6 +1327,37 @@ def test_it_stops_when_another_command_holds_the_lock(
 
 
 @pytest.mark.parametrize("command", ["deploy", "remove"])
+def test_bake_stops_before_anything_when_image_id_is_written(
+    aws_stubs: Stubs,
+    configured: Service,
+    jupyter: Path,
+    ssh: Ssh,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """--bake で ImageId を書いていれば、AMI は固定で焼けないので、ロックも取らず、AWS も
+    インスタンスにも触れずに引数の誤りで止める。"""
+    monkeypatch.setattr(lock, "hold", lambda service: pytest.fail("the lock was taken"))
+    text = configured.conf_path.read_text(encoding="utf-8")
+    configured.conf_path.write_text(
+        text.replace(
+            "[launch-template]\n", '[launch-template]\nImageId = "ami-0123456789abcdef0"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UsageError) as caught:
+        _start(command, configured, baking=True)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        "launch-template.ImageId in ~/.config/temt/dev-main.toml fixes the AMI; "
+        "remove the line to bake"
+    )
+    assert ssh.calls == []
+
+
+@pytest.mark.parametrize("command", ["deploy", "remove"])
 def test_it_holds_the_lock_until_it_has_baked(
     aws_stubs: Stubs,
     configured: Service,
@@ -1281,9 +1372,11 @@ def test_it_holds_the_lock_until_it_has_baked(
     stream = ssh.stream
     make = baking.make
 
-    def probe(argv: list[str], data: bytes | None = None) -> int:
+    def probe(
+        argv: list[str], data: bytes | None = None, *, env: Mapping[str, str] | None = None
+    ) -> int:
         held.append(not taken(configured))
-        return stream(argv, data)
+        return stream(argv, data, env=env)
 
     def making(ec2: Any, ssm: Any, service: Service, one: Instance) -> None:
         held.append(not taken(configured))

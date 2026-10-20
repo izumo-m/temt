@@ -43,8 +43,8 @@ THE_IMAGE = {"ImageIds": [IMAGE]}
 SERVICE_IMAGES = {
     "Owners": ["self"],
     "Filters": [
-        {"Name": "tag:temt:service", "Values": ["dev-main"]},
-        {"Name": "state", "Values": ["available"]},
+        {"Name": "name", "Values": ["temt-dev-main-??????????"]},
+        {"Name": "state", "Values": ["available", "pending"]},
     ],
 }
 # temt が付けるタグ
@@ -139,13 +139,13 @@ def no_image(stubs: Stubs) -> None:
     )
 
 
-def service_images(stubs: Stubs, *found: tuple[str, str]) -> None:
-    """temt:service=dev-main の AMI を積む。"""
+def service_images(stubs: Stubs, *found: tuple[str, str], state: str = "available") -> None:
+    """名前が temt-dev-main-<時刻> の AMI を積む。"""
     stubs.ec2.add_response(
         "describe_images",
         {
             "Images": [
-                {"ImageId": one, "Name": NAMES[one], "CreationDate": created}
+                {"ImageId": one, "Name": NAMES[one], "State": state, "CreationDate": created}
                 for one, created in found
             ]
         },
@@ -217,7 +217,7 @@ def test_it_shows_the_default_version(
         f"  created:     {MADE_SHOWN}\n"
         "  state:       available\n"
         "  root volume: 8 GiB\n"
-        f"  latest:      {IMAGE_NAME} ({IMAGE}, temt:service=dev-main) created {MADE_SHOWN}\n"
+        f"  latest:      {IMAGE_NAME} ({IMAGE}) created {MADE_SHOWN}\n"
         "versions (* is the default):\n"
         f"  3 * 2026-09-20 18:00:00 {IMAGE} t3.micro {SUBNET}\n"
     )
@@ -346,14 +346,15 @@ def test_it_shows_an_image_that_is_gone(
     assert section(capsys.readouterr().out, "image ") == [
         f"image {IMAGE}:",
         "  state:  (not found; it may have been deregistered)",
-        f"  latest: {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) created {LATER_SHOWN}",
+        f"  latest: {NEWEST_NAME} ({NEWEST}) created {LATER_SHOWN}",
     ]
 
 
 def test_it_marks_a_newer_image(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """temt:service=<svc> の最新 AMI がテンプレートのものより新しければ、そう分かるようにする。"""
+    """サービスの最新 AMI（apply が起動テンプレートを作るときに選ぶもの）がテンプレートのもの
+    より新しければ、そう分かるようにする。"""
     versions(aws_stubs, a_version(1))
     subnet(aws_stubs)
     image(aws_stubs)
@@ -361,8 +362,7 @@ def test_it_marks_a_newer_image(
     show.template(configured)
     aws_stubs.done()
     assert section(capsys.readouterr().out, "image ")[-1] == (
-        f"  latest:      {NEWEST_NAME} ({NEWEST}, temt:service=dev-main) "
-        f"created {LATER_SHOWN}, newer"
+        f"  latest:      {NEWEST_NAME} ({NEWEST}) created {LATER_SHOWN}, newer"
     )
 
 
@@ -377,7 +377,7 @@ def test_it_shows_no_ami_of_the_service(
     aws_stubs.done()
     assert (
         section(capsys.readouterr().out, "image ")[-1]
-        == "  latest:      none (temt:service=dev-main)"
+        == "  latest:      none (no AMI named temt-dev-main-<YYMMDDHHMM>)"
     )
 
 
@@ -447,3 +447,18 @@ def test_main_runs_it(
     out, err = capsys.readouterr()
     assert err == ""
     assert out.startswith(f"launch template {TEMPLATE}:\n")
+
+
+def test_it_tells_that_the_newest_image_is_pending(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """最新の AMI が pending（コピーの途中など）なら、そう添える。"""
+    versions(aws_stubs, a_version(1))
+    subnet(aws_stubs)
+    image(aws_stubs)
+    service_images(aws_stubs, (NEWEST, LATER), state="pending")
+    show.template(configured)
+    aws_stubs.done()
+    assert section(capsys.readouterr().out, "image ")[-1] == (
+        f"  latest:      {NEWEST_NAME} ({NEWEST}, pending) created {LATER_SHOWN}, newer"
+    )

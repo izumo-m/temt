@@ -8,7 +8,7 @@ AWS は呼ばない。docker の image ls が手元のイメージを挙げる�
 from pathlib import Path
 from typing import Any
 
-from temt import conf, ltdata, msg, table
+from temt import conf, msg, table
 from temt.conf import INSTANCE_TYPE, UNSET, Conf
 from temt.msg import TemtError
 from temt.names import Service, conf_dir, defaults_path, exists
@@ -18,9 +18,10 @@ SUFFIX = ".toml"
 # 読まないファイルの名前の頭
 HIDDEN = "."
 
+# AMI とサブネットの列は無い。ふつうは書かず、リージョンごとに AWS で決まるからである
 COLUMNS = table.Columns(
-    defaults=("SERVICE", "PROFILE", "REGION", "IMAGE", "TYPE"),
-    extras=("SUBNET", "INGRESS"),
+    defaults=("SERVICE", "PROFILE", "REGION", "TYPE"),
+    extras=("INGRESS",),
 )
 
 
@@ -31,17 +32,15 @@ def _value(value: Any) -> str:
 
 def _row(service: Service, values: Conf) -> dict[str, str]:
     """サービス 1 つの行。値は読んだときに効くもので、InstanceType は書かれていなければ
-    既定を出す。
+    既定を出す。AwsProfile と AwsRegion は、書かれていなければ空（table が EMPTY と出す）に
+    して、プロファイルやリージョンを決めているサービスと見分けられるようにする。
     """
     template = values.launch_template
-    first = ltdata.element(template.get("NetworkInterfaces") or [], "DeviceIndex", 0) or {}
     return {
         "SERVICE": service.svc,
         "PROFILE": _value(values.AwsProfile),
         "REGION": _value(values.AwsRegion),
-        "IMAGE": _value(template.get("ImageId")),
         "TYPE": _value(template.get("InstanceType") or INSTANCE_TYPE),
-        "SUBNET": _value(first.get("SubnetId")),
         "INGRESS": str(len(values.security_group.ingress)),
     }
 

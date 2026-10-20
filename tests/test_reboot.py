@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import Clock, Stubs, an_instance, deadline, reservations, taken
+from conftest import WHERE, Clock, Stubs, an_instance, deadline, identified, reservations, taken
 
 from temt import aws, cli, home, lock, reboot, wait
 from temt.conf import Conf
@@ -57,7 +57,7 @@ BOOTED = REQUESTED + timedelta(seconds=30)
 BEFORE = "5f0c3d1e-0000-4000-8000-000000000001"
 AFTER = "5f0c3d1e-0000-4000-8000-000000000002"
 # 手順 3 の問いかけ。標準エラー出力に書く
-PROMPT = f"reboot {INSTANCE} (running)? [y/N] "
+PROMPT = f"reboot {INSTANCE} (running) {WHERE}? [y/N] "
 # 状態が合わないときに、AWS が reboot-instances を断るメッセージ
 REFUSED = f"The instance '{INSTANCE}' is not in a state from which it can be rebooted."
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
@@ -152,6 +152,7 @@ def test_it_reboots_and_waits_until_the_boot_id_changes(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     found(aws_stubs)
     read_before(aws_stubs)
     rebooted(aws_stubs)
@@ -265,6 +266,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """確認は boot_id を読む前に求める。y でなければ何もしない。"""
+    identified(aws_stubs)
     _ = configured
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     found(aws_stubs)

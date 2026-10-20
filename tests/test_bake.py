@@ -1,8 +1,8 @@
 """bake の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（bake.run か cli.main）を通し、手順の順序と、失敗したときに設定ファイル、
-テンプレート、記録がどう残るかを確かめる。Stubber は積んだ順にしか応答しないので、
-応答を積む順が手順の順序を表す。
+端から端まで（bake.run か cli.main）を通し、手順の順序と、失敗したときにテンプレートと
+記録がどう残るかを確かめる。設定ファイルには、どの場合も書かない。Stubber は積んだ順に
+しか応答しないので、応答を積む順が手順の順序を表す。
 """
 
 import json
@@ -14,21 +14,30 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import Clock, Stubs, an_instance, deadline, reservations, taken
+from conftest import (
+    CONFIGURED,
+    WHERE,
+    Clock,
+    Stubs,
+    an_instance,
+    deadline,
+    identified,
+    reservations,
+    taken,
+)
 from types_boto3_ec2.client import EC2Client
 from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef
 
 from temt import app, bake, cli, conf, home, lock, resources, wait
-from temt.msg import TemtError
+from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path
-from temt.table import tilde
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
 INSTANCE = "i-0123456789abcdef0"
 OTHER = "i-0fedcba9876543210"
 ADDRESS = "203.0.113.10"
-# 設定ファイル（conftest の configured）とテンプレートが指している AMI
+# テンプレートが指している AMI。設定ファイル（conftest の configured）は ImageId を書かない
 OLD = "ami-0123456789abcdef0"
 NEW = "ami-0fedcba9876543210"
 SUBNET = "subnet-0123456789abcdef0"
@@ -70,7 +79,7 @@ CREATE = {
     ],
 }
 THE_IMAGE = {"ImageIds": [NEW]}
-PROMPT = f"bake {INSTANCE} (running)? [y/N] "
+PROMPT = f"bake {INSTANCE} (running) {WHERE}? [y/N] "
 # 手順 3 で、設定ファイルの SubnetId と、その VPC にある temt のセキュリティグループを引く
 THE_SUBNET = {"Filters": [{"Name": "subnet-id", "Values": [SUBNET]}]}
 THE_GROUP = {
@@ -81,11 +90,8 @@ THE_GROUP = {
 }
 # temt が付けるタグ
 MARKS = [{"Key": "Name", "Value": NAME}, {"Key": "temt:service", "Value": "dev-main"}]
-# ImageId が無いか、指す AMI が使えないときの誤り。行を消す案内は apply に任せる
-UNUSABLE_IMAGE = (
-    f"the launch template {TEMPLATE} does not match ~/.config/temt/dev-main.toml in ImageId; "
-    "run 'temt apply --svc dev-main' first"
-)
+# テンプレートの AMI が使えないときの誤り。apply と同じく、--image-id で選ぶよう告げる
+LOST_IMAGE = f"the AMI {OLD} of the launch template {TEMPLATE} {{}}; choose one with --image-id"
 
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
@@ -168,7 +174,7 @@ def a_version(
 
 
 def an_image(image_id: str = OLD, **changes: Any) -> dict[str, Any]:
-    """describe-images が返す、設定ファイルの ImageId の AMI。ルートボリュームは 8 GiB。"""
+    """describe-images が返す、テンプレートの ImageId の AMI。ルートボリュームは 8 GiB。"""
     return {
         "ImageId": image_id,
         "State": "available",
@@ -197,23 +203,19 @@ def read_template(stubs: Stubs, *versions: dict[str, Any]) -> None:
     )
 
 
-def looked_up(stubs: Stubs, *images: dict[str, Any], params: dict[str, Any] | None = None) -> None:
-    """設定ファイルの ImageId の AMI を引く describe-images を積む。
+def looked_up(stubs: Stubs, *images: dict[str, Any]) -> None:
+    """テンプレートの ImageId の AMI を ID で引く describe-images を積む。
 
-    ID で書かれていれば、その ID で引く。省けば、使える AMI が 1 つ見つかる。
+    省けば、使える AMI が 1 つ見つかる。
     """
     stubs.ec2.add_response(
-        "describe_images",
-        {"Images": list(images or (an_image(),))},
-        params or {"ImageIds": [OLD]},
+        "describe_images", {"Images": list(images or (an_image(),))}, {"ImageIds": [OLD]}
     )
 
 
-def networked(stubs: Stubs, *, group: str | None = GROUP, ipv6: bool = False) -> None:
-    """設定ファイルの SubnetId の VPC と、そこにある temt のセキュリティグループを積む。
-
-    group が None なら、temt のセキュリティグループはまだ無い。ipv6 なら、サブネットに
-    IPv6 の CIDR が結び付いている。
+def networked(stubs: Stubs, *, ipv6: bool = False) -> None:
+    """設定ファイルの SubnetId のサブネットを積む。Ipv6AddressCount が書かれていないので、
+    apply と同じく埋めるために読む。ipv6 なら、サブネットに IPv6 の CIDR が結び付いている。
     """
     subnet: dict[str, Any] = {"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "172.31.0.0/20"}
     if ipv6:
@@ -221,6 +223,10 @@ def networked(stubs: Stubs, *, group: str | None = GROUP, ipv6: bool = False) ->
             {"Ipv6CidrBlock": "2600:1f18::/64", "Ipv6CidrBlockState": {"State": "associated"}}
         ]
     stubs.ec2.add_response("describe_subnets", {"Subnets": [subnet]}, THE_SUBNET)
+
+
+def grouped(stubs: Stubs, *, group: str | None = GROUP) -> None:
+    """サブネットの VPC にある temt のセキュリティグループを積む。group が None なら、まだ無い。"""
     groups = [] if group is None else [{"GroupId": group, "GroupName": NAME, "VpcId": VPC}]
     stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": groups}, THE_GROUP)
 
@@ -228,12 +234,14 @@ def networked(stubs: Stubs, *, group: str | None = GROUP, ipv6: bool = False) ->
 def checked(stubs: Stubs, *versions: dict[str, Any]) -> None:
     """手順 3 のテンプレートの確かめを積む。
 
-    テンプレートを読み、設定ファイルから中身を組み立てる（ImageId の AMI、SubnetId の VPC、
-    temt のセキュリティグループを引く）。
+    テンプレートを読み、書かれていない項目を埋め（SubnetId のサブネットを引く）、テンプレートの
+    ImageId の AMI を引き、設定ファイルから中身を組み立てる（temt のセキュリティグループを
+    引く）。
     """
     read_template(stubs, *versions)
-    looked_up(stubs)
     networked(stubs)
+    looked_up(stubs)
+    grouped(stubs)
 
 
 def stopped(stubs: Stubs) -> None:
@@ -368,9 +376,17 @@ def terminated(stubs: Stubs) -> None:
     )
 
 
-def image_id(service: Service) -> str | None:
-    """設定ファイルの ImageId。"""
-    return conf.load(service).launch_template.get("ImageId")
+def untouched(service: Service) -> bool:
+    """設定ファイルが、置いたときのまま（conftest の CONFIGURED）か。bake は書かない。"""
+    return service.conf_path.read_text(encoding="utf-8") == CONFIGURED
+
+
+def resized(service: Service) -> None:
+    """設定ファイルの InstanceType を t3.small にし、テンプレートと食い違わせる。"""
+    text = service.conf_path.read_text(encoding="utf-8")
+    service.conf_path.write_text(
+        text.replace('InstanceType = "t3.micro"', 'InstanceType = "t3.small"'), encoding="utf-8"
+    )
 
 
 def test_it_bakes_a_running_instance(
@@ -380,6 +396,7 @@ def test_it_bakes_a_running_instance(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     known = home.prepare_known_hosts(configured) / INSTANCE
     known.touch()
     found(aws_stubs, an_instance(INSTANCE, "running", address=ADDRESS))
@@ -396,7 +413,7 @@ def test_it_bakes_a_running_instance(
 
     aws_stubs.done()
     assert answer.reads == 1
-    assert image_id(configured) == IMAGE_NAME
+    assert untouched(configured)
     assert not known.exists()
     captured = capsys.readouterr()
     # 問いかけだけを標準エラー出力に書く
@@ -405,21 +422,16 @@ def test_it_bakes_a_running_instance(
         f"bake {NAME}:\n"
         f"  stop {INSTANCE}\n"
         f"  make an AMI of {INSTANCE}\n"
-        "  point ImageId in ~/.config/temt/dev-main.toml and the launch template at the AMI "
-        "when it is available\n"
+        f"  point the launch template {TEMPLATE} at the AMI when it is available\n"
         f"  terminate {INSTANCE}\n"
     )
     assert captured.out.startswith(listing)
     lines = told(captured.out.removeprefix(listing))
     assert f"creating the AMI {NEW} ({IMAGE_NAME}) from {INSTANCE}" in lines
-    assert (
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} (was {OLD})"
-        in lines
-    )
-    assert f"launch template {TEMPLATE}: updated (version 2, {NEW})" in lines
-    # 設定ファイルを書き換えるのは、AMI が使えるようになってから
+    assert not [line for line in lines if line.startswith("wrote ")]
+    # テンプレートを向けるのは、AMI が使えるようになってから
     assert lines.index(f"the AMI {NEW} is available") < lines.index(
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} (was {OLD})"
+        f"launch template {TEMPLATE}: updated (version 2, {NEW})"
     )
     assert lines[-1] == f"baked {IMAGE_NAME} ({NEW}); the next start boots from it"
     # 停止を 1 回、AMI を 1 回待った
@@ -440,7 +452,7 @@ def test_it_bakes_a_stopped_instance_without_stopping_it(
     bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == IMAGE_NAME
+    assert untouched(configured)
     assert "  stop " not in capsys.readouterr().out
 
 
@@ -507,9 +519,11 @@ def test_it_leaves_the_other_volumes_out_of_the_ami(
     assert not [line for line in lines if DATA_DEVICE in line]
 
 
-def test_it_keeps_the_rest_of_the_config_file(
+def test_it_does_not_write_the_config_file(
     aws_stubs: Stubs, configured: Service, answer: Terminal
 ) -> None:
+    """そのリージョンの起動テンプレートだけを替え、設定ファイルには ImageId を書かない。"""
+    identified(aws_stubs)
     _ = answer
     text = configured.conf_path.read_text(encoding="utf-8")
     configured.conf_path.write_text("# mine\n" + text, encoding="utf-8")
@@ -523,14 +537,13 @@ def test_it_keeps_the_rest_of_the_config_file(
 
     bake.run(configured, yes=False)
 
-    assert configured.conf_path.read_text(encoding="utf-8") == "# mine\n" + text.replace(
-        OLD, IMAGE_NAME
-    )
+    assert configured.conf_path.read_text(encoding="utf-8") == "# mine\n" + text
 
 
 def test_it_does_nothing_when_the_answer_is_no(
     aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     found(aws_stubs, an_instance(INSTANCE, "running", address=ADDRESS))
     checked(aws_stubs)
@@ -539,7 +552,7 @@ def test_it_does_nothing_when_the_answer_is_no(
         bake.run(configured, yes=False)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
 def test_it_stops_when_there_is_no_instance(aws_stubs: Stubs, configured: Service) -> None:
@@ -586,9 +599,7 @@ def test_it_does_not_count_an_instance_that_is_shutting_down(
     aws_stubs: Stubs, configured: Service
 ) -> None:
     """終了の途中のものは 2 台と数えず、running の方を焼こうと先へ進む。"""
-    _ = conf.update(
-        configured, conf.load(configured), conf.launch_template_key("InstanceType"), "t3.small"
-    )
+    resized(configured)
     found(aws_stubs, an_instance(OTHER, "shutting-down"), an_instance(INSTANCE, "running"))
     checked(aws_stubs)
 
@@ -614,9 +625,7 @@ def test_it_stops_while_the_instance_is_changing(
 def test_it_asks_for_apply_when_the_config_file_differs(
     aws_stubs: Stubs, configured: Service
 ) -> None:
-    _ = conf.update(
-        configured, conf.load(configured), conf.launch_template_key("InstanceType"), "t3.small"
-    )
+    resized(configured)
     found(aws_stubs, an_instance(INSTANCE, "running"))
     checked(aws_stubs)
 
@@ -637,9 +646,7 @@ def test_it_lists_every_position_that_differs(aws_stubs: Stubs, configured: Serv
 
     設定ファイルにある項目が先で、テンプレートにだけある項目が後。
     """
-    _ = conf.update(
-        configured, conf.load(configured), conf.launch_template_key("InstanceType"), "t3.small"
-    )
+    resized(configured)
     found(aws_stubs, an_instance(INSTANCE, "running"))
     checked(aws_stubs, a_version(1, OLD, data=applied(KeyName="mine")))
 
@@ -666,7 +673,11 @@ def test_it_asks_for_apply_when_an_item_is_not_applied(
         encoding="utf-8",
     )
     found(aws_stubs, an_instance(INSTANCE, "running"))
-    checked(aws_stubs)
+    # Ipv6AddressCount が書かれているので、サブネットは組み立てるときに読む
+    read_template(aws_stubs)
+    looked_up(aws_stubs)
+    networked(aws_stubs)
+    grouped(aws_stubs)
 
     with pytest.raises(
         TemtError,
@@ -680,17 +691,36 @@ def test_it_asks_for_apply_when_an_item_is_not_applied(
     aws_stubs.done()
 
 
-def test_it_asks_for_apply_when_a_filled_item_is_removed(
+def test_a_removed_filled_item_is_filled_as_apply_does(
+    aws_stubs: Stubs, configured: Service, ec2: EC2Client
+) -> None:
+    """apply が埋める項目の行を消しても、apply と同じく既定で埋めて比べるので、既定の値の
+    テンプレートとは揃っている。設定ファイルには書かない。"""
+    text = configured.conf_path.read_text(encoding="utf-8")
+    text = text.replace('InstanceType = "t3.micro"\n', "")
+    text = text.replace('InstanceInitiatedShutdownBehavior = "terminate"\n', "")
+    configured.conf_path.write_text(text, encoding="utf-8")
+    checked(aws_stubs)
+    values = conf.load(configured)
+
+    built = bake.check_template(ec2, configured, values)
+
+    aws_stubs.done()
+    assert built.data["InstanceType"] == "t3.micro"
+    assert "InstanceType" not in values.launch_template
+    assert configured.conf_path.read_text(encoding="utf-8") == text
+
+
+def test_it_asks_for_apply_when_a_filled_item_differs(
     aws_stubs: Stubs, configured: Service
 ) -> None:
-    """apply が埋める項目の行を消して、まだ apply していなければ、テンプレートにだけ残る
-    ので揃っていない。"""
+    """書いていない項目の既定が、テンプレートの値と違えば揃っていない。"""
     text = configured.conf_path.read_text(encoding="utf-8")
     configured.conf_path.write_text(
         text.replace('InstanceType = "t3.micro"\n', ""), encoding="utf-8"
     )
     found(aws_stubs, an_instance(INSTANCE, "running"))
-    checked(aws_stubs)
+    checked(aws_stubs, a_version(1, OLD, data=applied(InstanceType="t3.small")))
 
     with pytest.raises(
         TemtError, match=re.escape("in InstanceType; run 'temt apply --svc dev-main' first")
@@ -700,16 +730,16 @@ def test_it_asks_for_apply_when_a_filled_item_is_removed(
     aws_stubs.done()
 
 
-def test_it_asks_for_apply_when_an_item_apply_fills_is_not_written(
+def test_it_asks_for_apply_when_an_item_apply_fills_is_not_in_the_template(
     aws_stubs: Stubs, configured: Service
 ) -> None:
-    """テンプレートが設定ファイルと揃っていても、apply が書く項目がまだ無ければ、次の apply
-    が書いて中身を変えうるので揃っていない。サブネットに IPv6 があれば Ipv6AddressCount
-    も書く。"""
+    """書いていない項目は apply と同じく埋めて比べる。サブネットに IPv6 があれば
+    Ipv6AddressCount を埋めるので、それが無いテンプレートとは揃っていない。"""
     found(aws_stubs, an_instance(INSTANCE, "running"))
     read_template(aws_stubs)
-    looked_up(aws_stubs)
     networked(aws_stubs, ipv6=True)
+    looked_up(aws_stubs)
+    grouped(aws_stubs)
 
     with pytest.raises(
         TemtError,
@@ -789,8 +819,9 @@ def test_it_asks_for_apply_when_the_security_group_is_not_made(
     """
     found(aws_stubs, an_instance(INSTANCE, "running"))
     read_template(aws_stubs)
+    networked(aws_stubs)
     looked_up(aws_stubs)
-    networked(aws_stubs, group=None)
+    grouped(aws_stubs, group=None)
 
     with pytest.raises(
         TemtError,
@@ -811,6 +842,7 @@ def test_it_compares_the_template_as_aws_reads_it_back(
     IamInstanceProfile は ARN で返り、読み出したときにだけある項目が付き、配列の並びも
     変わる。揃っているので、確認まで進む。
     """
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     read_back = applied(
         IamInstanceProfile={"Arn": f"arn:aws:iam::123456789012:instance-profile/{NAME}"},
@@ -838,6 +870,7 @@ def test_it_compares_with_the_values_over_the_common_file(
 ) -> None:
     """設定ファイルを共通ファイルの上に重ねたものと比べる。共通ファイルの項目も揃って
     いなければならない。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     defaults_path().write_text('[launch-template]\nKeyName = "mine"\n', encoding="utf-8")
     found(aws_stubs, an_instance(INSTANCE, "running"))
@@ -902,6 +935,7 @@ def test_it_does_not_bake_a_root_volume_larger_than_the_volume_size(
     要素とする。
     """
     sized_conf(configured, 20, device=device)
+    text = configured.conf_path.read_text(encoding="utf-8")
     found(aws_stubs, with_root("running"))
     checked(aws_stubs, sized_version(20))
     root_size(aws_stubs, 30)
@@ -915,7 +949,7 @@ def test_it_does_not_bake_a_root_volume_larger_than_the_volume_size(
         "raise it to 30 or more or remove it in ~/.config/temt/dev-main.toml, "
         "then run 'temt apply --svc dev-main' and bake again"
     )
-    assert image_id(configured) == OLD
+    assert configured.conf_path.read_text(encoding="utf-8") == text
 
 
 def test_it_names_the_common_file_for_the_volume_size(
@@ -940,6 +974,7 @@ def test_it_bakes_a_root_volume_up_to_the_volume_size(
     aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch, size: int
 ) -> None:
     """ルートボリュームが Ebs.VolumeSize 以下なら、確認まで進む。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     sized_conf(configured, 30)
     found(aws_stubs, with_root("running"))
@@ -957,6 +992,7 @@ def test_it_bakes_when_the_root_volume_size_is_unknown(
     aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch, answer: str
 ) -> None:
     """ルートボリュームの大きさが分からなければ、比べられないので止めない。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     sized_conf(configured, 30)
     if answer == "no volume id":
@@ -1000,6 +1036,7 @@ def test_it_does_not_look_at_the_root_volume_without_a_volume_size(
     aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Ebs.VolumeSize が無ければ、焼いた AMI の大きさで起動するので、比べない。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     found(aws_stubs, with_root("running"))
     checked(aws_stubs)
@@ -1018,6 +1055,7 @@ def test_it_does_not_take_another_device_for_the_root_volume(
 
     その要素の Ebs.VolumeSize がインスタンスのルートボリュームより小さくても止めない。
     """
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     sized_conf(configured, 4, device=DATA_DEVICE)
     mappings = [{"DeviceName": DATA_DEVICE, "Ebs": {"VolumeSize": 4}}]
@@ -1068,21 +1106,36 @@ def test_it_asks_for_apply_when_the_volume_size_is_removed(
     aws_stubs.done()
 
 
-def test_it_asks_for_apply_when_the_image_id_is_not_written(
-    aws_stubs: Stubs, configured: Service
+def test_an_image_id_not_written_is_not_compared(
+    aws_stubs: Stubs, configured: Service, ec2: EC2Client
 ) -> None:
-    """ImageId が無ければ、組み立てられないので、AWS で AMI を引かずに、ImageId が揃って
-    いないとして apply を促す。"""
-    text = configured.conf_path.read_text(encoding="utf-8")
-    configured.conf_path.write_text(text.replace(OLD, ""), encoding="utf-8")
+    """ImageId は書かれていないので、テンプレートの AMI を使い、比べない。"""
+    checked(aws_stubs)
+    values = conf.load(configured)
+
+    built = bake.check_template(ec2, configured, values)
+
+    aws_stubs.done()
+    assert built.data["ImageId"] == OLD
+    assert "ImageId" not in values.launch_template
+
+
+def test_it_stops_without_any_image_id(aws_stubs: Stubs, configured: Service) -> None:
+    """テンプレートにも ImageId が無ければ、組み立てられないので、AWS で AMI を引かずに、
+    --image-id で選ぶよう告げて止まる。"""
+    data = applied()
+    del data["ImageId"]
     found(aws_stubs, an_instance(INSTANCE, "running"))
-    read_template(aws_stubs)
+    read_template(aws_stubs, a_version(1, OLD, data=data))
+    networked(aws_stubs)
 
     with pytest.raises(TemtError) as caught:
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert str(caught.value) == UNUSABLE_IMAGE
+    assert str(caught.value) == (
+        f"the launch template {TEMPLATE} has no ImageId; choose one with --image-id"
+    )
 
 
 def test_it_asks_for_apply_before_looking_for_instances(
@@ -1119,9 +1172,7 @@ def test_it_asks_for_apply_when_the_launch_template_is_gone(
     aws_stubs.done()
 
 
-def test_it_tells_to_wait_a_minute_when_the_name_is_taken(
-    aws_stubs: Stubs, configured: Service
-) -> None:
+def test_it_tells_that_the_name_is_taken(aws_stubs: Stubs, configured: Service) -> None:
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     aws_stubs.ec2.add_client_error(
@@ -1132,17 +1183,15 @@ def test_it_tells_to_wait_a_minute_when_the_name_is_taken(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert str(caught.value) == (
-        f"an AMI named {IMAGE_NAME} already exists; wait a minute and run bake again"
-    )
-    assert image_id(configured) == OLD
+    assert str(caught.value) == (f"an AMI named {IMAGE_NAME} already exists")
+    assert untouched(configured)
 
 
-def test_create_takes_the_name_the_mappings_and_the_command_to_run_again(
+def test_create_takes_the_name_and_the_mappings(
     aws_stubs: Stubs, configured: Service, ec2: EC2Client
 ) -> None:
-    """ami import は、確認に出した名前と、足す BlockDeviceMappings を渡し、同じ名前の AMI が
-    あれば、やり直すコマンドとして自分を告げさせる。
+    """service import は、確認に出した名前と、足す BlockDeviceMappings を渡す。同じ名前の AMI が
+    あれば、そのことだけを告げる。
 
     ルートボリューム以外の EBS の NoDevice に続けて、足す指定を並べる。
     """
@@ -1166,14 +1215,10 @@ def test_create_takes_the_name_the_mappings_and_the_command_to_run_again(
     )
 
     with pytest.raises(TemtError) as caught:
-        _ = bake.create(
-            ec2, configured, INSTANCE, [DATA_DEVICE], mappings, name, command="ami import"
-        )
+        _ = bake.create(ec2, configured, INSTANCE, [DATA_DEVICE], mappings, name)
 
     aws_stubs.done()
-    assert str(caught.value) == (
-        f"an AMI named {name} already exists; wait a minute and run ami import again"
-    )
+    assert str(caught.value) == (f"an AMI named {name} already exists")
 
 
 def test_it_changes_nothing_when_the_image_fails(
@@ -1195,11 +1240,11 @@ def test_it_changes_nothing_when_the_image_fails(
 
     # インスタンスを終了するものは積んでいないので、終了しようとすれば Stubber が失敗する
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
     # 続くエラーに添えるので、標準エラー出力に出す
     assert capsys.readouterr().err == (
-        "bake has not changed ~/.config/temt/dev-main.toml, the launch template "
-        f"or the deploy records; {INSTANCE} is left stopped\n"
+        f"bake has not changed the launch template {TEMPLATE} or the deploy records; "
+        f"{INSTANCE} is left stopped\n"
     )
 
 
@@ -1222,7 +1267,7 @@ def test_it_waits_while_the_new_image_is_not_visible_yet(
 
     aws_stubs.done()
     assert clock.slept == [5, 5]
-    assert image_id(configured) == IMAGE_NAME
+    assert untouched(configured)
 
 
 def test_it_gives_up_on_an_image_it_never_sees(
@@ -1246,7 +1291,7 @@ def test_it_gives_up_on_an_image_it_never_sees(
 
     aws_stubs.done()
     assert clock.now == bake.UNSEEN_DEADLINE
-    assert image_id(configured) == OLD
+    assert untouched(configured)
     assert capsys.readouterr().err.endswith(f"{INSTANCE} is left stopped\n")
 
 
@@ -1268,10 +1313,10 @@ def test_an_aws_error_while_waiting_tells_what_is_left(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
     assert capsys.readouterr().err == (
-        "bake has not changed ~/.config/temt/dev-main.toml, the launch template "
-        f"or the deploy records; {INSTANCE} is left stopped\n"
+        f"bake has not changed the launch template {TEMPLATE} or the deploy records; "
+        f"{INSTANCE} is left stopped\n"
         f"the AMI {NEW} is not available yet\n"
     )
 
@@ -1291,7 +1336,7 @@ def test_it_gives_up_on_an_image_that_is_deregistered_while_it_waits(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
 def test_it_waits_as_long_as_the_image_is_pending(
@@ -1313,7 +1358,7 @@ def test_it_waits_as_long_as_the_image_is_pending(
 
     aws_stubs.done()
     assert clock.now == 2 * 60 * 60
-    assert image_id(configured) == IMAGE_NAME
+    assert untouched(configured)
 
 
 def test_an_interrupted_wait_changes_nothing(
@@ -1335,7 +1380,7 @@ def test_an_interrupted_wait_changes_nothing(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
 def test_it_stops_when_the_instance_goes_away_while_it_stops(
@@ -1358,7 +1403,7 @@ def test_it_stops_when_the_instance_goes_away_while_it_stops(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
 def test_it_stops_when_aws_refuses_to_stop_the_instance(
@@ -1379,7 +1424,7 @@ def test_it_stops_when_aws_refuses_to_stop_the_instance(
 
     aws_stubs.done()
     assert str(caught.value).endswith("; see 'temt status --svc dev-main' and bake again")
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
 def test_the_deadlines_are_the_ones_in_the_design() -> None:
@@ -1458,16 +1503,6 @@ def test_main_runs_bake(
     assert capsys.readouterr().err == f"temt: no instance for {NAME} to bake\n"
 
 
-def test_it_asks_for_apply_when_the_image_id_differs(aws_stubs: Stubs, configured: Service) -> None:
-    found(aws_stubs, an_instance(INSTANCE, "running"))
-    checked(aws_stubs, a_version(1, NEW))
-
-    with pytest.raises(TemtError, match="in ImageId; run 'temt apply --svc dev-main' first"):
-        bake.run(configured, yes=True)
-
-    aws_stubs.done()
-
-
 def test_it_leaves_the_config_file_alone_when_the_instance_cannot_be_stopped(
     aws_stubs: Stubs, configured: Service
 ) -> None:
@@ -1479,10 +1514,10 @@ def test_it_leaves_the_config_file_alone_when_the_instance_cannot_be_stopped(
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == OLD
+    assert untouched(configured)
 
 
-def test_the_config_file_points_at_the_new_image_before_the_template(
+def test_the_config_file_stays_when_the_template_cannot_be_pointed(
     aws_stubs: Stubs, configured: Service
 ) -> None:
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
@@ -1504,21 +1539,24 @@ def test_the_config_file_points_at_the_new_image_before_the_template(
         },
     )
 
-    # テンプレートで止まれば、設定ファイルは新しい AMI を指したまま
     with pytest.raises(ClientError):
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert image_id(configured) == IMAGE_NAME
+    assert untouched(configured)
 
 
 def test_it_does_not_make_a_config_file_that_went_away(
     aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """設定ファイルは読み直さないので、焼くあいだに消えても、作らずに焼き終える。"""
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
     image_state(aws_stubs, "available")
+    pointed(aws_stubs)
+    read_records(aws_stubs)
+    terminated(aws_stubs)
     create = bake.create
 
     def create_then_lose(*args: Any) -> tuple[str, str]:
@@ -1528,63 +1566,43 @@ def test_it_does_not_make_a_config_file_that_went_away(
 
     monkeypatch.setattr(bake, "create", create_then_lose)
 
-    with pytest.raises(TemtError, match="no config file: "):
-        bake.run(configured, yes=True)
+    bake.run(configured, yes=True)
 
     aws_stubs.done()
     assert not configured.conf_path.exists()
 
 
-OLD_NAME = "temt-dev-main-2609201800"
-BY_OLD_NAME = {"Owners": ["self"], "Filters": [{"Name": "name", "Values": [OLD_NAME]}]}
-
-
-def named(service: Service) -> None:
-    """設定ファイルの ImageId を、OLD の名前にする。"""
-    _ = conf.update(service, conf.load(service), conf.launch_template_key("ImageId"), OLD_NAME)
-
-
-def test_it_asks_for_apply_when_the_image_name_is_gone(
-    aws_stubs: Stubs, configured: Service
+@pytest.mark.parametrize(
+    ("common", "where"),
+    [
+        pytest.param(False, "~/.config/temt/dev-main.toml", id="config file"),
+        pytest.param(True, "~/.config/temt/defaults.toml", id="common file"),
+    ],
+)
+def test_a_written_image_id_stops_it_before_anything(
+    aws_stubs: Stubs,
+    configured: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    common: bool,
+    where: str,
 ) -> None:
-    """ImageId の名前の AMI が無ければ、ImageId が揃っていないものとして apply を促す。
-
-    行を消すよう案内するのは apply なので、bake は同じ案内を重ねない。
+    """ImageId を書いていれば（共通ファイルも含む）AMI は固定なので、ロックも取らず、AWS も
+    呼ばずに引数の誤りで止める。焼くには行を消す。
     """
-    named(configured)
-    found(aws_stubs, an_instance(INSTANCE, "running"))
-    read_template(aws_stubs)
-    aws_stubs.ec2.add_response("describe_images", {"Images": []}, BY_OLD_NAME)
+    monkeypatch.setattr(lock, "hold", lambda service: pytest.fail("the lock was taken"))
+    line = f'[launch-template]\nImageId = "{OLD}"\n'
+    if common:
+        defaults_path().write_text(line, encoding="utf-8")
+    else:
+        text = configured.conf_path.read_text(encoding="utf-8")
+        configured.conf_path.write_text(text.replace("[launch-template]\n", line), encoding="utf-8")
 
-    with pytest.raises(TemtError) as caught:
+    with pytest.raises(UsageError) as caught:
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert str(caught.value) == UNUSABLE_IMAGE
-
-
-def test_it_bakes_with_an_image_name_in_the_config_file(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    named(configured)
-    found(aws_stubs, an_instance(INSTANCE, "stopped"))
-    # 名前を ID に直して、テンプレートの ImageId と比べる
-    read_template(aws_stubs)
-    looked_up(aws_stubs, an_image(Name=OLD_NAME), params=BY_OLD_NAME)
-    networked(aws_stubs)
-    created(aws_stubs)
-    image_state(aws_stubs, "available")
-    pointed(aws_stubs)
-    read_records(aws_stubs)
-    terminated(aws_stubs)
-
-    bake.run(configured, yes=True)
-
-    aws_stubs.done()
-    assert image_id(configured) == IMAGE_NAME
-    assert (
-        f"wrote launch-template.ImageId = {IMAGE_NAME} in {tilde(configured.conf_path)} "
-        f"(was {OLD_NAME})" in told(capsys.readouterr().out)
+    assert str(caught.value) == (
+        f"launch-template.ImageId in {where} fixes the AMI; remove the line to bake"
     )
 
 
@@ -1631,20 +1649,29 @@ def test_it_deletes_every_old_version(aws_stubs: Stubs, configured: Service) -> 
     aws_stubs.done()
 
 
-@pytest.mark.parametrize("answer", [[], [{"ImageId": OLD, "State": "failed"}]])
-def test_it_asks_for_apply_when_the_written_id_is_not_usable(
-    aws_stubs: Stubs, configured: Service, answer: list[dict[str, Any]]
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        pytest.param([], "is not found", id="missing"),
+        pytest.param([{"ImageId": OLD, "State": "failed"}], "is failed", id="failed"),
+        pytest.param([{"ImageId": OLD, "State": "pending"}], "is pending", id="pending"),
+    ],
+)
+def test_it_stops_when_the_image_of_the_template_is_lost(
+    aws_stubs: Stubs, configured: Service, answer: list[dict[str, Any]], why: str
 ) -> None:
-    """ID で書かれていて、テンプレートと同じ値でも、使える AMI が無ければ揃っていない。"""
+    """テンプレートの AMI が無いか available でなければ、apply と同じく、--image-id で選ぶよう
+    告げて止まる。"""
     found(aws_stubs, an_instance(INSTANCE, "running"))
     read_template(aws_stubs)
+    networked(aws_stubs)
     aws_stubs.ec2.add_response("describe_images", {"Images": answer}, {"ImageIds": [OLD]})
 
     with pytest.raises(TemtError) as caught:
         bake.run(configured, yes=True)
 
     aws_stubs.done()
-    assert str(caught.value) == UNUSABLE_IMAGE
+    assert str(caught.value) == LOST_IMAGE.format(why)
 
 
 def test_it_records_the_apps_of_the_instance_as_baked(

@@ -13,10 +13,13 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from conftest import (
+    REGION,
+    WHERE,
     Clock,
     Stubs,
     an_instance,
     deadline,
+    identified,
     reservations,
     taken,
 )
@@ -66,35 +69,41 @@ THE_ROLE = {"RoleName": NAME}
 SERVICE_IMAGES = {
     "Owners": ["self"],
     "Filters": [
-        {"Name": "tag:temt:service", "Values": ["dev-main"]},
-        {"Name": "state", "Values": ["available"]},
+        {"Name": "name", "Values": ["temt-dev-main-??????????"]},
+        {"Name": "state", "Values": ["available", "pending"]},
     ],
 }
 
 # temt のものであることを示すタグ。消してよいのは、これが付いたものだけである
 OURS = [{"Key": "temt:service", "Value": "dev-main"}]
+# このリージョンと、ほかのリージョンのタグのキー
+HERE = f"temt:region:{REGION}"
+THERE = "temt:region:us-west-2"
 # ロールに付いた管理ポリシー。AWS 管理のものと、顧客管理のもの
 MANAGED = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
 CUSTOMER = "arn:aws:iam::123456789012:policy/web-data"
 # 消さずに残したときの報告
 LEFT = "left (not tagged temt:service=dev-main)"
 
-PROMPT = f"destroy {NAME}? [y/N] "
+PROMPT = f"destroy {NAME} {WHERE}? [y/N] "
 
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
 
-def listed(found: str = "none", *, role: str = f"role {NAME}") -> str:
+def listed(
+    found: str = "none",
+    *,
+    role: str = f"role {NAME}",
+    profile: str = f"instance profile {NAME}",
+) -> str:
     """手順 2 の一覧。"""
     lines = [
         f"instances: {found}",
         f"launch template {TEMPLATE}",
         f"parameters under /{NAME}/",
         f"security group {NAME}",
-        f"instance profile {NAME}",
+        profile,
         role,
-        f"~/.ssh/temt/known_hosts.d/{NAME}/",
-        f"~/.local/bin/{NAME}",
     ]
     return f"destroy {NAME}:\n" + "".join(f"  {line}\n" for line in lines)
 
@@ -228,14 +237,39 @@ def terminating(instance_id: str) -> dict[str, Any]:
     }
 
 
-def no_instance(stubs: Stubs) -> None:
-    """手順 1 と 2。インスタンスは 1 台も無く、ロールにポリシーも付いていない。"""
+def no_instance(
+    stubs: Stubs, *, tags: list[dict[str, str]] | None = OURS, exists: bool = True
+) -> None:
+    """手順 1 と 2。インスタンスは 1 台も無く、ロールにポリシーも付いていない。tags と
+    exists は held と同じ。
+    """
     stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    held(stubs)
+    held(stubs, tags=tags, exists=exists)
 
 
-def held(stubs: Stubs, inline: tuple[str, ...] = (), managed: tuple[str, ...] = ()) -> None:
-    """手順 2 の一覧が読む、ロールのインラインポリシーの名前と、管理ポリシーの ARN。"""
+def held(
+    stubs: Stubs,
+    inline: tuple[str, ...] = (),
+    managed: tuple[str, ...] = (),
+    *,
+    tags: list[dict[str, str]] | None = OURS,
+    exists: bool = True,
+) -> None:
+    """手順 2 の一覧が読む、ロールのタグ tags と、消すなら、インラインポリシーの名前と
+    管理ポリシーの ARN。
+
+    exists が偽ならロールは無い。temt:service=<svc> が付いていないか、ほかのリージョンの
+    タグが残っていれば、消さないのでポリシーは読まない。
+    """
+    if not exists:
+        missing(stubs.iam, "get_role", resources.NO_SUCH_ENTITY, **THE_ROLE)
+        return
+    stubs.iam.add_response("get_role", a_role(tags=tags), THE_ROLE)
+    keys = [one["Key"] for one in tags or []]
+    if {"Key": "temt:service", "Value": "dev-main"} not in (tags or []) or any(
+        key.startswith("temt:region:") and key != HERE for key in keys
+    ):
+        return
     stubs.iam.add_response("list_role_policies", {"PolicyNames": list(inline)}, THE_ROLE)
     stubs.iam.add_response("list_attached_role_policies", attached(*managed), THE_ROLE)
 
@@ -285,19 +319,26 @@ def profile_deleted(stubs: Stubs) -> None:
     stubs.iam.add_response("delete_instance_profile", {}, THE_PROFILE)
 
 
-def role_read(stubs: Stubs, *profiles: str) -> None:
-    """インスタンスプロファイルを消す前に、ロールの temt のタグと、ロールを入れた
-    インスタンスプロファイル profiles を読む。
+def role_read(stubs: Stubs, *profiles: str, tags: list[dict[str, str]] = OURS) -> None:
+    """インスタンスプロファイルを消す前に、ロールのタグ tags と、ロールを入れた
+    インスタンスプロファイル profiles を読む。tags にこのリージョンのタグがあれば外す。
 
     ロールがほかのインスタンスプロファイルにも入っていれば、インスタンスプロファイルも
     消さずに止めるためである。
     """
-    stubs.iam.add_response("get_role", a_role(), THE_ROLE)
+    stubs.iam.add_response("get_role", a_role(tags=tags), THE_ROLE)
+    if any(one["Key"] == HERE for one in tags):
+        untagged(stubs)
     stubs.iam.add_response(
         "list_instance_profiles_for_role",
         {"InstanceProfiles": [a_profile([NAME], name=one)["InstanceProfile"] for one in profiles]},
         THE_ROLE,
     )
+
+
+def untagged(stubs: Stubs) -> None:
+    """ロールから、このリージョンのタグを外す。"""
+    stubs.iam.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [HERE]})
 
 
 def role_stripped(
@@ -333,13 +374,18 @@ def all_deleted(stubs: Stubs) -> None:
     iam_deleted(stubs)
 
 
-def images(stubs: Stubs, *found: str) -> None:
-    """手順 6 が読む、自分のアカウントにあるサービスの AMI。"""
+def images(stubs: Stubs, *found: str, state: str = "available") -> None:
+    """手順 6 が読む、自分のアカウントにあるサービスの AMI。名前で探す。"""
     stubs.ec2.add_response(
         "describe_images",
         {
             "Images": [
-                {"ImageId": one, "Name": IMAGE_NAME, "CreationDate": "2026-09-20T00:00:00.000Z"}
+                {
+                    "ImageId": one,
+                    "Name": IMAGE_NAME,
+                    "State": state,
+                    "CreationDate": "2026-09-20T00:00:00.000Z",
+                }
                 for one in found
             ]
         },
@@ -348,7 +394,7 @@ def images(stubs: Stubs, *found: str) -> None:
 
 
 def gone(*, what: str = "deleted") -> list[str]:
-    """手順 4 と 5 の報告の行。"""
+    """手順 4 の報告の行。"""
     return [
         f"launch template {TEMPLATE}: {what}",
         f"parameters under /{NAME}/: deleted (1)"
@@ -362,15 +408,21 @@ def gone(*, what: str = "deleted") -> list[str]:
     ]
 
 
-def staying(*, image: str | None = IMAGE) -> list[str]:
-    """手順 6 の報告の行。AMI は、自分のアカウントにあるときだけ並ぶ。"""
+def staying(*, image: str | None = IMAGE, note: str = "") -> list[str]:
+    """手順 5 の報告の行。AMI は、次の apply が選ぶものが自分のアカウントにあるときだけ並ぶ。
+
+    known_hosts のディレクトリとサービスのコマンドも、ほかのリージョンのクローンが使うかも
+    しれないので残す。
+    """
     lines = [
         "left for the next apply:",
         "  ~/.config/temt/dev-main.toml",
         f"  the Host {NAME} block in ~/.ssh/temt/config",
+        f"  ~/.ssh/temt/known_hosts.d/{NAME}/",
+        f"  ~/.local/bin/{NAME}",
     ]
     if image is not None:
-        lines.append(f"  AMI {IMAGE_NAME} ({image}, temt:service=dev-main)")
+        lines.append(f"  AMI {IMAGE_NAME} ({image}{note})")
     return lines
 
 
@@ -381,6 +433,7 @@ def test_it_destroys_everything_and_reports_what_is_left(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     no_instance(aws_stubs)
     all_deleted(aws_stubs)
     images(aws_stubs, IMAGE)
@@ -389,16 +442,14 @@ def test_it_destroys_everything_and_reports_what_is_left(
 
     aws_stubs.done()
     assert answer.reads == 1
-    # 手順 5。known_hosts のディレクトリとサービスのコマンドが消える
-    assert not configured.known_hosts_dir.exists()
-    assert not command.exists()
+    # known_hosts のディレクトリとサービスのコマンドは残す
+    assert configured.known_hosts_dir.is_dir()
+    assert command.exists()
     captured = capsys.readouterr()
     # 一覧と進行は標準出力に、問いかけは標準エラー出力に書く
     assert captured.out.startswith(LISTING)
     assert told(captured.out.removeprefix(LISTING)) == [
         *gone(),
-        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
-        f"~/.local/bin/{NAME}: deleted",
         *staying(),
     ]
     assert captured.err == PROMPT
@@ -428,6 +479,7 @@ def test_it_deletes_in_the_order_of_the_design(
     aws_stubs.done()
     assert calls == [
         "DescribeInstances",
+        "GetRole",
         "ListRolePolicies",
         "ListAttachedRolePolicies",
         "DeleteLaunchTemplate",
@@ -452,7 +504,9 @@ def test_it_deletes_in_the_order_of_the_design(
 def test_it_leaves_the_ami_out_when_the_service_has_none(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AMI を挙げるのは、自分のアカウントに temt:service=dev-main のものがあるときだけである。"""
+    """AMI を挙げるのは、自分のアカウントに temt-dev-main-<時刻> の AMI があるときだけである。
+    無ければ次の apply は Ubuntu 24.04 を選ぶが、それは残したものではない。
+    """
     no_instance(aws_stubs)
     all_deleted(aws_stubs)
     images(aws_stubs)
@@ -460,7 +514,41 @@ def test_it_leaves_the_ami_out_when_the_service_has_none(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert told(capsys.readouterr().out)[-3:] == staying(image=None)
+    assert told(capsys.readouterr().out)[-5:] == staying(image=None)
+
+
+def test_it_tells_that_the_newest_ami_is_pending(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """最新の AMI が pending なら、そう添える。次の apply は、それが available になるまで止まる。"""
+    no_instance(aws_stubs)
+    all_deleted(aws_stubs)
+    images(aws_stubs, IMAGE, state="pending")
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[-6:] == staying(note=", pending")
+
+
+def test_it_leaves_the_ami_out_when_image_id_is_written(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ImageId を書いていれば、次の apply はそれを使い、選ばない。AMI を探さずに、設定ファイル
+    だけを挙げる。
+    """
+    text = configured.conf_path.read_text(encoding="utf-8")
+    configured.conf_path.write_text(
+        text.replace("[launch-template]\n", f'[launch-template]\nImageId = "{IMAGE}"\n'),
+        encoding="utf-8",
+    )
+    no_instance(aws_stubs)
+    all_deleted(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    assert told(capsys.readouterr().out)[-5:] == staying(image=None)
 
 
 def test_it_finishes_when_the_amis_cannot_be_read(
@@ -480,21 +568,17 @@ def test_it_finishes_when_the_amis_cannot_be_read(
 
     aws_stubs.done()
     captured = capsys.readouterr()
-    assert captured.err.startswith(
-        "temt: warning: cannot tell which AMIs are tagged temt:service=dev-main: "
-    )
+    assert captured.err.startswith(f"temt: warning: cannot tell the newest AMI of {NAME}: ")
     assert len(captured.err.splitlines()) == 1
-    assert told(captured.out)[-3:] == staying(image=None)
+    assert told(captured.out)[-5:] == staying(image=None)
 
 
 def test_it_reports_what_was_not_there(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """何も無ければ、どれも absent と知らせて終わる。エラーにはしない。"""
-    aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    # 手順 2 の一覧も、ロールが無ければ空とする
-    missing(aws_stubs.iam, "list_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
-    missing(aws_stubs.iam, "list_attached_role_policies", resources.NO_SUCH_ENTITY, **THE_ROLE)
+    # 手順 2 の一覧も、ロールが無ければポリシーを読まない
+    no_instance(aws_stubs, exists=False)
     missing(aws_stubs.ec2, "delete_launch_template", resources.NO_SUCH_TEMPLATE, **THE_TEMPLATE)
     no_parameters(aws_stubs)
     the_group(aws_stubs)
@@ -509,9 +593,6 @@ def test_it_reports_what_was_not_there(
     assert told(capsys.readouterr().out) == [
         *LISTING.splitlines(),
         *gone(what="absent"),
-        # known_hosts のディレクトリはロックを取るときに作られるので、つねにある
-        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
-        f"~/.local/bin/{NAME}: absent",
         *staying(image=None),
     ]
 
@@ -527,6 +608,7 @@ def test_it_names_and_deletes_every_inline_policy(
 
     手で付けたものも消えるので、確認の一覧に名前を挙げる。
     """
+    identified(aws_stubs)
     _ = command
     names = ("temt-jupyter", "temt-idle", "by-hand")
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
@@ -593,9 +675,12 @@ def test_it_terminates_the_instance_before_it_deletes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """動いているインスタンスは終了して terminated を待つ。"""
+    identified(aws_stubs)
     _ = command
     directory = home.prepare_known_hosts(configured)
     (directory / INSTANCE).touch(mode=0o600)
+    # ほかのリージョンのクローンのインスタンスのもの
+    (directory / OTHER).touch(mode=0o600)
     # 手順 1
     aws_stubs.ec2.add_response(
         "describe_instances",
@@ -616,7 +701,9 @@ def test_it_terminates_the_instance_before_it_deletes(
 
     aws_stubs.done()
     assert answer.reads == 1
-    assert not configured.known_hosts_dir.exists()
+    # 終了したインスタンスの known_hosts のファイルだけを消し、ディレクトリは残す
+    assert not (directory / INSTANCE).exists()
+    assert (directory / OTHER).exists()
     captured = capsys.readouterr()
     assert captured.err == PROMPT
     running = listed(f"{INSTANCE} (running)")
@@ -625,8 +712,6 @@ def test_it_terminates_the_instance_before_it_deletes(
         f"terminating {INSTANCE}",
         f"{INSTANCE} is terminated",
         *gone(),
-        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
-        f"~/.local/bin/{NAME}: deleted",
         *staying(),
     ]
 
@@ -669,8 +754,6 @@ def test_it_terminates_every_instance_with_the_name(
         f"{OTHER} is shutting-down",
         f"{OTHER} is terminated",
         *gone(),
-        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
-        f"~/.local/bin/{NAME}: absent",
         *staying(image=None),
     ]
 
@@ -734,6 +817,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """y と答えなければ、何も消さずに終了コード 1 で終わる。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     no_instance(aws_stubs)
 
@@ -919,6 +1003,7 @@ def test_it_detaches_the_managed_policies_and_deletes_the_role(
 
     外すものも確認の一覧に挙げ、外したものを 1 つずつ知らせる。
     """
+    identified(aws_stubs)
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
     held(aws_stubs, ("temt-ec2", "by-hand"), (MANAGED, CUSTOMER))
     template_deleted(aws_stubs)
@@ -1059,7 +1144,7 @@ def test_it_leaves_a_pair_not_tagged_for_the_service(
 
     ロールを消さないので、ロールを入れたインスタンスプロファイルも読まない。
     """
-    no_instance(aws_stubs)
+    no_instance(aws_stubs, tags=tags)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
@@ -1078,8 +1163,6 @@ def test_it_leaves_a_pair_not_tagged_for_the_service(
         f"security group {NAME} ({GROUP}): deleted",
         f"instance profile {NAME}: {LEFT}",
         f"role {NAME}: {LEFT}",
-        f"~/.ssh/temt/known_hosts.d/{NAME}: deleted",
-        f"~/.local/bin/{NAME}: absent",
         *staying(image=None),
     ]
 
@@ -1093,7 +1176,7 @@ def test_it_decides_each_of_the_pair_by_its_own_tag(
     残すインスタンスプロファイルにロールが入っていなければ、ロールは消す。残すロールが
     入っていても、インスタンスプロファイルからロール <名前> を外して消す。
     """
-    no_instance(aws_stubs)
+    no_instance(aws_stubs, tags=OURS if left == "instance profile" else None)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
@@ -1123,7 +1206,7 @@ def test_it_deletes_the_instance_profile_when_the_role_is_gone(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """ロールが無くても、インスタンスプロファイル <名前> は消し、ロールは absent と知らせる。"""
-    no_instance(aws_stubs)
+    no_instance(aws_stubs, exists=False)
     template_deleted(aws_stubs)
     parameter_deleted(aws_stubs)
     the_group(aws_stubs, (GROUP, VPC))
@@ -1140,6 +1223,71 @@ def test_it_deletes_the_instance_profile_when_the_role_is_gone(
     assert told(capsys.readouterr().out)[len(LISTING.splitlines()) :][3:5] == [
         f"instance profile {NAME}: deleted",
         f"role {NAME}: absent",
+    ]
+
+
+def test_it_removes_the_tag_of_its_region_before_deleting_the_last_use(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ロールにこのリージョンのタグしか無ければ、タグを外してから、インスタンスプロファイルと
+    ロールを消す。"""
+    tags = [*OURS, {"Key": HERE, "Value": ""}]
+    no_instance(aws_stubs, tags=tags)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    role_read(aws_stubs, NAME, tags=tags)
+    profile_deleted(aws_stubs)
+    role_stripped(aws_stubs)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    out = capsys.readouterr().out
+    assert out.startswith(LISTING)
+    assert told(out)[len(LISTING.splitlines()) :][3:6] == [
+        f"role {NAME}: untagged {HERE}",
+        f"instance profile {NAME}: deleted",
+        f"role {NAME}: deleted",
+    ]
+
+
+@pytest.mark.parametrize("here", [True, False], ids=["tagged here", "not tagged here"])
+def test_it_keeps_the_pair_that_another_region_uses(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str], here: bool
+) -> None:
+    """ロールにほかのリージョンのタグが残っていれば、このリージョンのタグだけを外し、
+    インスタンスプロファイルもロールも残す。確認の一覧にも、残すことを、使うリージョンを
+    添えて出す。ポリシーは読まず、インスタンスプロファイルは報告のために読むだけである。
+    """
+    tags = [*OURS, *([{"Key": HERE, "Value": ""}] if here else []), {"Key": THERE, "Value": ""}]
+    no_instance(aws_stubs, tags=tags)
+    template_deleted(aws_stubs)
+    parameter_deleted(aws_stubs)
+    the_group(aws_stubs, (GROUP, VPC))
+    group_deleted(aws_stubs)
+    aws_stubs.iam.add_response("get_role", a_role(tags=tags), THE_ROLE)
+    if here:
+        untagged(aws_stubs)
+    # 報告のために、インスタンスプロファイルがあるかだけを読む
+    aws_stubs.iam.add_response("get_instance_profile", a_profile([NAME]), THE_PROFILE)
+    images(aws_stubs)
+
+    destroy.run(configured, yes=True)
+
+    aws_stubs.done()
+    out = capsys.readouterr().out
+    listing = listed(
+        role=f"role {NAME} (kept: used in us-west-2)", profile=f"instance profile {NAME} (kept)"
+    )
+    assert out.startswith(listing)
+    assert told(out)[len(listing.splitlines()) :][3:] == [
+        *([f"role {NAME}: untagged {HERE}"] if here else []),
+        f"instance profile {NAME}: kept (used in us-west-2)",
+        f"role {NAME}: kept (used in us-west-2)",
+        *staying(image=None),
     ]
 
 
@@ -1222,14 +1370,17 @@ def test_it_counts_a_role_gone_before_deleting_as_absent(
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink"])
-def test_it_deletes_whatever_is_in_place_of_the_command(
+def test_it_keeps_whatever_is_in_place_of_the_command(
     aws_stubs: Stubs,
     configured: Service,
     home_dir: Path,
     capsys: pytest.CaptureFixture[str],
     kind: str,
 ) -> None:
-    """サービスのコマンドの場所にあるものは、中身にかかわらず消す。"""
+    """サービスのコマンドは、中身にかかわらず消さず、次の apply のために残したものに挙げる。
+
+    ほかのリージョンのクローンが使うかもしれない。
+    """
     path = configured.command_path
     path.parent.mkdir(parents=True)
     if kind == "file":
@@ -1243,28 +1394,29 @@ def test_it_deletes_whatever_is_in_place_of_the_command(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert not path.is_symlink()
-    assert not path.exists()
-    assert f"~/.local/bin/{NAME}: deleted" in capsys.readouterr().out
+    if kind == "file":
+        assert path.read_text(encoding="utf-8") == "mine\n"
+    else:
+        assert path.is_symlink()
+    assert told(capsys.readouterr().out)[-len(staying(image=None)) :] == staying(image=None)
 
 
-def test_it_stops_when_the_known_hosts_directory_is_a_symlink(
+def test_it_keeps_a_known_hosts_directory_that_is_a_symlink(
     aws_stubs: Stubs, configured: Service, home_dir: Path
 ) -> None:
-    """利用者が置き換えていれば、その先まで消さずに断って終わる。"""
+    """利用者が置き換えていても、ディレクトリにもその先にも、ロックのほかは触れない。"""
     elsewhere = home_dir / "keep"
     elsewhere.mkdir()
-    mine = elsewhere / INSTANCE
+    mine = elsewhere / OTHER
     mine.write_text("mine\n", encoding="utf-8")
     configured.known_hosts_dir.parent.mkdir(parents=True)
     configured.known_hosts_dir.symlink_to(elsewhere)
     no_instance(aws_stubs)
     all_deleted(aws_stubs)
+    images(aws_stubs)
 
-    with pytest.raises(TemtError, match=f"known_hosts.d/{NAME} is a symlink"):
-        destroy.run(configured, yes=True)
+    destroy.run(configured, yes=True)
 
-    # 手順 6 は積んでいないので、そこまで進んでいれば Stubber が失敗する
     aws_stubs.done()
     assert configured.known_hosts_dir.is_symlink()
     # ロックファイルはリンクを通して置くが、利用者のものには触れない
@@ -1274,7 +1426,7 @@ def test_it_stops_when_the_known_hosts_directory_is_a_symlink(
 def test_it_leaves_another_service_alone(
     aws_stubs: Stubs, configured: Service, command: Path
 ) -> None:
-    """消すのは、このサービスの known_hosts とサービスのコマンドだけである。"""
+    """ほかのサービスの known_hosts とサービスのコマンドには触れない。"""
     _ = command
     other = Service("dev-other")
     kept = home.prepare_known_hosts(other) / INSTANCE
@@ -1287,7 +1439,6 @@ def test_it_leaves_another_service_alone(
     destroy.run(configured, yes=True)
 
     aws_stubs.done()
-    assert not configured.known_hosts_dir.exists()
     assert kept.exists()
     assert other.command_path.exists()
 
@@ -1295,16 +1446,14 @@ def test_it_leaves_another_service_alone(
 def test_it_stops_when_there_is_no_config_file(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """destroy が要るのは設定ファイルだけなので、無ければ apply は促さない。"""
+    """打ち間違えたサービス名ですぐ止まる。片づける相手なので、apply は促さない。"""
     assert cli.main(["temt", "destroy", "--svc", "dev-main", "--yes"]) == 1
 
     # Session も作っていないので、AWS には触れていない
     aws_stubs.done()
     assert aws_stubs.passed == []
     err = capsys.readouterr().err
-    assert err == (
-        f"temt: no config file: {tilde(service.conf_path)}; destroy needs AwsRegion from it\n"
-    )
+    assert err == f"temt: no config file: {tilde(service.conf_path)}\n"
     assert "apply" not in err
 
 
@@ -1412,8 +1561,8 @@ def test_it_holds_the_lock_while_it_waits(
 
     aws_stubs.done()
     assert attempts == [False]
-    # 終わったときには、ロックファイルごとディレクトリが消えている
-    assert not configured.known_hosts_dir.exists()
+    # ロックファイルは、サービスごとのまま残す
+    assert (configured.known_hosts_dir / lock.LOCK_NAME).exists()
 
 
 def test_destroy_takes_yes_and_no_async() -> None:

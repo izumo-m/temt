@@ -14,17 +14,18 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import ANY
-from conftest import Clock, Stubs, an_instance, reservations, taken
+from conftest import CONFIGURED, WHERE, Clock, Stubs, an_instance, identified, reservations, taken
 
-from temt import bake, cli, conf, home, setport, sshd, wait
-from temt.msg import TemtError
+from temt import bake, cli, home, setport, sshd, wait
+from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path, ssh_dir
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
 INSTANCE = "i-0123456789abcdef0"
 OTHER = "i-0fedcba9876543210"
-# 設定ファイル（conftest の configured）とテンプレートが指している AMI と、焼いた AMI
+# テンプレートが指している AMI と、焼いた AMI。設定ファイル（conftest の configured）は
+# ImageId を書かない
 OLD = "ami-0123456789abcdef0"
 NEW = "ami-0fedcba9876543210"
 SUBNET = "subnet-0123456789abcdef0"
@@ -86,7 +87,7 @@ CREATE = {
 # temt が付けるタグ
 MARKS = [{"Key": "Name", "Value": NAME}, {"Key": "temt:service", "Value": "dev-main"}]
 # 手順 2 の問いかけ。標準エラー出力に書く
-PROMPT = f"set the sshd ports of {NAME} to 2222? [y/N] "
+PROMPT = f"set the sshd ports of {NAME} to 2222 {WHERE}? [y/N] "
 # スクリプトの出力。成功と、再起動の前と後の失敗
 CHANGED = "temt-sshd: before 22\ntemt-sshd: listening 2222\ntemt-sshd: changed 22 -> 2222\n"
 REJECTED = (
@@ -225,7 +226,7 @@ def a_version(
 
 
 def the_image() -> dict[str, Any]:
-    """設定ファイルの ImageId の AMI。ルートボリュームは 8 GiB。"""
+    """テンプレートの ImageId の AMI。ルートボリュームは 8 GiB。"""
     return {
         "ImageId": OLD,
         "State": "available",
@@ -235,22 +236,23 @@ def the_image() -> dict[str, Any]:
 
 
 def compared(stubs: Stubs, *versions: dict[str, Any]) -> None:
-    """手順 1 のうち、bake と同じくテンプレートを設定ファイルと比べる分を積む。
+    """手順 2 のうち、bake と同じくテンプレートを設定ファイルと比べる分を積む。
 
-    テンプレートを読み、設定ファイルから中身を組み立てる（ImageId の AMI、SubnetId の VPC、
-    その VPC にある temt のセキュリティグループを引く）。
+    テンプレートを読み、書かれていない項目を埋め（SubnetId のサブネットを引く）、テンプレートの
+    ImageId の AMI を引き、設定ファイルから中身を組み立てる（その VPC にある temt の
+    セキュリティグループを引く）。
     """
     stubs.ec2.add_response(
         "describe_launch_template_versions",
         {"LaunchTemplateVersions": list(versions or (a_version(1, OLD),))},
         THE_TEMPLATE,
     )
-    stubs.ec2.add_response("describe_images", {"Images": [the_image()]}, {"ImageIds": [OLD]})
     stubs.ec2.add_response(
         "describe_subnets",
         {"Subnets": [{"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "172.31.0.0/20"}]},
         THE_SUBNET,
     )
+    stubs.ec2.add_response("describe_images", {"Images": [the_image()]}, {"ImageIds": [OLD]})
     stubs.ec2.add_response(
         "describe_security_groups",
         {"SecurityGroups": [{"GroupId": GROUP, "GroupName": NAME, "VpcId": VPC}]},
@@ -431,6 +433,7 @@ def test_it_sets_the_ports_bakes_and_writes_port(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     terminal = Terminal("y\n")
     monkeypatch.setattr(sys, "stdin", terminal)
     before = ssh_config()
@@ -451,8 +454,8 @@ def test_it_sets_the_ports_bakes_and_writes_port(
     assert len(changed) == 1
     assert re.fullmatch(r"\s+Port\s+22", changed[0][0])
     assert re.fullmatch(r"\s+Port\s+2222", changed[0][1])
-    # 焼いた AMI を設定ファイルが指す
-    assert conf.load(ready).launch_template.get("ImageId") == IMAGE_NAME
+    # 焼いた AMI はテンプレートだけが指し、設定ファイルには書かない
+    assert ready.conf_path.read_text(encoding="utf-8") == CONFIGURED
     captured = capsys.readouterr()
     assert captured.err == PROMPT
     listing = (
@@ -654,7 +657,10 @@ def test_it_stops_without_the_host_block(
 
 def test_it_stops_when_the_template_differs(aws_stubs: Stubs, ready: Service) -> None:
     """焼くときに止まる条件は、sshd を変える前に確かめる。"""
-    _ = conf.update(ready, conf.load(ready), conf.launch_template_key("InstanceType"), "t3.small")
+    ready.conf_path.write_text(
+        CONFIGURED.replace('InstanceType = "t3.micro"', 'InstanceType = "t3.small"'),
+        encoding="utf-8",
+    )
     applied(aws_stubs)
     compared(aws_stubs)
 
@@ -673,12 +679,12 @@ def test_it_stops_when_the_security_group_is_not_made(aws_stubs: Stubs, ready: S
         {"LaunchTemplateVersions": [a_version(1, OLD)]},
         THE_TEMPLATE,
     )
-    aws_stubs.ec2.add_response("describe_images", {"Images": [the_image()]}, {"ImageIds": [OLD]})
     aws_stubs.ec2.add_response(
         "describe_subnets",
         {"Subnets": [{"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "172.31.0.0/20"}]},
         THE_SUBNET,
     )
+    aws_stubs.ec2.add_response("describe_images", {"Images": [the_image()]}, {"ImageIds": [OLD]})
     aws_stubs.ec2.add_response("describe_security_groups", {"SecurityGroups": []}, THE_GROUP)
 
     with pytest.raises(
@@ -693,13 +699,18 @@ def test_it_stops_when_the_security_group_is_not_made(aws_stubs: Stubs, ready: S
 
 
 def test_it_stops_when_the_image_is_gone(aws_stubs: Stubs, ready: Service) -> None:
-    """ImageId の AMI が使えなければ、組み立てられないので、ImageId が揃っていないとして
-    apply を促して止まる。行を消す案内は apply がする。"""
+    """テンプレートの AMI が無ければ、組み立てられないので、apply と同じく --image-id で
+    選ぶよう告げて、sshd を変える前に止まる。"""
     applied(aws_stubs)
     aws_stubs.ec2.add_response(
         "describe_launch_template_versions",
         {"LaunchTemplateVersions": [a_version(1, OLD)]},
         THE_TEMPLATE,
+    )
+    aws_stubs.ec2.add_response(
+        "describe_subnets",
+        {"Subnets": [{"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "172.31.0.0/20"}]},
+        THE_SUBNET,
     )
     aws_stubs.ec2.add_response("describe_images", {"Images": []}, {"ImageIds": [OLD]})
 
@@ -708,8 +719,28 @@ def test_it_stops_when_the_image_is_gone(aws_stubs: Stubs, ready: Service) -> No
 
     aws_stubs.done()
     assert str(caught.value) == (
-        f"the launch template {TEMPLATE} does not match ~/.config/temt/dev-main.toml in "
-        "ImageId; run 'temt apply --svc dev-main' first"
+        f"the AMI {OLD} of the launch template {TEMPLATE} is not found; choose one with --image-id"
+    )
+
+
+def test_a_written_image_id_stops_it_before_anything(
+    aws_stubs: Stubs, ready: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ImageId を書いていれば AMI は固定で焼けないので、ロックも取らず、AWS も呼ばずに引数の
+    誤りで止める。"""
+    monkeypatch.setattr(setport.lock, "hold", lambda service: pytest.fail("the lock was taken"))
+    ready.conf_path.write_text(
+        CONFIGURED.replace("[launch-template]\n", f'[launch-template]\nImageId = "{OLD}"\n'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UsageError) as caught:
+        setport.run(ready, [2222], yes=True)
+
+    aws_stubs.done()
+    assert str(caught.value) == (
+        "launch-template.ImageId in ~/.config/temt/dev-main.toml fixes the AMI; "
+        "remove the line to bake"
     )
 
 
@@ -784,6 +815,7 @@ def test_it_needs_a_terminal_without_yes(
 def test_it_does_nothing_when_the_answer_is_no(
     aws_stubs: Stubs, ready: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     checked(aws_stubs, an_instance(INSTANCE, "running"))
     before = ssh_config()
@@ -817,7 +849,7 @@ def test_a_failure_before_the_restart(
         f"set-port again; {LEFT}"
     )
     assert ssh_config() == before
-    assert conf.load(ready).launch_template.get("ImageId") == OLD
+    assert ready.conf_path.read_text(encoding="utf-8") == CONFIGURED
     captured = capsys.readouterr()
     # スクリプトの標準出力と標準エラー出力を見せる
     assert told(captured.out)[-3:] == REJECTED.splitlines()
@@ -859,12 +891,10 @@ def test_a_failure_after_the_restart(
     aws_stubs.done()
     assert str(raised.value) == (
         "set-port changed the sshd ports, but failed after the restart: sshd did not listen on "
-        f"2222; sshd may listen on no port, so open a shell with 'aws ssm start-session --target "
-        f"{INSTANCE}' and fix it, or run 'temt terminate --svc dev-main' and start again (what "
-        f"was not baked is lost); {LEFT}"
+        f"2222; sshd may listen on no port; {LEFT}"
     )
     assert ssh_config() == before
-    assert conf.load(ready).launch_template.get("ImageId") == OLD
+    assert ready.conf_path.read_text(encoding="utf-8") == CONFIGURED
     # 何も待ち受けていない行も、そのまま見せる
     assert told(capsys.readouterr().out)[-3:] == NOT_LISTENING.splitlines()
 

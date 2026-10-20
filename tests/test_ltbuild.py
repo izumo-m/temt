@@ -7,7 +7,7 @@ import pytest
 from botocore.stub import Stubber
 from types_boto3_ec2.client import EC2Client
 
-from temt import ltbuild
+from temt import aws, ltbuild
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import Service
@@ -164,7 +164,7 @@ def test_an_ami_name_becomes_its_id(ec2: EC2Client, service: Service) -> None:
 
 
 def test_no_image_stops(ec2: EC2Client, service: Service) -> None:
-    """ImageId が無ければ、AWS を読まずに止まる。apply は手順 2 で書いている。"""
+    """ImageId が無ければ、AWS を読まずに止まる。apply は手順 2 で決めて入れている。"""
     with Stubber(ec2), pytest.raises(TemtError) as caught:
         _ = ltbuild.build(ec2, service, values(ImageId=None))
     assert str(caught.value) == f"no launch-template.ImageId in {tilde(service.conf_path)}"
@@ -173,7 +173,7 @@ def test_no_image_stops(ec2: EC2Client, service: Service) -> None:
 def test_an_ami_that_is_gone_stops(ec2: EC2Client, service: Service) -> None:
     with Stubber(ec2) as stub:
         stub.add_response("describe_images", {"Images": []}, {"ImageIds": [IMAGE]})
-        with pytest.raises(TemtError, match=f"^no such AMI: {IMAGE}; remove launch-template"):
+        with pytest.raises(TemtError, match=f"^no such AMI: {IMAGE}; write another AMI "):
             _ = ltbuild.build(ec2, service, values())
         stub.assert_no_pending_responses()
 
@@ -466,45 +466,196 @@ def test_with_group_puts_the_created_id_in_place_of_new_group() -> None:
     assert data == before
 
 
+def a_subnet(*, ipv6: bool = False) -> dict[str, Any]:
+    """describe-subnets が返すサブネット。ipv6 なら IPv6 の CIDR が結び付いている。"""
+    found: dict[str, Any] = {"SubnetId": SUBNET, "VpcId": VPC, "CidrBlock": "10.0.0.0/24"}
+    if ipv6:
+        found["Ipv6CidrBlockAssociationSet"] = [
+            {"Ipv6CidrBlock": "2001:db8::/64", "Ipv6CidrBlockState": {"State": "associated"}}
+        ]
+    return found
+
+
+# fill が埋める、DeviceIndex が 0 の要素のほかの項目
+FILLED: dict[str, Any] = {
+    "InstanceType": "t3.micro",
+    "MetadataOptions": {"HttpTokens": "required", "InstanceMetadataTags": "enabled"},
+    "InstanceInitiatedShutdownBehavior": "terminate",
+    "CreditSpecification": {"CpuCredits": "unlimited"},
+}
+
+
+def test_fill_puts_the_defaults_and_looks_up_the_subnet(ec2: EC2Client, service: Service) -> None:
+    """何も書かれていなければ、既定 VPC のサブネットを選び、ほかの項目を既定で埋める。
+
+    サブネットに IPv6 の CIDR が結び付いていれば、IPv6 アドレスを 1 つ付ける。読んだ
+    サブネットを返すので、build は読み直さない。ImageId は埋めない。
+    """
+    conf = Conf(AwsRegion="ap-northeast-1")
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_vpcs",
+            {"Vpcs": [{"VpcId": VPC}]},
+            {"Filters": [{"Name": "is-default", "Values": ["true"]}]},
+        )
+        stub.add_response(
+            "describe_subnets",
+            {
+                "Subnets": [
+                    {"SubnetId": SUBNET, "AvailabilityZone": "ap-northeast-1a", "VpcId": VPC}
+                ]
+            },
+            {
+                "Filters": [
+                    {"Name": "vpc-id", "Values": [VPC]},
+                    {"Name": "map-public-ip-on-launch", "Values": ["true"]},
+                ]
+            },
+        )
+        stub.add_response(
+            "describe_subnets",
+            {"Subnets": [a_subnet(ipv6=True)]},
+            {"Filters": [{"Name": "subnet-id", "Values": [SUBNET]}]},
+        )
+        found = ltbuild.fill(ec2, service, conf)
+        stub.assert_no_pending_responses()
+    assert found == aws.Subnet(vpc_id=VPC, ipv6=True)
+    assert conf.launch_template == {
+        **FILLED,
+        "NetworkInterfaces": [
+            {
+                "DeviceIndex": 0,
+                "SubnetId": SUBNET,
+                "AssociatePublicIpAddress": True,
+                "Ipv6AddressCount": 1,
+            }
+        ],
+    }
+
+
 @pytest.mark.parametrize(
-    ("data", "ipv6", "missing"),
+    ("data", "filled"),
     [
-        pytest.param({}, False, [], id="all written"),
-        pytest.param({"InstanceType": None}, False, ["InstanceType"], id="instance type"),
         pytest.param(
-            {"NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": SUBNET}]},
-            False,
-            ["NetworkInterfaces[DeviceIndex=0].AssociatePublicIpAddress"],
-            id="public address",
+            {"InstanceType": "m7i.large", "CreditSpecification": None},
+            {"InstanceType": "m7i.large", "CreditSpecification": None},
+            id="not burstable",
         ),
         pytest.param(
-            {}, True, ["NetworkInterfaces[DeviceIndex=0].Ipv6AddressCount"], id="ipv6 subnet"
+            {"InstanceType": "t1.micro", "CreditSpecification": None},
+            {"InstanceType": "t1.micro", "CreditSpecification": None},
+            id="t1",
         ),
         pytest.param(
-            {"CreditSpecification": None}, False, ["CreditSpecification.CpuCredits"], id="credits"
+            {"CreditSpecification": {"CpuCredits": "standard"}},
+            {"CreditSpecification": {"CpuCredits": "standard"}},
+            id="credits written",
         ),
         pytest.param(
-            {"NetworkInterfaces": [{"DeviceIndex": 0, "NetworkInterfaceId": "eni-1"}]},
-            True,
-            [],
-            id="existing interface",
+            {"MetadataOptions": {"HttpTokens": "optional", "HttpPutResponseHopLimit": 2}},
+            {
+                "MetadataOptions": {
+                    "HttpTokens": "optional",
+                    "HttpPutResponseHopLimit": 2,
+                    "InstanceMetadataTags": "enabled",
+                }
+            },
+            id="metadata written",
         ),
     ],
 )
-def test_unfilled_lists_what_apply_has_not_written(
-    data: dict[str, Any], ipv6: bool, missing: list[str]
+def test_fill_keeps_what_is_written(
+    ec2: EC2Client, service: Service, data: dict[str, Any], filled: dict[str, Any]
 ) -> None:
-    """書かなければ apply が書く項目のうち、まだ書かれていないものを挙げる。bake と
-    set-port が、先に apply するよう促すのに使う。
+    """書かれた項目はそのまま。CpuCredits は T 系（t1 を除く）の型だけに入れる。
+
+    SubnetId と Ipv6AddressCount が書かれていれば、AWS を読まない。
     """
-    written: dict[str, Any] = {
-        "ImageId": IMAGE,
-        "InstanceType": "t3.micro",
-        "InstanceInitiatedShutdownBehavior": "terminate",
-        "MetadataOptions": {"HttpTokens": "required", "InstanceMetadataTags": "enabled"},
-        "CreditSpecification": {"CpuCredits": "unlimited"},
-        "NetworkInterfaces": [{**PRIMARY, "AssociatePublicIpAddress": True}],
+    primary = {**PRIMARY, "AssociatePublicIpAddress": False, "Ipv6AddressCount": 0}
+    conf = values(NetworkInterfaces=[dict(primary)], ImageId=None, **data)
+    with Stubber(ec2) as stub:
+        assert ltbuild.fill(ec2, service, conf) is None
+        stub.assert_no_pending_responses()
+    wanted = {**FILLED, "NetworkInterfaces": [primary], **filled}
+    assert conf.launch_template == {
+        key: value for key, value in wanted.items() if value is not None
     }
-    written.update(data)
-    conf = Conf(launch_template={key: value for key, value in written.items() if value is not None})
-    assert ltbuild.unfilled(conf, ipv6=ipv6) == missing
+
+
+def test_fill_reads_the_written_subnet_for_ipv6(ec2: EC2Client, service: Service) -> None:
+    """SubnetId が書かれていても、Ipv6AddressCount が無ければサブネットを読んで決める。"""
+    conf = values(ImageId=None)
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_subnets",
+            {"Subnets": [a_subnet()]},
+            {"Filters": [{"Name": "subnet-id", "Values": [SUBNET]}]},
+        )
+        found = ltbuild.fill(ec2, service, conf)
+        stub.assert_no_pending_responses()
+    assert found == aws.Subnet(vpc_id=VPC, ipv6=False)
+    assert conf.launch_template["NetworkInterfaces"] == [
+        {**PRIMARY, "AssociatePublicIpAddress": True}
+    ]
+
+
+def test_fill_leaves_an_existing_network_interface_alone(ec2: EC2Client, service: Service) -> None:
+    """DeviceIndex が 0 の要素に NetworkInterfaceId があれば、サブネットの項目は入れない。"""
+    conf = values(NetworkInterfaces=[{"DeviceIndex": 0, "NetworkInterfaceId": "eni-1"}])
+    with Stubber(ec2) as stub:
+        assert ltbuild.fill(ec2, service, conf) is None
+        stub.assert_no_pending_responses()
+    assert conf.launch_template["NetworkInterfaces"] == [
+        {"DeviceIndex": 0, "NetworkInterfaceId": "eni-1"}
+    ]
+
+
+def test_fill_adds_the_primary_element_beside_others(ec2: EC2Client, service: Service) -> None:
+    """DeviceIndex が 0 の要素が無ければ、ほかの要素はそのままに、要素を足して埋める。"""
+    other = {"DeviceIndex": 1, "SubnetId": SUBNET}
+    conf = values(NetworkInterfaces=[dict(other)])
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_vpcs",
+            {"Vpcs": [{"VpcId": VPC}]},
+            {"Filters": [{"Name": "is-default", "Values": ["true"]}]},
+        )
+        stub.add_response(
+            "describe_subnets",
+            {
+                "Subnets": [
+                    {"SubnetId": SUBNET, "AvailabilityZone": "ap-northeast-1a", "VpcId": VPC}
+                ]
+            },
+            {
+                "Filters": [
+                    {"Name": "vpc-id", "Values": [VPC]},
+                    {"Name": "map-public-ip-on-launch", "Values": ["true"]},
+                ]
+            },
+        )
+        stub.add_response(
+            "describe_subnets",
+            {"Subnets": [a_subnet()]},
+            {"Filters": [{"Name": "subnet-id", "Values": [SUBNET]}]},
+        )
+        _ = ltbuild.fill(ec2, service, conf)
+        stub.assert_no_pending_responses()
+    assert conf.launch_template["NetworkInterfaces"] == [
+        other,
+        {"DeviceIndex": 0, "SubnetId": SUBNET, "AssociatePublicIpAddress": True},
+    ]
+
+
+def test_build_uses_the_subnet_that_fill_read(ec2: EC2Client, service: Service) -> None:
+    """fill が読んだサブネットを渡せば、build は読み直さない。"""
+    conf = values()
+    with Stubber(ec2) as stub:
+        stub.add_response("describe_images", {"Images": [an_image()]}, {"ImageIds": [IMAGE]})
+        stub.add_response(
+            "describe_security_groups", {"SecurityGroups": [a_group(GROUP, NAME)]}, in_vpc(NAME)
+        )
+        found = ltbuild.build(ec2, service, conf, known=aws.Subnet(vpc_id=VPC, ipv6=True))
+        stub.assert_no_pending_responses()
+    assert found.vpc_id == VPC
+    assert found.ipv6

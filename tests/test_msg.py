@@ -90,6 +90,29 @@ def test_confirm_writes_the_prompt_to_stderr(
     assert shown.err == "destroy dev-main? [y/N] "
 
 
+def test_confirm_makes_the_question_only_when_it_asks(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """問いを作る関数は、問うときにだけ呼ぶ。yes のときと、標準入力が端末でないときは
+    呼ばない。--svc のコマンドは、それでアカウントを引く STS の呼び出しを省く。
+    """
+    made: list[str] = []
+
+    def question() -> str:
+        made.append("made")
+        return "destroy dev-main in ap-northeast-1?"
+
+    msg.confirm(question, yes=True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    with pytest.raises(TemtError, match="pass --yes"):
+        msg.confirm(question, yes=False)
+    assert made == []
+    monkeypatch.setattr(sys, "stdin", Terminal("y\n"))
+    msg.confirm(question, yes=False)
+    assert made == ["made"]
+    assert capsys.readouterr().err == "destroy dev-main in ap-northeast-1? [y/N] "
+
+
 def test_confirm_closes_the_line_on_end_of_input(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

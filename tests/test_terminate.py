@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import Clock, Stubs, an_instance, deadline, reservations, taken
+from conftest import WHERE, Clock, Stubs, an_instance, deadline, identified, reservations, taken
 
 from temt import cli, home, instances, lock, terminate, wait
 from temt.msg import TemtError
@@ -35,7 +35,7 @@ SEARCH = {
 BY_ID = {"InstanceIds": [INSTANCE]}
 BOTH = {"InstanceIds": [INSTANCE, OTHER]}
 # 手順 3 の問いかけ。標準エラー出力に書く
-PROMPT = f"terminate {INSTANCE} (running)? [y/N] "
+PROMPT = f"terminate {INSTANCE} (running) {WHERE}? [y/N] "
 TIME_RE = re.compile(r"\d\d:\d\d:\d\d ")
 
 
@@ -108,6 +108,7 @@ def test_it_terminates_the_instance_and_waits(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     file = known_hosts(configured, INSTANCE, current=INSTANCE)[0]
     # 手順 1
     aws_stubs.ec2.add_response(
@@ -151,6 +152,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """y と答えなければ、何もせずに終了コード 1 で終わる。"""
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     file = known_hosts(configured, INSTANCE)[0]
     aws_stubs.ec2.add_response(
@@ -177,6 +179,7 @@ def test_it_cancels_at_the_end_of_input(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Ctrl-D は端末に何も出さないので、行を閉じてから終わる。"""
+    identified(aws_stubs)
     _ = configured
     monkeypatch.setattr(sys, "stdin", Terminal(""))
     aws_stubs.ec2.add_response(
@@ -254,6 +257,7 @@ def test_it_terminates_every_instance_when_there_are_two(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """手違いで 2 台あれば、両方とも終了する。"""
+    identified(aws_stubs)
     files = known_hosts(configured, INSTANCE, OTHER, current=OTHER)
     aws_stubs.ec2.add_response(
         "describe_instances",
@@ -276,7 +280,7 @@ def test_it_terminates_every_instance_when_there_are_two(
     assert [file.exists() for file in files] == [False, False]
     assert not configured.known_hosts_current.is_symlink()
     out, err = capsys.readouterr()
-    assert err == f"terminate {INSTANCE} (running), {OTHER} (stopped)? [y/N] "
+    assert err == f"terminate {INSTANCE} (running), {OTHER} (stopped) {WHERE}? [y/N] "
     assert f"{INSTANCE} is terminated" in told(out)
     assert f"{OTHER} is terminated" in told(out)
 
@@ -556,6 +560,7 @@ def test_it_warns_about_the_apps_removed_without_baking(
     aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """終了するインスタンスから焼かずに外したアプリが、テンプレートの AMI にあれば警告する。"""
+    identified(aws_stubs)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
@@ -597,6 +602,7 @@ def test_it_warns_about_the_apps_that_are_not_baked(
     aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """終了するインスタンスに入れてまだ焼いていないアプリを、確認の前に警告する。"""
+    identified(aws_stubs)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
@@ -650,6 +656,7 @@ def test_it_terminates_only_the_instance_it_is_given(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """ID を指せば、確認、known_hosts、焼いていないアプリ、待ち合わせもそれだけに行う。"""
+    identified(aws_stubs)
     files = known_hosts(configured, INSTANCE, OTHER, current=INSTANCE)
     aws_stubs.ec2.add_response(
         "describe_instances",
@@ -671,7 +678,7 @@ def test_it_terminates_only_the_instance_it_is_given(
     assert clock.slept == []
     assert [file.exists() for file in files] == [True, False]
     assert configured.known_hosts_current.is_symlink()
-    prompt = f"terminate {OTHER} (stopped)? [y/N] "
+    prompt = f"terminate {OTHER} (stopped) {WHERE}? [y/N] "
     out, err = capsys.readouterr()
     assert err == f"temt: warning: unbaked apps will be lost: jupyter\n{prompt}"
     assert told(out) == [f"terminating {OTHER}", f"{OTHER} is terminated"]

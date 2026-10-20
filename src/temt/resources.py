@@ -13,10 +13,19 @@ update は、検出した差分で、同じ順に、無ければ作り、あれ�
 消したものを、それぞれ知らせる。リソースごとには、detect_<リソース> が AWS を読んで差分を検出し、
 リソースの名前の関数（role、role_policies など）が検出した差分で揃える。
 
+[role] が無ければ、detect の後に with_release が、ロールからこのリージョンのタグを外す
+ことと、ほかのリージョンのタグが無ければロールとインスタンスプロファイルを消すことを
+検出する（detect_release）。update もその順に、起動テンプレートを揃えてから行う。
+
 remove は、起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティ
-グループ、インスタンスプロファイル、IAM ロールを、この順に消す。ロールは、付いた
-インラインポリシーをすべて消してから消す。消したもの、既に無かったものを、それぞれ
-知らせる。
+グループを消し、ロールからこのリージョンのタグを外して、ほかのリージョンのタグが無ければ
+インスタンスプロファイル、IAM ロールを、この順に消す。ロールは、付いた
+インラインポリシーをすべて消してから消す。消したもの、残したもの、既に無かったものを、
+それぞれ知らせる。
+
+ロールは、全リージョンのクローンが 1 つを使う（design/resources.md の Regions）。<名前> が
+IAM のロール名の上限より長ければ、IAM を読むだけのところ（[role] の無い apply と diff、
+destroy、role delete）は、呼ばずにロールもインスタンスプロファイルも無いものとする。
 
 セキュリティグループについては、sg diff と sg show が AWS と設定ファイルを比べて
 見せるための groups、current_rules、wanted_rules、changes も持つ。
@@ -31,7 +40,7 @@ botocore の例外は、そのリソースが無いことを表す誤りだけ�
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from ipaddress import ip_network
 from typing import TYPE_CHECKING, Any, cast
 
@@ -103,8 +112,6 @@ UNKNOWN_SOURCE = "?"
 
 # CPU クレジットを持つ T 系のインスタンスの型。ltbuild が持つ
 BURSTABLE = ltbuild.BURSTABLE
-# サブネットに IPv6 の CIDR が結び付いているときに付ける IPv6 アドレスの数
-IPV6_ADDRESSES = 1
 DEFAULT_VERSION = "$Default"
 # delete-parameters が 1 回に受け付ける名前の数
 PARAMETER_BATCH = 10
@@ -114,6 +121,10 @@ UPDATED = "updated"
 UNCHANGED = "unchanged"
 DELETED = "deleted"
 ABSENT = "absent"
+KEPT = "kept"
+
+# IAM のロール名の長さの上限。これより長い <名前> のロールは IAM に無い
+ROLE_NAME_MAX = 64
 
 # 差分の種類。change.Change の kind
 ROLE = "role"
@@ -133,6 +144,29 @@ def _mark(service: Service) -> list[tuple[str, str]]:
     AWS のサービスごとにタグの型が違うので、渡すときにそれぞれの形にする。
     """
     return [(aws.TAG_SERVICE, service.svc)]
+
+
+def _role_mark(service: Service, region: str) -> list[tuple[str, str]]:
+    """インスタンスロールに付けるタグ。temt のタグと、このリージョンのタグ（値は空）。"""
+    return [*_mark(service), (aws.region_tag(region), "")]
+
+
+def too_long(service: Service) -> bool:
+    """<名前> が IAM のロール名の上限より長いか。そのロールは IAM に無い。"""
+    return len(service.name) > ROLE_NAME_MAX
+
+
+def held(inline: Sequence[str], managed: Sequence[str]) -> str:
+    """ロールに付いたポリシーの表示。インラインポリシーの名前と管理ポリシーの ARN。無ければ空。
+
+    ロールを消すと、どちらも一緒に消える（管理ポリシーは外れる）ので、確認に挙げる。
+    """
+    return "; ".join(
+        [
+            *([f"inline policies: {', '.join(inline)}"] if inline else []),
+            *([f"managed policies: {', '.join(managed)}"] if managed else []),
+        ]
+    )
 
 
 def _report(what: str, state: str, note: str = "") -> None:
@@ -157,11 +191,14 @@ def _missing(
 
 @dataclass(frozen=True)
 class RoleDiff:
-    """IAM ロールの差分。exists でなければ作る。tags は足すタグ。"""
+    """IAM ロールの差分。exists でなければ作る。tags は足すタグで、このリージョンのタグも
+    入る。region はこのリージョンで、作るときにそのタグを付ける。
+    """
 
     name: str
     exists: bool
     tags: tuple[tuple[str, str], ...] = ()
+    region: str = ""
 
     def changes(self) -> list[Change]:
         """diff に出す形にする。"""
@@ -182,17 +219,23 @@ def _owned(what: str, tags: Sequence[Mapping[str, Any]] | None, service: Service
         )
 
 
-def detect_role(iam: IAMClient, service: Service) -> RoleDiff:
-    """インスタンスロール <名前> の差分を検出する。別のサービスのタグが付いていれば止める。"""
+def detect_role(iam: IAMClient, service: Service, region: str) -> RoleDiff:
+    """インスタンスロール <名前> の差分を検出する。別のサービスのタグが付いていれば止める。
+
+    region はこのリージョンで、そのタグが無ければ足す。
+    """
     try:
         found = iam.get_role(RoleName=service.name)["Role"]
     except ClientError as e:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
-        return RoleDiff(service.name, exists=False)
+        return RoleDiff(service.name, exists=False, region=region)
     _owned("role", found.get("Tags"), service)
     return RoleDiff(
-        service.name, exists=True, tags=tuple(_missing(found.get("Tags"), _mark(service)))
+        service.name,
+        exists=True,
+        tags=tuple(_missing(found.get("Tags"), _role_mark(service, region))),
+        region=region,
     )
 
 
@@ -206,7 +249,7 @@ def role(iam: IAMClient, service: Service, found: RoleDiff) -> None:
         _ = iam.create_role(
             RoleName=service.name,
             AssumeRolePolicyDocument=TRUST_POLICY,
-            Tags=[{"Key": key, "Value": value} for key, value in _mark(service)],
+            Tags=[{"Key": key, "Value": value} for key, value in _role_mark(service, found.region)],
         )
         state = CREATED
     elif found.tags:
@@ -887,21 +930,31 @@ def require_template(ec2: EC2Client, service: Service) -> None:
         raise not_applied(service)
 
 
-def versions(ec2: EC2Client, service: Service) -> list[Mapping[str, Any]]:
-    """起動テンプレートのすべてのバージョン。無ければ apply を促して終わる。"""
-    name = service.launch_template
+def template_versions(ec2: EC2Client, service: Service) -> list[Mapping[str, Any]]:
+    """起動テンプレートのすべてのバージョン。テンプレートが無ければ空。
+
+    テンプレートには必ずバージョンがあるので、空はテンプレートが無いことを表す。
+    """
     try:
         return [
             one
             for page in ec2.get_paginator("describe_launch_template_versions").paginate(
-                LaunchTemplateName=name
+                LaunchTemplateName=service.launch_template
             )
             for one in page.get("LaunchTemplateVersions", [])
         ]
     except ClientError as e:
         if error_code(e) != NO_SUCH_TEMPLATE:
             raise
-        raise not_applied(service) from None
+        return []
+
+
+def versions(ec2: EC2Client, service: Service) -> list[Mapping[str, Any]]:
+    """起動テンプレートのすべてのバージョン。無ければ apply を促して終わる。"""
+    found = template_versions(ec2, service)
+    if not found:
+        raise not_applied(service)
+    return found
 
 
 @dataclass(frozen=True)
@@ -999,6 +1052,7 @@ class TemplateDiff:
     wanted は揃える中身（ltbuild.build）。current は既定バージョンの中身で、テンプレートが
     無ければ None で、作る。number は既定バージョンの番号、versions は今あるバージョンの
     番号。tags は、テンプレート自身に足すタグで、template_id はそのテンプレートの ID。
+    note は、ImageId の行で新しい AMI に括弧で添えること（ltbuild.Image）。
     """
 
     name: str
@@ -1008,6 +1062,7 @@ class TemplateDiff:
     versions: tuple[int, ...] = ()
     template_id: str = ""
     tags: tuple[tuple[str, str], ...] = ()
+    note: str = ""
 
     @property
     def changed(self) -> bool:
@@ -1029,9 +1084,18 @@ class TemplateDiff:
         return tuple(one for one in self.versions if one != self.number)
 
     def changes(self) -> list[Change]:
-        """diff に出す形にする。違う項目を 1 つ 1 行で出す。"""
+        """diff に出す形にする。違う項目を 1 つ 1 行で出す。
+
+        作るときは項目に開かず、選んだ AMI だけを出す。AMI を写し忘れたクローンが、確認の
+        前に気づけるようにする。
+        """
+        notes = {ltbuild.IMAGE_ID: self.note} if self.note else {}
         if self.current is None:
-            return [Change(ADD, LAUNCH_TEMPLATE, self.name)]
+            image = self.wanted.get(ltbuild.IMAGE_ID)
+            detail = "" if image is None else f"{ltbuild.IMAGE_ID}: {ltdata.shown(image)}"
+            if detail and self.note:
+                detail += f" ({self.note})"
+            return [Change(ADD, LAUNCH_TEMPLATE, self.name, detail)]
         found: list[Change] = []
         if self.tags:
             found.append(Change(UPDATE, LAUNCH_TEMPLATE, self.name, change.tags(self.tags)))
@@ -1044,7 +1108,7 @@ class TemplateDiff:
             return found
         items = [
             Change(UPDATE, LAUNCH_TEMPLATE, self.name, detail, body)
-            for detail, body in template_changes(self.current, self.wanted)
+            for detail, body in template_changes(self.current, self.wanted, notes)
         ]
         # 開いた項目では違いが見えないときも、新しいバージョンを作ることは出す
         return found + (items or [Change(UPDATE, LAUNCH_TEMPLATE, self.name, "new version")])
@@ -1067,14 +1131,16 @@ def _tables(value: Any) -> bool:
 
 
 def template_changes(
-    current: Mapping[str, Any], wanted: Mapping[str, Any]
+    current: Mapping[str, Any], wanted: Mapping[str, Any], notes: Mapping[str, str] | None = None
 ) -> list[tuple[str, tuple[str, ...]]]:
     """2 つの中身の違いを、項目の位置ごとに、違いの文と続く行の組で返す。
 
     位置は ltdata.leaves の書き方。UserData は base64 を戻した文書を unified diff で
     続く行に出し、文字として読めなければバイト数だけを出す。対応づけのキーの無い
     テーブルの配列は、要素を中身全体で比べ、消える要素と足される要素を 1 つ 1 行で出す。
+    notes は、位置ごとに、新しい値の後ろに括弧で添えること（ImageId の AMI の名前）。
     """
+    notes = notes or {}
     now = ltdata.leaves(ltdata.normalize(current))
     then = ltdata.leaves(ltdata.normalize(wanted))
     found: list[tuple[str, tuple[str, ...]]] = []
@@ -1099,7 +1165,8 @@ def template_changes(
                 if not any(ltdata.same(one, other) for other in old)
             ]
             continue
-        found.append((f"{key}: {ltdata.shown(before)}{ARROW}{ltdata.shown(after)}", ()))
+        note = f" ({notes[key]})" if notes.get(key) else ""
+        found.append((f"{key}: {ltdata.shown(before)}{ARROW}{ltdata.shown(after)}{note}", ()))
     return found
 
 
@@ -1120,27 +1187,28 @@ def _presence(value: Any) -> str:
     return "-" if value is None else "(text)"
 
 
-def detect_template(ec2: EC2Client, service: Service, wanted: Mapping[str, Any]) -> TemplateDiff:
+def detect_template(
+    ec2: EC2Client,
+    service: Service,
+    wanted: Mapping[str, Any],
+    *,
+    versions: Sequence[Mapping[str, Any]] | None = None,
+    note: str = "",
+) -> TemplateDiff:
     """起動テンプレートの差分を検出する。
 
     wanted は ltbuild.build が組み立てた中身で、temt のセキュリティグループがまだ無ければ
     その ID は ltbuild.NEW_GROUP になっている。既定バージョンの中身全体と、テンプレート
     自身のタグを比べる。バージョンの中の TagSpecifications は起動したインスタンスに
-    付くもので、テンプレート自身のタグとは別である。
+    付くもので、テンプレート自身のタグとは別である。versions は、AMI を決めるために先に
+    読んだバージョン（template_versions）で、None ならここで読む。note は、ImageId の
+    行に添えること。
     """
     name = service.launch_template
-    try:
-        versions = [
-            one
-            for page in ec2.get_paginator("describe_launch_template_versions").paginate(
-                LaunchTemplateName=name
-            )
-            for one in page.get("LaunchTemplateVersions", [])
-        ]
-    except ClientError as e:
-        if error_code(e) != NO_SUCH_TEMPLATE:
-            raise
-        return TemplateDiff(name, wanted)
+    if versions is None:
+        versions = template_versions(ec2, service)
+    if not versions:
+        return TemplateDiff(name, wanted, note=note)
     current = default_version(versions, service)
     found = ec2.describe_launch_templates(LaunchTemplateNames=[name]).get("LaunchTemplates")
     # 名前で引いて無ければ AWS は誤りを返すので、空の応答は ID が無いものとして扱う
@@ -1154,6 +1222,7 @@ def detect_template(ec2: EC2Client, service: Service, wanted: Mapping[str, Any])
         tuple(_version(one.get("VersionNumber"), name) for one in versions),
         field(described, "LaunchTemplateId") if differ else "",
         differ,
+        note,
     )
 
 
@@ -1166,7 +1235,8 @@ def template(
     新しいバージョンを既定にしたら、それ以外のバージョンをすべて消す。作らないときも、
     既定以外のバージョンが残っていれば消す。group_id は揃えた temt のセキュリティ
     グループの ID で、検出したときにまだ無く NEW_GROUP で比べていれば、それをこの ID に
-    置き換えて書く。managed は、temt のインスタンスプロファイルを直前に揃えたか。
+    置き換えて書く。managed は、temt のインスタンスプロファイルを直前に揃え、
+    IamInstanceProfile がそれを指すか。
     """
     name = found.name
     wanted: Any = ltbuild.with_group(found.wanted, group_id) if group_id else dict(found.wanted)
@@ -1223,23 +1293,141 @@ class IamDiff:
 
 
 @dataclass(frozen=True)
+class Release:
+    """ロールからこのリージョンのタグを外し、最後なら、ロールとインスタンスプロファイル
+    <名前> を消す差分。[role] の無い apply と、destroy の確認が使う。
+
+    region はこのリージョン。role は temt:service=<svc> の付いたロールがあるか、tagged は
+    それにこのリージョンのタグが付いているか。regions は、タグが残るほかのリージョンで、
+    あればロールとインスタンスプロファイルは残す。inline と managed は、消すロールに付いた
+    インラインポリシーの名前と管理ポリシーの ARN。profile は、temt:service=<svc> の付いた
+    インスタンスプロファイルがあって消すか（apply だけが読む）。
+    """
+
+    name: str
+    region: str
+    role: bool = False
+    tagged: bool = False
+    regions: tuple[str, ...] = ()
+    inline: tuple[str, ...] = ()
+    managed: tuple[str, ...] = ()
+    profile: bool = False
+
+    @property
+    def kept(self) -> bool:
+        """ほかのリージョンのタグが残り、ロールとインスタンスプロファイルを残すか。"""
+        return self.role and bool(self.regions)
+
+    @property
+    def used(self) -> str:
+        """残すときの表示。タグが残るリージョンを挙げる。"""
+        return f"{KEPT}: used in {', '.join(self.regions)}"
+
+    def changes(self) -> list[Change]:
+        """diff に出す形にする。タグを外すことは ~、消すことは - にする。
+
+        消すときは、タグを外すことは出さない。ロール、インスタンスプロファイルの順に並べる。
+        """
+        if self.kept:
+            if not self.tagged:
+                return []
+            detail = f"untag {aws.region_tag(self.region)}; {self.used}"
+            return [Change(UPDATE, ROLE, self.name, detail)]
+        found: list[Change] = []
+        if self.role:
+            found.append(Change(REMOVE, ROLE, self.name, held(self.inline, self.managed)))
+        if self.profile:
+            found.append(Change(REMOVE, INSTANCE_PROFILE, self.name))
+        return found
+
+
+def role_release(iam: IAMClient, service: Service, region: str) -> Release:
+    """ロールの側の Release を検出する。インスタンスプロファイルは読まない。
+
+    消すときだけ、付いたポリシーを読む。<名前> が長すぎれば、IAM を呼ばずに、ロールは
+    無いものとする。
+    """
+    if too_long(service):
+        return Release(service.name, region)
+    tags = read_tags(iam, "role", service)
+    if tags is None or not _ours(tags, service):
+        return Release(service.name, region)
+    item = {"Tags": tags}
+    regions = tuple(one for one in aws.tagged_regions(item) if one != region)
+    tagged = region in aws.tagged_regions(item)
+    if regions:
+        return Release(service.name, region, role=True, tagged=tagged, regions=regions)
+    return Release(
+        service.name,
+        region,
+        role=True,
+        tagged=tagged,
+        inline=tuple(inline_policies(iam, service)),
+        managed=tuple(attached_policies(iam, service)),
+    )
+
+
+def detect_release(iam: IAMClient, service: Service, region: str) -> Release:
+    """[role] の無い apply の、ロールとインスタンスプロファイル <名前> の差分を検出する。
+
+    消せるかどうか（インスタンスプロファイルが別のロールを持つ、ロールが別のインスタンス
+    プロファイルにも入っている）は、ここでは確かめない。消すときに delete_iam が確かめ、
+    消せなければその誤りで止まる。
+    """
+    found = role_release(iam, service, region)
+    if found.kept or too_long(service):
+        return found
+    tags = read_tags(iam, "instance profile", service)
+    return replace(found, profile=tags is not None and _ours(tags, service))
+
+
+def _check_profiles(profiles: Sequence[str], service: Service, command: str) -> None:
+    """ロール <名前> が、消さないインスタンスプロファイルに入っていれば止める。"""
+    if not profiles:
+        return
+    if profiles[0] == service.name:
+        raise TemtError(
+            f"the role {service.name} is also in the instance profile {service.name}, which "
+            f"is left as it is not tagged {aws.TAG_SERVICE}={service.svc}; remove the role "
+            f"from it by hand and run {command} again"
+        )
+    raise TemtError(
+        f"the role {service.name} is also in the instance profile {profiles[0]}; "
+        f"remove it from there by hand and run {command} again"
+    )
+
+
+def release(iam: IAMClient, service: Service, found: Release) -> None:
+    """detect_release が検出した差分で、タグを外し、最後なら消す。
+
+    消してよいかは、delete_iam が読み直して確かめる。無いものだけは知らせない。
+    """
+    if found.changes():
+        delete_iam(iam, service, found.region, command="apply", quiet=True)
+
+
+@dataclass(frozen=True)
 class Found:
     """手順 5 のリソースの差分。
 
-    iam は、IamInstanceProfile が temt のものを指すときだけある。group は、起動
-    テンプレートが temt のセキュリティグループを使うときだけある。
+    iam は、[role] が書かれているときだけある。release は、書かれていないときだけある。
+    group は、起動テンプレートが temt のセキュリティグループを使うときだけある。aligned は、
+    揃えるインスタンスプロファイルを起動テンプレートの IamInstanceProfile が指すか。
     """
 
     iam: IamDiff | None
     group: GroupDiff | None
     template: TemplateDiff
+    aligned: bool = False
+    release: Release | None = None
 
     def changes(self) -> list[Change]:
         """diff に出す形にする。揃える順に並べる。"""
         found = [] if self.iam is None else self.iam.changes()
         if self.group is not None:
             found += self.group.changes()
-        return found + self.template.changes()
+        found += self.template.changes()
+        return found + ([] if self.release is None else self.release.changes())
 
 
 def detect(
@@ -1250,18 +1438,22 @@ def detect(
     built: ltbuild.Built,
     *,
     policies: Mapping[str, Mapping[str, Any]] | None,
+    versions: Sequence[Mapping[str, Any]] | None = None,
 ) -> Found:
     """リソースの差分を、揃える順に検出する。
 
     built は手順 4 で組み立てた起動テンプレートの中身。policies は、手順 4 で検査した、
-    インラインポリシーの名前から中身への対応で、temt のインスタンスプロファイルを
-    使わないときは None。そのときインスタンスロールとインスタンスプロファイルは見ない。
-    セキュリティグループは、起動テンプレートがそれを使うときだけ見る。
+    インラインポリシーの名前から中身への対応で、[role] が無いときは None。そのとき
+    インスタンスロールとインスタンスプロファイルは揃えない。手放す差分は、呼ぶ側が
+    起動テンプレートの差分を見せてから with_release で検出する。IamInstanceProfile が
+    どこを指すかには関わらない。セキュリティグループは、起動テンプレートがそれを使うとき
+    だけ見る。versions は、手順 4 で AMI を決めるために読んだ起動テンプレートのバージョンで、
+    読んでいなければ None。リージョンは values.AwsRegion。
     """
     iam_found = None
     if policies is not None:
         iam_found = IamDiff(
-            detect_role(iam, service),
+            detect_role(iam, service, values.AwsRegion),
             tuple(detect_role_policies(iam, service, policies)),
             detect_managed_policies(iam, service, values.role.ManagedPolicyArns),
             detect_instance_profile(iam, service),
@@ -1269,13 +1461,29 @@ def detect(
     group = None
     if built.uses_group and built.vpc_id is not None:
         group = detect_security_group(ec2, service, values, built.vpc_id)
-    return Found(iam_found, group, detect_template(ec2, service, built.data))
+    aligned = iam_found is not None and ltbuild.points_at_temt(built.data, service)
+    template = detect_template(ec2, service, built.data, versions=versions, note=built.note)
+    return Found(iam_found, group, template, aligned)
+
+
+def with_release(iam: IAMClient, service: Service, found: Found, region: str) -> Found:
+    """[role] が無いとき（found.iam が無い）、ロールとインスタンスプロファイルを手放す差分を
+    検出して found に足す。[role] があれば found のまま。
+
+    detect とは分け、IAM を読むところで誤りになって止まるときも、起動テンプレートまでの
+    差分は先に見せられるようにする。
+    """
+    if found.iam is not None:
+        return found
+    return replace(found, release=detect_release(iam, service, region))
 
 
 def update(ec2: EC2Client, iam: IAMClient, service: Service, found: Found) -> None:
     """detect が検出した差分で、リソースを順に揃える。
 
-    起動テンプレートには、揃えた temt のセキュリティグループの ID を入れる。
+    起動テンプレートには、揃えた temt のセキュリティグループの ID を入れる。ロールを
+    手放すのは、起動テンプレートを揃えた後にする。先に消すと、テンプレートの更新がほかの
+    誤りで失敗したとき、テンプレートが消えたインスタンスプロファイルを指したまま残る。
     """
     if found.iam is not None:
         role(iam, service, found.iam.role)
@@ -1283,7 +1491,9 @@ def update(ec2: EC2Client, iam: IAMClient, service: Service, found: Found) -> No
         managed_policies(iam, service, found.iam.managed)
         instance_profile(iam, service, found.iam.profile)
     group_id = None if found.group is None else security_group(ec2, service, found.group)
-    template(ec2, service, found.template, group_id, managed=found.iam is not None)
+    template(ec2, service, found.template, group_id, managed=found.aligned)
+    if found.release is not None:
+        release(iam, service, found.release)
 
 
 def delete_template(ec2: EC2Client, service: Service) -> None:
@@ -1383,20 +1593,33 @@ def profile_roles(iam: IAMClient, service: Service) -> list[str]:
     return [field(item, "RoleName") for item in found["InstanceProfile"]["Roles"]]
 
 
-def delete_instance_profile(iam: IAMClient, service: Service, *, command: str = "destroy") -> bool:
+def _absent(what: str, service: Service, *, quiet: bool) -> None:
+    """what <名前> が無いことを知らせる。quiet なら知らせない。
+
+    apply は、無いものを知らせない。残したもの（タグが違う、ほかのリージョンが使う）は、
+    消すはずのものが残ったので、apply でも知らせる。
+    """
+    if not quiet:
+        msg.info(f"{what} {service.name}: {ABSENT}")
+
+
+def delete_instance_profile(
+    iam: IAMClient, service: Service, *, command: str = "destroy", quiet: bool = False
+) -> bool:
     """インスタンスプロファイル <名前> を消す。無ければ absent と知らせる。
 
     temt:service=<svc> が付いているものだけを消す。取り込んだ元のインスタンスプロファイル
     など、ほかの名前のものは、そもそも対象にならない。入れたロール <名前> だけを外す。
     他のロールが入っていれば、それを挙げて終了する。command はやり直すよう告げる
-    コマンド。消したか、もともと無ければ True、タグが違って残せば False を返す。
+    コマンド。消したか、もともと無ければ True、タグが違って残せば False を返す。quiet
+    なら、無いことは知らせない。
     """
     try:
         found = iam.get_instance_profile(InstanceProfileName=service.name)
     except ClientError as e:
         if error_code(e) != NO_SUCH_ENTITY:
             raise
-        msg.info(f"instance profile {service.name}: {ABSENT}")
+        _absent("instance profile", service, quiet=quiet)
         return True
     if not _ours(found["InstanceProfile"].get("Tags"), service):
         msg.info(f"instance profile {service.name}: {LEFT.format(svc=service.svc)}")
@@ -1530,42 +1753,77 @@ def _strip_role(iam: IAMClient, service: Service, command: str) -> None:
     msg.info(f"role {service.name}: {DELETED}")
 
 
-def delete_iam(iam: IAMClient, service: Service) -> None:
-    """destroy の、インスタンスプロファイルとインスタンスロール <名前> を消すところ。
+def delete_iam(
+    iam: IAMClient,
+    service: Service,
+    region: str,
+    *,
+    command: str = "destroy",
+    quiet: bool = False,
+) -> None:
+    """destroy と [role] の無い apply の、インスタンスロールとインスタンスプロファイル
+    <名前> を手放すところ。
 
-    どちらも temt:service=<svc> が付いているものだけを消す。インスタンスロールが
+    temt:service=<svc> の付いたロールから、このリージョン region のタグを外す。ほかの
+    リージョンのタグが残っていれば、ロールもインスタンスプロファイルも残す。残って
+    いなければ、どちらも temt:service=<svc> が付いているものだけを消す。インスタンスロールが
     ほかのインスタンスプロファイルにも入っていれば、何も外さず消さずに、インスタンス
     プロファイルも消さずに止める。タグが違って残したインスタンスプロファイル <名前> に
-    入っているときも、ロールに手を付けずに止める。
+    入っているときも、ロールに手を付けずに止める。command はやり直すよう告げるコマンド。
+    quiet なら、無いものは知らせない。ほかのリージョンが使うので残すときは、quiet なら
+    ロールの 1 行だけを知らせる。
     """
+    if too_long(service):
+        _absent("instance profile", service, quiet=quiet)
+        _absent("role", service, quiet=quiet)
+        return
     tags = read_tags(iam, "role", service)
     ours = tags is not None and _ours(tags, service)
+    if tags is not None and ours:
+        tagged = aws.tagged_regions({"Tags": tags})
+        key = aws.region_tag(region)
+        if region in tagged:
+            _ = iam.untag_role(RoleName=service.name, TagKeys=[key])
+            msg.info(f"role {service.name}: untagged {key}")
+        regions = [one for one in tagged if one != region]
+        if regions:
+            used = f"{KEPT} (used in {', '.join(regions)})"
+            if not quiet:
+                _report_kept_profile(iam, service, used)
+            msg.info(f"role {service.name}: {used}")
+            return
     profiles = other_profiles(iam, service, own_gone=False) if ours else []
-    others = [name for name in profiles if name != service.name]
-    if others:
-        raise TemtError(
-            f"the role {service.name} is also in the instance profile {others[0]}; "
-            f"remove it from there by hand and run destroy again"
-        )
-    gone = delete_instance_profile(iam, service)
+    _check_profiles([name for name in profiles if name != service.name], service, command)
+    gone = delete_instance_profile(iam, service, command=command, quiet=quiet)
     if tags is None:
-        msg.info(f"role {service.name}: {ABSENT}")
+        _absent("role", service, quiet=quiet)
         return
     if not ours:
         msg.info(f"role {service.name}: {LEFT.format(svc=service.svc)}")
         return
     if not gone and service.name in profiles:
-        raise TemtError(
-            f"the role {service.name} is also in the instance profile {service.name}, which "
-            f"is left as it is not tagged {aws.TAG_SERVICE}={service.svc}; remove the role "
-            f"from it by hand and run destroy again"
-        )
-    _strip_role(iam, service, "destroy")
+        _check_profiles([service.name], service, command)
+    _strip_role(iam, service, command)
 
 
-def remove(ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service) -> None:
-    """起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティグループ、
-    インスタンスプロファイル、IAM ロールを、この順に消す。
+def _report_kept_profile(iam: IAMClient, service: Service, used: str) -> None:
+    """ロールを残すときの、インスタンスプロファイル <名前> の報告。無ければ absent、
+    temt:service=<svc> が付いていなければ left、あれば used（残すこと）と知らせる。
+    """
+    tags = read_tags(iam, "instance profile", service)
+    if tags is None:
+        state = ABSENT
+    elif not _ours(tags, service):
+        state = LEFT.format(svc=service.svc)
+    else:
+        state = used
+    msg.info(f"instance profile {service.name}: {state}")
+
+
+def remove(ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service, region: str) -> None:
+    """起動テンプレート、/<名前> の下の SSM パラメータ、セキュリティグループを消し、
+    インスタンスロールからこのリージョン region のタグを外して、ほかのリージョンのタグが
+    無ければインスタンスプロファイル、IAM ロールを、この順に消す。
 
     無いものは飛ばして absent と知らせ、エラーにしない。途中で失敗すればそこで止まる
     ので、もう一度実行すれば、消えたものを飛ばして続きから進む。
@@ -1573,4 +1831,4 @@ def remove(ec2: EC2Client, iam: IAMClient, ssm: SSMClient, service: Service) -> 
     delete_template(ec2, service)
     delete_parameters(ssm, service)
     delete_security_groups(ec2, service)
-    delete_iam(iam, service)
+    delete_iam(iam, service, region)

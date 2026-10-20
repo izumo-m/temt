@@ -95,7 +95,7 @@ class Instance:
     image_id: str = ""
     # ルートボリュームの ID。応答に無ければ空文字列
     root_volume: str = ""
-    # ルートボリューム以外の EBS のデバイス名。bake と ami import は AMI に入れない
+    # ルートボリューム以外の EBS のデバイス名。bake と service import は AMI に入れない
     other_devices: tuple[str, ...] = ()
 
     def because(self) -> str:
@@ -261,8 +261,8 @@ def launch(ec2: EC2Client, service: Service) -> str:
     """起動テンプレートの既定バージョンから 1 台起動し、その ID を返す。
 
     タグは起動テンプレートが付けるので、ここでは付けない。EC2 がインスタンス
-    プロファイルを見つけられずに断れば、待ってやり直さず、知らせて止まる。apply の
-    直後なら、少しあけて利用者がやり直すころには、ロールの資格情報も使えるように
+    プロファイルを見つけられずに断れば、待ってやり直さず、そのことだけを知らせて止まる。
+    apply の直後なら、少しあけて利用者がやり直すころには、ロールの資格情報も使えるように
     なっている。いちばん早い時点で起動すると、SSM エージェントが資格情報を取れずに、
     取り直しまで最長 30 分待つことがあるからである（設計書）。
     """
@@ -279,11 +279,7 @@ def launch(ec2: EC2Client, service: Service) -> str:
         )
     except ClientError as e:
         if _profile_unseen(e, service):
-            raise TemtError(
-                f"EC2 does not see the instance profile {service.name} yet; if you just ran "
-                f"'temt apply', wait a minute and start again; otherwise run "
-                f"'temt apply --svc {service.svc}'"
-            ) from None
+            raise TemtError(f"EC2 does not see the instance profile {service.name}") from None
         if error_code(e) != resources.NO_SUCH_TEMPLATE:
             raise
         raise resources.not_applied(service) from None
@@ -520,22 +516,6 @@ def wait_online(
         _noticing(notice, lambda: True if is_online(ssm, instance_id, since) else None),
         hint=hint,
     )
-
-
-def login_hint(service: Service) -> str:
-    """動いていたインスタンスの SSM エージェントを待ち切れなかったときの手がかり。"""
-    return f"see 'temt status --svc {service.svc}' or run 'temt reboot --svc {service.svc} --async'"
-
-
-def relaunch_hint(service: Service) -> str:
-    """起動したばかりのインスタンスの SSM エージェントを待ち切れなかったときの手がかり。
-
-    apply の直後の起動では、エージェントがロールの資格情報を取れなかったか、destroy の
-    直後に作り直したプロファイルの、消えた古いものが付いたことがある。どちらも、終了
-    して起動し直せば直る。後者は EC2 が新しいものを引くまで数分かかるので、数分あける
-    よう添える。
-    """
-    return f"run 'temt terminate --svc {service.svc}', wait a few minutes, and start again"
 
 
 def connect(address: str, port: int) -> socket.socket:

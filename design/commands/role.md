@@ -36,7 +36,8 @@ terminated and started again.
 3. Set `IamInstanceProfile` in the config file's `[launch-template]` to
    `IamInstanceProfile.Name = "${temt:name}"`, the same form as the scaffold
    ([resources.md](../resources.md#instance-profile-and-instance-role)). Comments
-   around an existing `IamInstanceProfile` stay.
+   around an existing `IamInstanceProfile` stay, except one at the end of a replaced `Arn`
+   line.
 4. Confirm, listing the policies and the change of `IamInstanceProfile`; `--yes` skips
    it. The confirmation shows no region or account: only a local file changes.
 5. Write the config file. Then tell the user to fix by hand the resource policies

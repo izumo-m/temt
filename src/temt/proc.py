@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Mapping
 from contextlib import suppress
 from typing import IO
 
@@ -68,16 +69,22 @@ def _feed(pipe: IO[bytes], data: bytes) -> None:
             pipe.close()
 
 
-def stream(argv: list[str], data: bytes | None = None) -> int:
+def stream(
+    argv: list[str], data: bytes | None = None, *, env: Mapping[str, str] | None = None
+) -> int:
     """コマンドを実行し、終了コードを返す。出力はそのまま利用者に見せる。
 
     標準出力は受け取って、msg.raw で標準出力に流す。標準出力の読み手（head など）が先に
     閉じても、子は止めずに最後まで動かす。install を途中で切らないためである。標準エラー
     出力はそのまま見せる。data を渡せば標準入力に書き、渡さなければ標準入力を閉じる。
+    env を渡せば、子の環境をそれにする。
     """
     msg.flush()
     with subprocess.Popen(
-        argv, stdin=subprocess.DEVNULL if data is None else subprocess.PIPE, stdout=subprocess.PIPE
+        argv,
+        stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=env,
     ) as child:
         # 子の出力を読みながら書くよう、標準入力は別のスレッドで書く
         feeder = None
@@ -92,12 +99,14 @@ def stream(argv: list[str], data: bytes | None = None) -> int:
         return child.wait()
 
 
-def read(argv: list[str]) -> tuple[int, str]:
+def read(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
     """コマンドを実行し、終了コードと標準出力を返す。標準エラー出力はそのまま見せる。
 
     ssh の ProxyCommand が出す待ちの知らせや、ssh 自身の誤りを利用者に見せるため、
-    標準エラー出力は受け取らない。標準入力は閉じる。
+    標準エラー出力は受け取らない。標準入力は閉じる。env を渡せば、子の環境をそれにする。
     """
     msg.flush()
-    done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=False)
+    done = subprocess.run(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env, check=False
+    )
     return done.returncode, done.stdout.decode(errors="replace")

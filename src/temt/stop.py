@@ -25,7 +25,8 @@ def run(service: Service, *, is_async: bool, yes: bool) -> None:
     is_async なら、AWS が停止の要求を受け付けるまでしか待たない。yes なら確認しない。
     """
     values = conf.load(service)
-    ec2 = aws.session(values).client("ec2")
+    session = aws.session(values)
+    ec2 = session.client("ec2")
     with lock.hold(service):
         # 手順 1。終了の途中のものは、無いものとして扱う
         found = instances.remaining(instances.find(ec2, service))
@@ -44,7 +45,7 @@ def run(service: Service, *, is_async: bool, yes: bool) -> None:
             msg.info(f"{one.id} is already {one.state}")
         else:
             # 手順 3。pending でも停止を求める。断るかは AWS が決める
-            msg.confirm(f"stop {one.id} ({one.state})?", yes=yes)
+            aws.confirm(session, f"stop {one.id} ({one.state})", yes=yes)
             with instances.refused(service, "stop"):
                 instances.stop(ec2, one.id)
         # 手順 4

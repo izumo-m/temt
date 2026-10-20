@@ -51,8 +51,12 @@ READ_ONLY = (
 USER_DATA = "UserData"
 # IamInstanceProfile の、名前と ARN の項目
 PROFILE = "IamInstanceProfile"
-# template show で、apply が書くのと同じくインラインテーブルにする項目
+# template show で、role import が書くのと同じくインラインテーブルにする項目
 INLINE = (PROFILE,)
+# 共通ファイルと重ねるとき、テーブルでもキーごとに重ねず、丸ごと置き換える項目。共通
+# ファイルの Arn と設定ファイルの Name が混ざって、別のインスタンスプロファイルを指さない
+# ようにする
+WHOLE = (PROFILE,)
 
 
 @cache
@@ -221,14 +225,15 @@ def _arrays(value: Any, where: str) -> Iterator[tuple[str, list[Any]]]:
 def merge(base: Any, over: Any, name: str = "") -> Any:
     """共通ファイルの [launch-template] base に、設定ファイルの over を重ねる。
 
-    テーブルはキーごとに重ね、両方にある値は over にする。MATCH_KEYS の配列は、キーが
-    同じ要素どうしを要素の中で重ね、キーが違う要素は両方を並べる（base の要素が先）。
-    ほかの配列は、over に書けば base を丸ごと置き換える。name は over の項目の名前。
+    テーブルはキーごとに重ね、両方にある値は over にする。ただし WHOLE の項目は、over に
+    書けば base を丸ごと置き換える。MATCH_KEYS の配列は、キーが同じ要素どうしを要素の中で
+    重ね、キーが違う要素は両方を並べる（base の要素が先）。ほかの配列は、over に書けば
+    base を丸ごと置き換える。name は over の項目の名前。
     """
     if isinstance(base, dict) and isinstance(over, dict):
         made = dict(base)
         for key, item in over.items():
-            made[key] = merge(base[key], item, key) if key in base else item
+            made[key] = merge(base[key], item, key) if key in base and key not in WHOLE else item
         return made
     key = MATCH_KEYS.get(name)
     if key is not None and isinstance(base, list) and isinstance(over, list):
@@ -404,8 +409,8 @@ def _without_read_only(value: Any, path: tuple[str, ...]) -> Any:
 def render(data: Mapping[str, Any], notes: Mapping[str, str] | None = None) -> list[str]:
     """中身を、設定ファイルの [launch-template] と同じ TOML の行にする。template show が使う。
 
-    そのまま設定ファイルに写せる形にする。タグの並び（Tags）と IamInstanceProfile は、
-    apply が書くのと同じくインラインにする。notes は値（サブネットの ID など）から、
+    そのまま設定ファイルに写せる形にする。タグの並び（Tags）と IamInstanceProfile は
+    インラインにする。notes は値（サブネットの ID など）から、
     その値の行の後ろに添えるコメントへの対応。
     """
     import tomlkit

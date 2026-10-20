@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from temt import aws, conf, ltdata, msg, resources
+from temt.names import PREFIX
 from temt.table import printable
 
 if TYPE_CHECKING:
@@ -97,14 +98,25 @@ def _root_volume(found: Mapping[str, Any]) -> str:
 
 
 def _latest(ec2: EC2Client, svc: str, found: Mapping[str, Any] | None) -> str:
-    """サービスの最新の AMI の表示。テンプレートのものより新しければ、そう添える。"""
-    tag = f"{aws.TAG_SERVICE}={svc}"
-    latest = aws.own_ami(ec2, svc)
+    """サービスの最新の AMI の表示。apply が起動テンプレートを作るときと同じく、名前で探して
+    作成日時で選ぶ（aws.newest_image）。テンプレートのものより新しければ、そう添える。
+    """
+    latest = aws.newest_image(ec2, svc)
     if latest is None:
-        return f"none ({tag})"
-    created = found.get("CreationDate") if found is not None else None
-    newer = ", newer" if isinstance(created, str) and latest.created > created else ""
-    return f"{latest.name} ({latest.image_id}, {tag}) created {aws.when(latest.created)}{newer}"
+        return f"none (no AMI named {PREFIX}-{svc}-<YYMMDDHHMM>)"
+    created = latest.get("CreationDate")
+    current = found.get("CreationDate") if found is not None else None
+    newer = (
+        ", newer"
+        if isinstance(created, str) and isinstance(current, str) and created > current
+        else ""
+    )
+    state = latest.get("State")
+    pending = f", {aws.PENDING}" if state == aws.PENDING else ""
+    return (
+        f"{_text(latest.get('Name'))} ({_text(latest.get('ImageId'))}{pending}) "
+        f"created {aws.when(created)}{newer}"
+    )
 
 
 def _show_image(ec2: EC2Client, service: Service, image_id: Any) -> None:

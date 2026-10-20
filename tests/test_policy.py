@@ -15,6 +15,9 @@ CONTENT: dict[str, Any] = {
     "Version": policy.VERSION,
     "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resources": "*"}],
 }
+# Statement ごとの、書いた場所。共通ファイルの Statement の後ろに設定ファイルの Statement が
+# つながったもの
+PLACES = ["defaults.toml: role.jupyter[0]", "web.toml: role.jupyter[0]"]
 REQUEST = {
     "policyDocument": json.dumps(CONTENT),
     "policyType": "IDENTITY_POLICY",
@@ -79,12 +82,12 @@ def test_document_stops_when_two_keys_become_one() -> None:
     with pytest.raises(
         TemtError,
         match=(
-            r"^web\.toml: role\.policy\.jupyter\[0\] has two keys that become "
+            r"^web\.toml: role\.jupyter\[0\] has two keys that become "
             r"aws:ResourceTag/web after substituting the variables$"
         ),
     ):
         _ = policy.document(
-            statements, policy.variables(Service("web")), "web.toml: role.policy.jupyter"
+            statements, policy.variables(Service("web")), ["web.toml: role.jupyter[0]"]
         )
 
 
@@ -102,7 +105,7 @@ def test_document_substitutes_the_variables_in_values_and_keys() -> None:
             "Condition": {"StringEquals": {"aws:ResourceTag/${temt:service}": "${temt:service}"}},
         }
     ]
-    made = policy.document(statements, policy.variables(Service("web")), "role.")
+    made = policy.document(statements, policy.variables(Service("web")), ["role.x[0]"])
     assert made == {
         "Version": "2012-10-17",
         "Statement": [
@@ -121,7 +124,7 @@ def test_document_substitutes_the_variables_in_values_and_keys() -> None:
 def test_document_adds_allow_when_the_effect_is_missing() -> None:
     """Effect を省いた Statement には Allow を先頭に補う。書いたものはそのまま。"""
     statements = [{"Action": "s3:GetObject", "Resource": "*"}, {"Effect": "Deny", "Action": "*"}]
-    made = policy.document(statements, policy.variables(Service("web")), "role.policy.x")
+    made = policy.document(statements, policy.variables(Service("web")), ["role.x[0]", "role.x[1]"])
     assert made["Statement"] == [
         {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"},
         {"Effect": "Deny", "Action": "*"},
@@ -135,7 +138,7 @@ def test_validate_passes_when_there_is_no_finding(
 ) -> None:
     with Stubber(analyzer) as stub:
         stub.add_response("validate_policy", {"findings": []}, REQUEST)
-        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter") == 0
+        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES) == 0
         stub.assert_no_pending_responses()
     assert capsys.readouterr().err == ""
 
@@ -153,9 +156,9 @@ def test_validate_warns_and_goes_on_for_what_is_not_an_error(
     ]
     with Stubber(analyzer) as stub:
         stub.add_response("validate_policy", {"findings": findings}, REQUEST)
-        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter") == 0
+        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES) == 0
     assert capsys.readouterr().err.splitlines() == [
-        "temt: warning: role.policy.jupyter[0].Resource: SECURITY_WARNING "
+        "temt: warning: defaults.toml: role.jupyter[0].Resource: SECURITY_WARNING "
         "PASS_ROLE_WITH_STAR_IN_RESOURCE: details of PASS_ROLE_WITH_STAR_IN_RESOURCE",
         "temt: warning: temt-jupyter: SUGGESTION EMPTY_ARRAY_ACTION: details of EMPTY_ARRAY_ACTION",
     ]
@@ -164,7 +167,10 @@ def test_validate_warns_and_goes_on_for_what_is_not_an_error(
 def test_validate_lists_every_error_and_counts_them(
     analyzer: AccessAnalyzerClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """ERROR は、すべて挙げて数を返す。止めるのは呼ぶ側。ページをまたいでも挙げる。"""
+    """ERROR は、すべて挙げて数を返す。止めるのは呼ぶ側。ページをまたいでも挙げる。
+
+    Statement の中の指摘は、その Statement を書いたファイルと、ファイルの中での位置で挙げる。
+    """
     first = [
         a_finding(
             "ERROR",
@@ -183,12 +189,13 @@ def test_validate_lists_every_error_and_counts_them(
     with Stubber(analyzer) as stub:
         stub.add_response("validate_policy", {"findings": first, "nextToken": "t"}, REQUEST)
         stub.add_response("validate_policy", {"findings": second}, {**REQUEST, "nextToken": "t"})
-        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter") == 2
+        assert policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES) == 2
         stub.assert_no_pending_responses()
     assert capsys.readouterr().err.splitlines() == [
-        "temt: role.policy.jupyter[0].Resources: ERROR INVALID_POLICY_ELEMENT: "
+        "temt: defaults.toml: role.jupyter[0].Resources: ERROR INVALID_POLICY_ELEMENT: "
         "details of INVALID_POLICY_ELEMENT",
-        "temt: role.policy.jupyter[1].Action[2]: ERROR INVALID_ACTION: details of INVALID_ACTION",
+        "temt: web.toml: role.jupyter[0].Action[2]: ERROR INVALID_ACTION: "
+        "details of INVALID_ACTION",
         "temt: warning: temt-jupyter: WARNING MISSING_VERSION: details of MISSING_VERSION",
     ]
 
@@ -199,7 +206,7 @@ def test_a_location_without_a_path_falls_back_to_the_name(
     """位置そのものが無ければポリシー名を出す。"""
     with Stubber(analyzer) as stub:
         stub.add_response("validate_policy", {"findings": [a_finding("WARNING", "X")]}, REQUEST)
-        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter")
+        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES)
     assert "temt: warning: temt-jupyter: WARNING X" in capsys.readouterr().err
 
 
@@ -217,33 +224,36 @@ def test_a_key_in_the_path_is_written_like_a_value(
         stub.add_response(
             "validate_policy", {"findings": [a_finding("WARNING", "X", path)]}, REQUEST
         )
-        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter")
-    assert "role.policy.jupyter[0].Condition.StringEquals: WARNING X" in capsys.readouterr().err
+        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES)
+    assert (
+        "defaults.toml: role.jupyter[0].Condition.StringEquals: WARNING X"
+        in capsys.readouterr().err
+    )
 
 
 def test_a_finding_outside_the_statements_keeps_its_place(
     analyzer: AccessAnalyzerClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Statement の中でない位置は、[[role.policy.<名前>]] の位置の後ろに . でつなぐ。"""
+    """Statement の中でない位置は、[[role.<名前>]] の位置の後ろに . でつなぐ。"""
     with Stubber(analyzer) as stub:
         stub.add_response(
             "validate_policy",
             {"findings": [a_finding("WARNING", "X", [{"value": "Version"}])]},
             REQUEST,
         )
-        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter")
-    assert "temt: warning: role.policy.jupyter.Version: WARNING X" in capsys.readouterr().err
+        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES)
+    assert "temt: warning: role.jupyter.Version: WARNING X" in capsys.readouterr().err
 
 
 def test_a_finding_on_the_statements_as_a_whole_names_the_policy_table(
     analyzer: AccessAnalyzerClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """位置が Statement の並び全体なら、[[role.policy.<名前>]] の位置として出す。"""
+    """位置が Statement の並び全体なら、[[role.<名前>]] の位置として出す。"""
     with Stubber(analyzer) as stub:
         stub.add_response(
             "validate_policy",
             {"findings": [a_finding("WARNING", "X", [{"value": "Statement"}])]},
             REQUEST,
         )
-        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.policy.jupyter")
-    assert "temt: warning: role.policy.jupyter: WARNING X" in capsys.readouterr().err
+        policy.validate(analyzer, CONTENT, "temt-jupyter", "role.jupyter", PLACES)
+    assert "temt: warning: role.jupyter: WARNING X" in capsys.readouterr().err

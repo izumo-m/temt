@@ -1,4 +1,4 @@
-"""ssh set-port の本体。設計の手順 1〜7 を順に行う（design/commands/ssh.md）。
+"""ssh set-port の本体。設計の手順 1〜8 を順に行う（design/commands/ssh.md）。
 
 焼く前に止まる条件と Host ブロックを書けるかを先に確かめてから、確認を求め、
 インスタンスを起動し（start と同じ）、Run Command で sshd の待ち受けポートを変える
@@ -53,7 +53,7 @@ def _ports(ports: Sequence[int]) -> str:
 
 
 def _plan(service: Service, ports: Sequence[int]) -> list[str]:
-    """手順 2 で挙げる、これからすること。"""
+    """手順 3 で挙げる、これからすること。"""
     config = printable(tilde(ssh_dir() / "config"))
     return [
         f"start {service.name} if it is not running",
@@ -143,11 +143,10 @@ def _failed(service: Service, instance_id: str, found: sshd.Outcome, status: str
             f"{running}"
         )
     if found.last.startswith(sshd.FAILED_AFTER):
+        # 直し方は添えない。何が起きたかだけを知らせる
         return TemtError(
             f"set-port changed the sshd ports, but {printable(found.last)}; sshd may listen on "
-            f"no port, so open a shell with 'aws ssm start-session --target {instance_id}' and "
-            f"fix it, or run 'temt terminate --svc {service.svc}' and start again (what was "
-            f"not baked is lost); {running}"
+            f"no port; {running}"
         )
     return TemtError(
         f"the Run Command that sets the sshd ports ended with {status or '(no status)'}; {running}"
@@ -157,7 +156,7 @@ def _failed(service: Service, instance_id: str, found: sshd.Outcome, status: str
 def _run_script(
     ssm: SSMClient, service: Service, instance_id: str, ports: Sequence[int]
 ) -> sshd.Outcome:
-    """手順 4。スクリプトを動かし、終わるまで待つ。成功しなければ直し方を添えて止める。"""
+    """手順 5。スクリプトを動かし、終わるまで待つ。成功しなければ直し方を添えて止める。"""
     run = _Run(ssm, instance_id, ports)
     try:
         status, output, error = wait.until(
@@ -200,7 +199,7 @@ def _uses_temt_group(ec2: EC2Client, service: Service) -> bool:
 def _guide(
     ec2: EC2Client, service: Service, values: Conf, before: Sequence[int], ports: Sequence[int]
 ) -> None:
-    """手順 7。受信規則の変え方を案内する。直接接続のときだけ要る。temt は変えない。"""
+    """手順 8。受信規則の変え方を案内する。直接接続のときだけ要る。temt は変えない。"""
     msg.info("for direct connection (TEMT_LOGIN=direct), the ingress rules must allow the ports")
     if not _uses_temt_group(ec2, service):
         msg.info(
@@ -240,11 +239,13 @@ def run(service: Service, ports: Sequence[int], *, yes: bool) -> None:
     先頭のポートにする。yes なら確認しない。
     """
     values = conf.load(service)
+    # 手順 1。ImageId を書いていれば、焼けないので何もせずに止まる
+    bake.check_unfixed(service, values)
     session = aws.session(values)
     ec2 = session.client("ec2")
     ssm = session.client("ssm")
     with lock.hold(service):
-        # 手順 1。sshd を変えてから止まると、変えたが焼いていない状態が残るので、焼くときに
+        # 手順 2。sshd を変えてから止まると、変えたが焼いていない状態が残るので、焼くときに
         # 止まる条件と、Host ブロックを書けない条件を先に確かめる
         resources.require_template(ec2, service)
         home.check_owner(service)
@@ -255,26 +256,26 @@ def run(service: Service, ports: Sequence[int], *, yes: bool) -> None:
             instances.too_many(service, found, "set-port")
         if found:
             bake.check_size(ec2, service, built, found[0], command="set-port")
-        # 手順 2
+        # 手順 3
         planned = "".join(f"  {line}\n" for line in _plan(service, ports))
         msg.tell(f"set-port {service.name}:\n{planned}")
-        msg.confirm(f"set the sshd ports of {service.name} to {_ports(ports)}?", yes=yes)
-        # 手順 3。SSM を使うので、WaitForSsm によらずエージェントを待つ
+        aws.confirm(session, f"set the sshd ports of {service.name} to {_ports(ports)}", yes=yes)
+        # 手順 4。SSM を使うので、WaitForSsm によらずエージェントを待つ
         instance_id = start.bring_up(
             session, service, is_async=False, wait_ssm=True, command="set-port"
         )
-        # 手順 4
-        done = _run_script(ssm, service, instance_id, ports)
         # 手順 5
+        done = _run_script(ssm, service, instance_id, ports)
+        # 手順 6
         one = instances.look_up(ec2, instance_id)
         if one is None:
             raise TemtError(f"{instance_id} is not found; run set-port again")
         bake.make(ec2, ssm, service, one)
-        # 手順 6
+        # 手順 7
         if home.write_edit(home.detect_port(service, ports[0])):
             msg.info(
                 f"wrote Port {ports[0]} in the Host {service.name} block of "
                 f"{printable(tilde(ssh_dir() / 'config'))}"
             )
-        # 手順 7
+        # 手順 8
         _guide(ec2, service, values, done.before, ports)

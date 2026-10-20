@@ -14,7 +14,7 @@ sg diff は、変更だけを標準出力に残すよう、stderr_only のあい
 import os
 import sys
 import time
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 from typing import TextIO
 
@@ -161,9 +161,11 @@ def columns(lines: Sequence[Sequence[str]]) -> None:
         tell(f"  {'  '.join(cells)}  {line[-1]}\n")
 
 
-def confirm(question: str, *, yes: bool) -> None:
+def confirm(question: str | Callable[[], str], *, yes: bool) -> None:
     """[y/N] で問いかけ、y と答えなければ終了する。yes なら問いかけない。
 
+    question は問いの文か、問う直前に文を作る関数である。関数は、問いかけないとき（yes の
+    ときと、標準入力が端末でないとき）には呼ばない。文に AWS から引く値を入れるのに使う。
     プロンプトは、標準出力をファイルやパイプに回しても見えるよう、標準エラー出力に書き、
     答えは標準入力から読む。input() はプロンプトを標準出力に出すので使わない。
     """
@@ -171,6 +173,8 @@ def confirm(question: str, *, yes: bool) -> None:
         return
     if sys.stdin is None or not sys.stdin.isatty():
         raise TemtError("cannot ask for confirmation: stdin is not a terminal; pass --yes")
+    if callable(question):
+        question = question()
     _write(sys.stderr, f"{question} [y/N] ")
     try:
         answer = sys.stdin.readline()

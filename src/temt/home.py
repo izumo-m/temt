@@ -6,7 +6,6 @@ ssh ディレクトリ、サービスのコマンド、ssh の設定を扱う。
 import fcntl
 import os
 import re
-import shutil
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -159,29 +158,11 @@ def forget_known_hosts(service: Service, instance_id: str) -> None:
         current.unlink()
 
 
-def forget_service(service: Service) -> bool:
-    """サービスの known_hosts のディレクトリを、中身ごと消す。消したら True を返す。
-
-    destroy はロックを持ったままこれを呼ぶ。ロックファイルもこのディレクトリに
-    あるが、Linux のロックは開いたファイルに付くので、消してもロックは離れない。
-    利用者がここをシンボリックリンクにしていれば、その先まで消さずに終了する。
-    """
-    directory = service.known_hosts_dir
-    if directory.is_symlink():
-        raise TemtError(
-            f"{printable(tilde(directory))} is a symlink; remove it by hand and run destroy again"
-        )
-    if not directory.exists():
-        return False
-    shutil.rmtree(directory)
-    return True
-
-
 def _command_script(service: Service) -> str:
     """サービスのコマンドの中身。PATH にある temt を、--svc を付けて実行する。"""
     return (
         "#!/bin/sh\n"
-        f"# Written by temt apply for the service {service.svc}; temt destroy removes it.\n"
+        f"# Written by temt apply for the service {service.svc}.\n"
         f'exec {PREFIX} --svc {service.svc} "$@"\n'
     )
 
@@ -208,15 +189,6 @@ def write_command(service: Service) -> None:
     path = service.command_path
     path.parent.mkdir(parents=True, exist_ok=True)
     replace_text(path, _command_script(service), mode=COMMAND_MODE)
-
-
-def remove_command(service: Service) -> bool:
-    """サービスのコマンドを、中身にかかわらず消す。消したら True を返す。"""
-    path = service.command_path
-    if not _present(path):
-        return False
-    path.unlink()
-    return True
 
 
 def _keyword(line: str) -> tuple[str, list[str]]:

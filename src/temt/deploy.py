@@ -5,11 +5,13 @@ deploy は、アプリのディレクトリを動いているインスタンス�
 使う値を決めて記録に残し、temt-options.env をディレクトリに足して install に渡す
 （options）。remove は uninstall を実行してディレクトリを消し、記録を消す。どちらも
 ロールのポリシーには触らない。アプリが使う権限は、設定ファイルの
-[[role.policy.<ポリシー名>]] に書き、apply で付ける。どちらも --bake を付ければ、
+[[role.<ポリシー名>]] に書き、apply で付ける。どちらも --bake を付ければ、
 終わったあとに、同じロックを持ったまま bake と同じ手順で AMI にする。
 
-アプリは OpenSSH の ssh で、apply が用意した Host <名前> を通して運ぶ。ディレクトリを
-tar.gz にして標準入力に流し、インスタンスの上では sudo で動く。途中で失敗しても巻き
+アプリは OpenSSH の ssh で、apply が用意した Host <名前> を通して運ぶ。ssh の
+ProxyCommand の proxy には、このコマンドが決めたリージョンとプロファイルを環境変数で
+渡す（proxy.passed_env）。ディレクトリを tar.gz にして標準入力に流し、インスタンスの上
+では sudo で動く。途中で失敗しても巻き
 戻さない。install は何度実行してもよいので、もう一度 deploy すれば揃う。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
@@ -30,7 +32,20 @@ from typing import TYPE_CHECKING
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from temt import app, aws, bake, conf, instances, lock, msg, options, proc, resources, table
+from temt import (
+    app,
+    aws,
+    bake,
+    conf,
+    instances,
+    lock,
+    msg,
+    options,
+    proc,
+    proxy,
+    resources,
+    table,
+)
 from temt.manifest import find_app, known_apps, read_manifest
 from temt.msg import TemtError
 from temt.names import (
@@ -47,6 +62,7 @@ from temt.table import tilde
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ssm.client import SSMClient
 
@@ -218,21 +234,27 @@ def _remote(script: str, *args: str) -> str:
     )
 
 
-def _ssh(service: Service, command: str, data: bytes | None = None) -> int:
-    """Host <名前> に ssh でつなぎ、command を実行して終了コードを返す。"""
-    return proc.stream([SSH, "-T", service.name, command], data)
+def _ssh(
+    service: Service, command: str, data: bytes | None = None, *, env: Mapping[str, str]
+) -> int:
+    """Host <名前> に ssh でつなぎ、command を実行して終了コードを返す。
+
+    env は ssh の環境で、proxy に決めたリージョンとプロファイルを渡す（proxy.passed_env）。
+    """
+    return proc.stream([SSH, "-T", service.name, command], data, env=env)
 
 
-def _reach(service: Service, one: Instance) -> None:
+def _reach(service: Service, one: Instance, env: Mapping[str, str]) -> None:
     """ssh でつながり、sudo が使え、つながった先が one であることを確かめる。
 
     何かを変える前に呼ぶ。初めてつなぐインスタンスのホスト鍵を確かめられないときなどに、
-    何も変えずに止まれる。--profile で別のアカウントを指していると、ssh は別の
+    何も変えずに止まれる。proxy には決めたリージョンとプロファイルを渡すが、利用者の
+    ControlMaster が別のリージョンやアカウントへの前の接続を使い回すと、ssh は別の
     インスタンスにつながりうる。そのときも止める。ProxyCommand の待ちの知らせと ssh の
-    誤りは、そのまま見せる。
+    誤りは、そのまま見せる。env は ssh の環境。
     """
     msg.info(f"checking that 'ssh {service.name}' reaches {one.id}")
-    code, out = proc.read([SSH, "-T", service.name, f"sudo -n cat {INSTANCE_ID_FILE}"])
+    code, out = proc.read([SSH, "-T", service.name, f"sudo -n cat {INSTANCE_ID_FILE}"], env=env)
     if code != 0:
         raise TemtError(
             f"cannot reach {one.id} with 'ssh {service.name}' (exit {code}); nothing was changed"
@@ -246,14 +268,16 @@ def _reach(service: Service, one: Instance) -> None:
         )
 
 
-def _has_user(service: Service, one: Instance, user: str, hint: str) -> None:
+def _has_user(
+    service: Service, one: Instance, user: str, hint: str, env: Mapping[str, str]
+) -> None:
     """install と uninstall を実行するユーザーが one にいることを確かめる。何かを変える前に呼ぶ。
 
     hint は、いなかったときに添える直し方。
     """
     if user == ROOT_USER:
         return
-    code, _ = proc.read([SSH, "-T", service.name, f"id -u -- {shlex.quote(user)}"])
+    code, _ = proc.read([SSH, "-T", service.name, f"id -u -- {shlex.quote(user)}"], env=env)
     if code == SSH_FAILED:
         raise TemtError(f"cannot reach {one.id} with 'ssh {service.name}'; nothing was changed")
     if code != 0:
@@ -287,11 +311,13 @@ def _running(service: Service, found: list[Instance], command: str) -> Instance:
     )
 
 
-def _confirm(service: Service, one: Instance, what: str, *, yes: bool) -> None:
+def _confirm(
+    session: boto3.Session, service: Service, one: Instance, what: str, *, yes: bool
+) -> None:
     """--bake のとき、始める前に、することをすべて挙げて確認する。"""
     lines = [what, *bake.plan(service, one)]
     msg.tell(f"{what} and bake {service.name}:\n" + "".join(f"  {line}\n" for line in lines))
-    msg.confirm(f"{what} and bake {one.id} ({one.state})?", yes=yes)
+    aws.confirm(session, f"{what} and bake {one.id} ({one.state})", yes=yes)
 
 
 def _previous(ssm: SSMClient, name: str) -> Record | None:
@@ -443,8 +469,12 @@ def run(
     オプションを引き継がない。
     """
     given = given or {}
+    values = conf.load(service)
+    # 手順 1。ImageId を書いていれば、焼けないので何もせずに止まる。ここからしばらくは、AWS
+    # にもインスタンスにも書かない
+    if baking:
+        bake.check_unfixed(service, values)
     proc.require(SSH)
-    # 手順 1。ここまでは AWS にもインスタンスにも書かない
     app_id, path = locate(target)
     # 利用者がリンクで置いたアプリなら、その先も添える
     where = f"{tilde(path)} -> {tilde(path.resolve())}" if path.is_symlink() else tilde(path)
@@ -458,19 +488,19 @@ def run(
         )
     options.check_given(app_id, manifest.options, given)
     user = user or manifest.user or ROOT_USER
-    values = conf.load(service)
     session = aws.session(values)
     ec2 = session.client("ec2")
     ssm = session.client("ssm")
+    env = proxy.passed_env(values)
     record_name = service.app_parameter(app_id, DEPLOY_KEY)
     with lock.hold(service):
         # 手順 2
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "deploy")
-        _reach(service, one)
+        _reach(service, one, env)
         before = _previous(ssm, record_name)
         _same_user(app_id, record_name, before, user)
-        _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user")
+        _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user", env)
         # このインスタンスから外したアプリは、外す前のオプションを引き継がない。焼いた版は
         # AMI に残っているので、_new_record は引き継ぐ
         removed = before is not None and before.fields.get("removed") == one.id
@@ -486,14 +516,14 @@ def run(
         if baking:
             bake.check(ec2, service, values, one, command="deploy")
             what = f"deploy {app_id} {options.visible(manifest.version)} to {one.id} as {user}"
-            _confirm(service, one, what, yes=yes)
+            _confirm(session, service, one, what, yes=yes)
         # 手順 3
         msg.info(f"sending {app_id} to {one.id}")
-        code = _ssh(service, _remote(SEND_SCRIPT, REMOTE_ROOT, app_id), data)
+        code = _ssh(service, _remote(SEND_SCRIPT, REMOTE_ROOT, app_id), data, env=env)
         if code != 0:
             raise TemtError(f"cannot send {app_id} to {one.id} (exit {code}); deploy again")
         msg.info(f"running {INSTALL} of {app_id} as {user} on {one.id}")
-        code = _ssh(service, _remote(INSTALL_SCRIPT, f"{REMOTE_ROOT}/{app_id}", user))
+        code = _ssh(service, _remote(INSTALL_SCRIPT, f"{REMOTE_ROOT}/{app_id}", user), env=env)
         if code != 0:
             raise TemtError(
                 f"{INSTALL} of {app_id} failed on {one.id} (exit {code}); the files are in "
@@ -567,12 +597,16 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
     実行する。記録は、アプリが起動テンプレートの AMI に焼いてあれば外したことを書いて
     残し（_left）、そうでなければ消す。
     """
-    proc.require(SSH)
     values = conf.load(service)
+    # ImageId を書いていれば、焼けないので何もせずに止まる
+    if baking:
+        bake.check_unfixed(service, values)
+    proc.require(SSH)
     session = aws.session(values)
     ec2 = session.client("ec2")
     directory = f"{REMOTE_ROOT}/{app_id}"
     ssm = session.client("ssm")
+    env = proxy.passed_env(values)
     record = service.app_parameter(app_id, DEPLOY_KEY)
     # アプリが書いた状態。記録と一緒に消す
     state = service.app_parameter(app_id, STATUS_KEY)
@@ -580,9 +614,9 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "app remove")
         # 確認の前に、読むだけで分かることを確かめる
-        _reach(service, one)
+        _reach(service, one, env)
         check = CHECK_SCRIPT.format(absent=ABSENT_CODE, no_uninstall=NO_UNINSTALL_CODE)
-        code = _ssh(service, _remote(check, directory))
+        code = _ssh(service, _remote(check, directory), env=env)
         if code == NO_UNINSTALL_CODE:
             raise TemtError(f"{app_id} has no {UNINSTALL} on {one.id}; temt cannot remove it")
         if code not in (0, ABSENT_CODE):
@@ -604,16 +638,16 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
         runner = ROOT_USER
         if present:
             runner = user or _recorded_user(record, found)
-            _has_user(service, one, runner, "give another user with --user")
+            _has_user(service, one, runner, "give another user with --user", env)
             what += f" as {runner}"
         else:
             msg.warn(f"{directory} is not on {one.id}; updating only the record")
         if baking:
             bake.check(ec2, service, values, one, command="app remove")
-            _confirm(service, one, what, yes=yes)
+            _confirm(session, service, one, what, yes=yes)
         if present:
             msg.info(f"running {UNINSTALL} of {app_id} as {runner} on {one.id}")
-            code = _ssh(service, _remote(UNINSTALL_SCRIPT, directory, runner))
+            code = _ssh(service, _remote(UNINSTALL_SCRIPT, directory, runner), env=env)
             if code != 0:
                 raise TemtError(
                     f"{UNINSTALL} of {app_id} or deleting {directory} failed on {one.id} "

@@ -181,30 +181,6 @@ def test_the_command_leaves_whatever_is_in_place(home_dir: Path, kind: str) -> N
     assert home.command_changes(service, home.command_missing(service)) == []
 
 
-@pytest.mark.parametrize("kind", ["file", "symlink", "broken symlink"])
-def test_remove_command_removes_whatever_is_in_place(home_dir: Path, kind: str) -> None:
-    """シンボリックリンクなら、リンクだけを消し、行き先は残す。"""
-    service = Service("dev-main")
-    path = service.command_path
-    path.parent.mkdir(parents=True)
-    target = home_dir / "target"
-    if kind == "file":
-        path.write_text("mine\n", encoding="utf-8")
-    else:
-        if kind == "symlink":
-            target.write_text("mine\n", encoding="utf-8")
-        path.symlink_to(target)
-    assert home.remove_command(service) is True
-    assert not path.is_symlink()
-    assert not path.exists()
-    assert target.exists() == (kind == "symlink")
-
-
-def test_remove_command_without_one(home_dir: Path) -> None:
-    _ = home_dir
-    assert home.remove_command(Service("dev-main")) is False
-
-
 def test_detecting_writes_nothing(home_dir: Path) -> None:
     """差分を検出するだけでは、ホームに何も作らない。diff は検出だけをたどる。"""
     service = Service("dev-main")

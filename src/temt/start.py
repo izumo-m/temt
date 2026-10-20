@@ -54,9 +54,7 @@ def bring_up(
     running = None
     # 再開を求めたときの、見つけた状態
     resumed: str | None = None
-    # 新しく起動したか。待ち切れなかったときの手がかりが違う
-    launched = not found
-    if launched:
+    if not found:
         instance_id = instances.launch(ec2, service)
     elif found[0].state in instances.RESUMABLE_STATES:
         # 停止の途中でも止まるのを待たず、再開を求める。断るかは AWS が決める
@@ -93,8 +91,8 @@ def bring_up(
         # SSM エージェントが登録されないインスタンスでは、待っても Online にならない。
         # running になったことは wait_running が知らせている
         return instance_id
-    # 停止してすぐ再開したときに残っている、止まる前の Online の報告を数えない
-    hint = instances.relaunch_hint(service) if launched else instances.login_hint(service)
-    instances.wait_online(session.client("ssm"), instance_id, since=running.launched, hint=hint)
+    # 停止してすぐ再開したときに残っている、止まる前の Online の報告を数えない。待ち切れ
+    # なくても、何が起きたかだけを知らせ、どうするかは添えない
+    instances.wait_online(session.client("ssm"), instance_id, since=running.launched)
     msg.info(f"{instance_id} is ready for login")
     return instance_id

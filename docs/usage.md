@@ -913,7 +913,7 @@ AMI だけを消す候補にする。指されているかは、他のサービ�
 `ami delete` も `--svc` を付ければ、そのサービスの AMI でないものは
 見つからないとして消さない。`ami prune` も `ami delete` も、設定ファイルの
 `ImageId` は見ない。`ImageId` に書いた AMI を消すと、次の `apply` が止まるので、
-`ImageId` を書き直すか行を消す。起動テンプレートが指す AMI を `--force` で消したときも
+`ImageId` を書き直すか、行を消して `--image-id` で選ぶ。起動テンプレートが指す AMI を `--force` で消したときも
 `apply` が止まるので、`--image-id` で選び直す。
 
 起動テンプレートの `ImageId` に SSM パラメータ（`resolve:ssm:`）を書いたものは、
@@ -959,7 +959,7 @@ AWS がパラメータから引いた AMI を指すものとして扱う。パ�
       created:     2026-09-20 18:00:00
       state:       available
       root volume: 8 GiB
-      latest:      temt-<svc>-2609211800 (ami-0fedcba9876543210, temt:service=<svc>) created 2026-09-21 18:00:00, newer
+      latest:      temt-<svc>-2609211800 (ami-0fedcba9876543210) created 2026-09-21 18:00:00, newer
     versions (* is the default):
       3 * 2026-09-20 18:00:00 ami-0123456789abcdef0 t3.micro subnet-0123456789abcdef0
 

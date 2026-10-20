@@ -91,7 +91,7 @@ def service_args(command: str) -> list[str]:
         (["instance", "reboot", *SVC], cli.INSTANCE_REBOOT),
         (["instance", "show", *SVC], cli.INSTANCE_SHOW),
         (["ami", "bake", *SVC], cli.AMI_BAKE),
-        (["ami", "import", *SVC, SOURCE], cli.AMI_IMPORT),
+        (["service", "import", *SVC, SOURCE], cli.SERVICE_IMPORT),
         (["template", "show", *SVC], cli.TEMPLATE_SHOW),
         (["role", "import", *SVC, ROLE], cli.ROLE_IMPORT),
         (["role", "delete", *SVC], cli.ROLE_DELETE),
@@ -269,7 +269,7 @@ def test_main_passes_the_profile_option(monkeypatch: pytest.MonkeyPatch) -> None
     """--profile は、設定ファイルの AwsProfile より優先される。"""
     seen: list[str | None] = []
 
-    def remember(service: Service, *, yes: bool) -> None:
+    def remember(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         seen.append(conf.OPTION_PROFILE)
 
@@ -397,17 +397,17 @@ def test_main_passes_the_ports_to_set_port(monkeypatch: pytest.MonkeyPatch) -> N
     ]
 
 
-def test_ami_import_takes_an_instance_id() -> None:
-    """ami import は、取り込むインスタンスの ID をちょうど 1 つ取る。"""
-    request = cli.parse(["ami", "import", *SVC, SOURCE])
+def test_service_import_takes_an_instance_id() -> None:
+    """service import は、取り込むインスタンスの ID をちょうど 1 つ取る。"""
+    request = cli.parse(["service", "import", *SVC, SOURCE])
     assert (request.command, request.service, request.instance_ids, request.yes) == (
-        cli.AMI_IMPORT,
+        cli.SERVICE_IMPORT,
         Service("dev-main"),
         (SOURCE,),
         False,
     )
     # コマンドラインオプションの間に置いてもよい。取り込むリージョンは --region で選ぶ
-    request = cli.parse(["--region", "us-east-1", "ami", "import", "--yes", "i-01234567", *SVC])
+    request = cli.parse(["--region", "us-east-1", "service", "import", "--yes", "i-01234567", *SVC])
     assert (request.instance_ids, request.yes, request.region) == (
         ("i-01234567",),
         True,
@@ -418,32 +418,38 @@ def test_ami_import_takes_an_instance_id() -> None:
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["ami", "import", *SVC], "ami import: missing instance id"),
-        (["ami", "import", *SVC, ""], "ami import: missing instance id"),
-        (["ami", "import", *SVC, "--yes"], "ami import: missing instance id"),
-        (["ami", "import", SOURCE], "ami import: missing --svc"),
+        (["service", "import", *SVC], "service import: missing instance id"),
+        (["service", "import", *SVC, ""], "service import: missing instance id"),
+        (["service", "import", *SVC, "--yes"], "service import: missing instance id"),
+        (["service", "import", SOURCE], "service import: missing --svc"),
         (
-            ["ami", "import", *SVC, "web"],
-            f"ami import: the instance id {INSTANCE_ID_RULE}: web",
+            ["service", "import", *SVC, "web"],
+            f"service import: the instance id {INSTANCE_ID_RULE}: web",
         ),
         (
-            ["ami", "import", *SVC, "i-0123456789ABCDEF0"],
-            f"ami import: the instance id {INSTANCE_ID_RULE}: i-0123456789ABCDEF0",
+            ["service", "import", *SVC, "i-0123456789ABCDEF0"],
+            f"service import: the instance id {INSTANCE_ID_RULE}: i-0123456789ABCDEF0",
         ),
         (
-            ["ami", "import", *SVC, "i-\x1b[2J"],
-            f"ami import: the instance id {INSTANCE_ID_RULE}: i-?[2J",
+            ["service", "import", *SVC, "i-\x1b[2J"],
+            f"service import: the instance id {INSTANCE_ID_RULE}: i-?[2J",
         ),
         # 取り込むのは 1 台だけ
         (
-            ["ami", "import", *SVC, SOURCE, ANOTHER_SOURCE],
-            f"ami import: unexpected argument: {ANOTHER_SOURCE}",
+            ["service", "import", *SVC, SOURCE, ANOTHER_SOURCE],
+            f"service import: unexpected argument: {ANOTHER_SOURCE}",
         ),
-        (["ami", "import", *SVC, SOURCE, "--async"], "ami import: unexpected argument: --async"),
-        (["ami", "import", *SVC, SOURCE, "--force"], "ami import: unexpected argument: --force"),
+        (
+            ["service", "import", *SVC, SOURCE, "--async"],
+            "service import: unexpected argument: --async",
+        ),
+        (
+            ["service", "import", *SVC, SOURCE, "--force"],
+            "service import: unexpected argument: --force",
+        ),
     ],
 )
-def test_ami_import_arguments_rejected(args: list[str], message: str) -> None:
+def test_service_import_arguments_rejected(args: list[str], message: str) -> None:
     with pytest.raises(UsageError) as caught:
         cli.parse(args)
     assert str(caught.value) == message
@@ -497,19 +503,19 @@ def test_role_arguments_rejected(args: list[str], message: str) -> None:
     assert str(caught.value) == message
 
 
-def test_main_runs_ami_import(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_runs_service_import(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[Service, str, bool]] = []
 
     def imported(service: Service, instance_id: str, *, yes: bool) -> None:
         seen.append((service, instance_id, yes))
 
     monkeypatch.setattr(importing, "run", imported)
-    assert cli.main(["temt", "ami", "import", *SVC, SOURCE]) == 0
-    assert cli.main(["temt", "ami", "import", "--yes", ANOTHER_SOURCE, "--svc", "web"]) == 0
+    assert cli.main(["temt", "service", "import", *SVC, SOURCE]) == 0
+    assert cli.main(["temt", "service", "import", "--yes", ANOTHER_SOURCE, "--svc", "web"]) == 0
     assert seen == [(Service("dev-main"), SOURCE, False), (Service("web"), ANOTHER_SOURCE, True)]
 
 
-def test_main_passes_the_region_to_ami_import(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_passes_the_region_to_service_import(monkeypatch: pytest.MonkeyPatch) -> None:
     """--region は、設定ファイルの無いサービスに取り込むリージョンとして、conf に渡す。"""
     seen: list[str | None] = []
 
@@ -518,7 +524,7 @@ def test_main_passes_the_region_to_ami_import(monkeypatch: pytest.MonkeyPatch) -
         seen.append(conf.OPTION_REGION)
 
     monkeypatch.setattr(importing, "run", imported)
-    assert cli.main(["temt", "--region", "us-east-1", "ami", "import", *SVC, SOURCE]) == 0
+    assert cli.main(["temt", "--region", "us-east-1", "service", "import", *SVC, SOURCE]) == 0
     assert seen == ["us-east-1"]
 
 
@@ -559,7 +565,6 @@ def test_main_runs_the_role_commands(monkeypatch: pytest.MonkeyPatch) -> None:
         (["pause", *SVC], "unknown command: pause"),
         (["apply", "--svc", "Dev-main"], "invalid service name: Dev-main"),
         (["apply", "--svc", "dev-"], "invalid service name: dev-"),
-        (["apply", "--svc", "a" * 60], "name longer than 64 characters: "),
         # サービス名を位置引数に書いた
         (["apply", "dev-main"], "apply: missing --svc"),
         (["apply", *SVC, "extra"], "apply: unexpected argument: extra"),
@@ -608,6 +613,14 @@ def test_unknown_command_is_reported_before_the_service_name() -> None:
         cli.parse(["pause", "--svc", "Dev-main"])
     with pytest.raises(UsageError, match="instance: unknown verb: pause"):
         cli.parse(["instance", "pause", "--svc", "Dev-main"])
+
+
+def test_import_is_a_verb_of_service_only() -> None:
+    """取り込みは service import で、ami import は残さない。短縮形も無い。"""
+    with pytest.raises(UsageError, match="^ami: unknown verb: import$"):
+        cli.parse(["ami", "import", *SVC, SOURCE])
+    with pytest.raises(UsageError, match="^unknown command: import$"):
+        cli.parse(["import", *SVC, SOURCE])
 
 
 def test_main_without_args_prints_usage(capsys: pytest.CaptureFixture[str]) -> None:
@@ -717,8 +730,8 @@ def test_the_usage_of_a_target_has_only_its_notes() -> None:
     assert "[--svc <svc>] of app list" not in cli.usage("instance")
     assert "ssh set-port sets the ports sshd listens on" in cli.usage("ssh")
     assert "ssh set-port sets" not in cli.usage("sg")
-    assert "ami import makes an AMI of a stopped instance" in cli.usage("ami")
-    assert "ami import makes" not in cli.usage("instance")
+    assert "service import makes an AMI of a stopped instance" in cli.usage("service")
+    assert "service import makes" not in cli.usage("ami")
     text = cli.usage("role")
     assert "role import rewrites [role] and IamInstanceProfile" in text
     assert "role delete\ndeletes the instance role and instance profile temt-<svc>" in text
@@ -726,8 +739,8 @@ def test_the_usage_of_a_target_has_only_its_notes() -> None:
 
 
 def test_the_usage_shows_the_new_commands() -> None:
-    """ami import と role のコマンドの行。位置引数の名前も出す。"""
-    assert "  ami import --svc <svc> <instance id> [--yes]\n" in cli.usage("ami")
+    """service import と role のコマンドの行。位置引数の名前も出す。"""
+    assert "  service import --svc <svc> <instance id> [--yes]\n" in cli.usage("service")
     text = cli.usage("role")
     assert "  role import --svc <svc> <role name or arn> [--yes]\n" in text
     assert "  role delete --svc <svc> [--yes]\n" in text
@@ -749,7 +762,7 @@ def test_help_after_a_value_option_is_its_value() -> None:
         ),
         (["temt", "deploy", *SVC], "deploy: missing app id or path", "app"),
         (["temt", "ssh", "set-port", *SVC], "ssh set-port: missing port", "ssh"),
-        (["temt", "ami", "import", *SVC], "ami import: missing instance id", "ami"),
+        (["temt", "service", "import", *SVC], "service import: missing instance id", "service"),
         (["temt", "role", "import", *SVC], "role import: missing role name or ARN", "role"),
         (["temt", "instance", "--format"], "missing value for --format", "instance"),
         (
@@ -797,7 +810,7 @@ def test_main_passes_yes_to_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     """apply は確認を求めるので、--yes を取り、確認を省くかどうかを渡す。"""
     seen: list[bool] = []
 
-    def remember(service: Service, *, yes: bool) -> None:
+    def remember(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         seen.append(yes)
 
@@ -808,17 +821,52 @@ def test_main_passes_yes_to_apply(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_main_runs_diff(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[Service] = []
-    monkeypatch.setattr(apply, "diff", seen.append)
+    seen: list[tuple[Service, str | None]] = []
+
+    def remember(service: Service, *, image: str | None) -> None:
+        seen.append((service, image))
+
+    monkeypatch.setattr(apply, "diff", remember)
     assert cli.main(["temt", "service", "diff", *SVC]) == 0
     assert cli.main(["temt", "diff", *SVC]) == 0
-    assert seen == [Service("dev-main"), Service("dev-main")]
+    assert seen == [(Service("dev-main"), None), (Service("dev-main"), None)]
+
+
+@pytest.mark.parametrize("command", ["apply", "diff"])
+def test_main_passes_the_image_id_option(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """apply と diff は --image-id を取り、起動テンプレートの AMI を選ぶ。"""
+    seen: list[str | None] = []
+
+    def remember(service: Service, *, image: str | None, yes: bool = False) -> None:
+        _ = service, yes
+        seen.append(image)
+
+    monkeypatch.setattr(apply, "run" if command == "apply" else "diff", remember)
+    assert cli.main(["temt", command, *SVC, "--image-id", "temt-dev-main-2609200900"]) == 0
+    assert seen == ["temt-dev-main-2609200900"]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["bake", *SVC, "--image-id", "ami-0123456789abcdef0"], "bake: unexpected argument"),
+        (["apply", *SVC, "--image-id"], "apply: missing value for --image-id"),
+        (["apply", *SVC, "--image-id", ""], "apply: missing value for --image-id"),
+        (
+            ["diff", *SVC, "--image-id", "temt-\udcff"],
+            "diff: the AMI id or name is not valid UTF-8",
+        ),
+    ],
+)
+def test_image_id_option_rejected(args: list[str], message: str) -> None:
+    with pytest.raises(UsageError, match=f"^{re.escape(message)}"):
+        cli.parse(args)
 
 
 def test_main_wraps_an_error_from_aws(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken(service: Service, *, yes: bool) -> None:
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         raise ClientError(
             {"Error": {"Code": "UnauthorizedOperation", "Message": "not authorized"}}, "CreateRole"
@@ -836,7 +884,7 @@ def test_main_wraps_a_failure_to_reach_aws(
 ) -> None:
     """接続の失敗など、AWS の答えが無い誤り（BotoCoreError）も、1 行で知らせて 1 で終わる。"""
 
-    def broken(service: Service, *, yes: bool) -> None:
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         raise EndpointConnectionError(endpoint_url="https://ec2.ap-northeast-1.amazonaws.com/")
 
@@ -870,7 +918,7 @@ def test_main_shows_an_aws_error_safely(
 ) -> None:
     """botocore の例外の文は利用者の値を含みうるので、表示できない文字を ? にし、行をつなぐ。"""
 
-    def broken(service: Service, *, yes: bool) -> None:
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         raise error
 
@@ -890,7 +938,7 @@ def test_main_says_where_the_profile_can_be_chosen(
 ) -> None:
     """資格情報でつまずいたら、プロファイルを選べる 3 つの場所を添える。"""
 
-    def broken(service: Service, *, yes: bool) -> None:
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         raise error
 
@@ -899,6 +947,22 @@ def test_main_says_where_the_profile_can_be_chosen(
     err = capsys.readouterr().err
     assert "give --profile, set AWS_PROFILE" in err
     assert f"or write AwsProfile in {tilde(service.conf_path)}" in err
+
+
+def test_main_points_at_the_written_profile(
+    service: Service, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """設定ファイルに書いた AwsProfile は固定なので、--profile や AWS_PROFILE は勧めない。"""
+
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
+        _ = service
+        raise ProfileNotFound(profile="work")
+
+    service.conf_path.parent.mkdir(parents=True)
+    service.conf_path.write_text('AwsProfile = "work"\n', encoding="utf-8")
+    monkeypatch.setattr(apply, "run", broken)
+    assert cli.main(["temt", "apply", *SVC]) == 1
+    assert capsys.readouterr().err.endswith(f"; check AwsProfile in {tilde(service.conf_path)}\n")
 
 
 def test_main_reports_a_file_error(
@@ -919,7 +983,7 @@ def test_main_reports_an_interrupt(
 ) -> None:
     """Ctrl-C で中断されたときも、その旨を述べて 1 で終わる。"""
 
-    def broken(service: Service, *, yes: bool) -> None:
+    def broken(service: Service, *, image: str | None, yes: bool) -> None:
         _ = service
         raise KeyboardInterrupt
 
@@ -1169,7 +1233,7 @@ def test_main_passes_the_instance_ids_to_terminate(monkeypatch: pytest.MonkeyPat
         ["ami", "prune", *SVC, "--region", "us-east-1"],
         ["--region", "us-east-1", "status", *SVC],
         ["--region", "us-east-1", "apply", *SVC],
-        ["--region", "us-east-1", "ami", "import", *SVC, SOURCE],
+        ["--region", "us-east-1", "service", "import", *SVC, SOURCE],
         ["role", "import", *SVC, ROLE, "--region", "us-east-1"],
         ["role", "delete", *SVC, "--region", "us-east-1"],
     ],

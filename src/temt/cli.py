@@ -29,6 +29,7 @@ SERVICE_APPLY = "service apply"
 SERVICE_DIFF = "service diff"
 SERVICE_DESTROY = "service destroy"
 SERVICE_LIST = "service list"
+SERVICE_IMPORT = "service import"
 INSTANCE_START = "instance start"
 INSTANCE_STOP = "instance stop"
 INSTANCE_TERMINATE = "instance terminate"
@@ -36,7 +37,6 @@ INSTANCE_REBOOT = "instance reboot"
 INSTANCE_SHOW = "instance show"
 INSTANCE_LIST = "instance list"
 AMI_BAKE = "ami bake"
-AMI_IMPORT = "ami import"
 AMI_LIST = "ami list"
 AMI_PRUNE = "ami prune"
 AMI_DELETE = "ami delete"
@@ -62,6 +62,7 @@ COMMANDS = (
     SERVICE_DIFF,
     SERVICE_DESTROY,
     SERVICE_LIST,
+    SERVICE_IMPORT,
     INSTANCE_START,
     INSTANCE_STOP,
     INSTANCE_TERMINATE,
@@ -69,7 +70,6 @@ COMMANDS = (
     INSTANCE_SHOW,
     INSTANCE_LIST,
     AMI_BAKE,
-    AMI_IMPORT,
     AMI_LIST,
     AMI_PRUNE,
     AMI_DELETE,
@@ -117,7 +117,7 @@ YES_COMMANDS = (
     INSTANCE_REBOOT,
     AMI_BAKE,
     SERVICE_DESTROY,
-    AMI_IMPORT,
+    SERVICE_IMPORT,
     AMI_PRUNE,
     AMI_DELETE,
     ROLE_IMPORT,
@@ -152,10 +152,12 @@ RULE_COMMANDS = (SG_ADD, SG_REMOVE)
 DESCRIPTION_COMMANDS = (SG_ADD,)
 # 動詞の後ろに AMI の ID か名前を取るコマンド
 IMAGE_COMMANDS = (AMI_DELETE,)
+# 起動テンプレートの AMI を選ぶ --image-id を取るコマンド
+IMAGE_ID_COMMANDS = (SERVICE_APPLY, SERVICE_DIFF)
 # 動詞の後ろにインスタンス ID を 0 個以上取るコマンド
 INSTANCE_ID_COMMANDS = (INSTANCE_TERMINATE,)
 # 動詞の後ろに、取り込むインスタンスの ID を 1 つ取るコマンド
-SOURCE_COMMANDS = (AMI_IMPORT,)
+SOURCE_COMMANDS = (SERVICE_IMPORT,)
 # 動詞の後ろに、IAM のロールの名前か ARN を 1 つ取るコマンド
 ROLE_COMMANDS = (ROLE_IMPORT,)
 # 表を出し、出す列を選ぶ --format を取るコマンド
@@ -172,15 +174,19 @@ APP_ARGS = {
 # キー deploy を扱えないコマンド。deploy の記録は temt が書く
 RECORD_KEEPING = (APP_SET, APP_UNSET)
 SVC_OPTION = "--svc"
-# 使うプロファイルを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る
+# 使うプロファイルを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
+# 付けたコマンドでは、設定ファイルに AwsProfile が無いときだけ使い、あれば同じ値でなければ
+# ならない
 PROFILE_OPTION = "--profile"
 # 使うリージョンを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
-# 付けたコマンドでは、設定ファイルに AwsRegion が無いときだけ使う
+# 付けたコマンドでは、設定ファイルに AwsRegion が無いときだけ使い、あれば同じ値でなければ
+# ならない
 REGION_OPTION = "--region"
 FORMAT_OPTION = "--format"
 # install と uninstall を実行するインスタンスのユーザーを選ぶコマンドラインオプション
 USER_OPTION = "--user"
 DESCRIPTION_OPTION = "--description"
+IMAGE_ID_OPTION = "--image-id"
 ASYNC_OPTION = "--async"
 YES_OPTION = "--yes"
 BAKE_OPTION = "--bake"
@@ -201,6 +207,7 @@ VALUE_OPTIONS = (
     FORMAT_OPTION,
     USER_OPTION,
     DESCRIPTION_OPTION,
+    IMAGE_ID_OPTION,
 )
 # 値を取らないコマンドラインオプション
 SWITCH_OPTIONS = (ASYNC_OPTION, YES_OPTION, BAKE_OPTION, FORCE_OPTION, RESET_OPTION)
@@ -212,6 +219,7 @@ COMMAND_OPTIONS = {
     FORMAT_OPTION: LIST_COMMANDS,
     USER_OPTION: (*TARGET_COMMANDS, SSH_PROXY),
     DESCRIPTION_OPTION: DESCRIPTION_COMMANDS,
+    IMAGE_ID_OPTION: IMAGE_ID_COMMANDS,
     ASYNC_OPTION: ASYNC_COMMANDS,
     YES_OPTION: YES_COMMANDS,
     BAKE_OPTION: BAKE_COMMANDS,
@@ -221,10 +229,11 @@ COMMAND_OPTIONS = {
 # 使い方に書く、動詞より後ろの引数と、そのコマンドだけが取るコマンドラインオプション。
 # --svc は区分から足す
 SYNOPSES = {
-    SERVICE_APPLY: "[--yes]",
-    SERVICE_DIFF: "",
+    SERVICE_APPLY: "[--image-id <ami id or name>] [--yes]",
+    SERVICE_DIFF: "[--image-id <ami id or name>]",
     SERVICE_DESTROY: "[--yes]",
     SERVICE_LIST: "[--format <columns>]",
+    SERVICE_IMPORT: "<instance id> [--yes]",
     INSTANCE_START: "[--async]",
     INSTANCE_STOP: "[--async] [--yes]",
     INSTANCE_TERMINATE: "[<id>...] [<options>]",
@@ -232,7 +241,6 @@ SYNOPSES = {
     INSTANCE_SHOW: "",
     INSTANCE_LIST: "[--format <columns>]",
     AMI_BAKE: "[--yes]",
-    AMI_IMPORT: "<instance id> [--yes]",
     AMI_LIST: "[--format <columns>]",
     AMI_PRUNE: "[--yes]",
     AMI_DELETE: "<ami id or name> [--force] [--yes]",
@@ -298,7 +306,7 @@ and those that come with temt), and takes no --profile or --region.""",
     (
         SOURCE_COMMANDS,
         """\
-ami import makes an AMI of a stopped instance and a new config file that
+service import makes an AMI of a stopped instance and a new config file that
 launches the same instance; run apply next. It takes --region for the region of
 the instance, and changes nothing on the instance.""",
     ),
@@ -333,8 +341,8 @@ that ran install, and both to root.""",
 # 使い方の、コマンドラインオプションの説明の行
 HELP_LINE = "  --help              print this message; after <target>, the help for it"
 VERSION_LINE = "  --version           print the version of temt"
-SVC_LINE = "  --svc <svc>         the service; its config file gives the region and profile"
-PROFILE_LINE = "  --profile <name>    the AWS profile, over AwsProfile in the config file"
+SVC_LINE = "  --svc <svc>         the service (its config file)"
+PROFILE_LINE = "  --profile <name>    the AWS profile, while the config file has no AwsProfile"
 REGION_LINE = "  --region <region>   the AWS region, while the config file has no AwsRegion"
 
 
@@ -429,7 +437,7 @@ class Request:
     profile: str | None = None
     # --region で選ばれたリージョン。省かれていれば None
     region: str | None = None
-    # ami delete が取る AMI の ID か名前
+    # ami delete が取る AMI の ID か名前と、IMAGE_ID_COMMANDS の --image-id の値
     image: str | None = None
     # INSTANCE_ID_COMMANDS が取るインスタンス ID。並びは打たれた順。省かれていれば空
     instance_ids: tuple[str, ...] = ()
@@ -754,6 +762,14 @@ def _app_options(typed: str, words: list[str]) -> tuple[tuple[str, str | None], 
     return tuple(found.items())
 
 
+def _image(typed: str, image: str) -> str:
+    """AMI の ID か名前を確かめる。"""
+    if not options.is_utf8(image):
+        # AWS に送れない
+        raise UsageError(f"{typed}: the AMI id or name is not valid UTF-8: {printable(image)}")
+    return image
+
+
 def _user(typed: str, user: str | None) -> str | None:
     """--user の値をユーザー名の規則で確かめる。"""
     if user is not None and not is_user_name(user):
@@ -790,11 +806,9 @@ def parse(args: list[str]) -> Request:
         reset=RESET_OPTION in cli_options,
     )
     if command in IMAGE_COMMANDS:
-        image = _one(typed, words, "AMI id or name")
-        if not options.is_utf8(image):
-            # AWS に送れない
-            raise UsageError(f"{typed}: the AMI id or name is not valid UTF-8: {printable(image)}")
-        return replace(request, image=image)
+        return replace(request, image=_image(typed, _one(typed, words, "AMI id or name")))
+    if IMAGE_ID_OPTION in cli_options:
+        request = replace(request, image=_image(typed, cli_options[IMAGE_ID_OPTION]))
     if command in INSTANCE_ID_COMMANDS:
         return replace(request, instance_ids=_instance_ids(typed, words))
     if command in SOURCE_COMMANDS:
@@ -837,6 +851,9 @@ def _profile_hint(service: Service | None) -> str:
             f"give {PROFILE_OPTION}, write AwsProfile in {printable(tilde(defaults_path()))}, "
             f"or set AWS_PROFILE"
         )
+    if conf.written(service, "AwsProfile"):
+        # 設定ファイルに書いた AwsProfile は固定で、--profile でも環境変数でも替わらない
+        return f"check AwsProfile in {printable(tilde(service.conf_path))}"
     return (
         f"give {PROFILE_OPTION}, set AWS_PROFILE, or write AwsProfile in "
         f"{printable(tilde(conf.source(service, 'AwsProfile')))}"
@@ -869,9 +886,9 @@ def _run_service(request: Request) -> None:
     if request.command == APP_LIST or request.command in (*APP_ARGS, *TARGET_COMMANDS):
         _run_app(request, service)
     elif request.command == SERVICE_APPLY:
-        apply.run(service, yes=request.yes)
+        apply.run(service, image=request.image, yes=request.yes)
     elif request.command == SERVICE_DIFF:
-        apply.diff(service)
+        apply.diff(service, image=request.image)
     elif request.command == SERVICE_DESTROY:
         destroy.run(service, yes=request.yes)
     elif request.command == INSTANCE_START:
@@ -886,7 +903,7 @@ def _run_service(request: Request) -> None:
         status.run(service)
     elif request.command == AMI_BAKE:
         bake.run(service, yes=request.yes)
-    elif request.command == AMI_IMPORT:
+    elif request.command == SERVICE_IMPORT:
         importing.run(service, request.instance_ids[0], yes=request.yes)
     elif request.command == ROLE_IMPORT and request.app is not None:
         role.import_role(service, request.app, yes=request.yes)

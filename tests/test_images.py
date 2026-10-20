@@ -704,6 +704,27 @@ def test_prune_of_a_service_deregisters_only_its_images(
     assert f"deregistered {OLD} (temt-dev-main-2609011200)" in captured.out
 
 
+def test_prune_of_a_service_names_the_region_and_the_account_when_it_asks(
+    stubs: Stubs,
+    configured: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--svc を付ければ環境の行を出さないので、確認にリージョンとアカウントを添える。"""
+    monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
+    listed(stubs, DEV_MAIN, an_image(OLD, "temt-dev-main-2609011200", "2026-09-01T03:00:00.000Z"))
+    templates(stubs)
+    identified(stubs)
+
+    with pytest.raises(TemtError, match="cancelled"):
+        images.prune(configured, None, yes=False)
+
+    stubs.done()
+    assert capsys.readouterr().err == (
+        f"deregister 1 AMI and their snapshots in {REGION} (account {ACCOUNT})? [y/N] "
+    )
+
+
 DEV_MAIN_OLD = an_image(OLD, "temt-dev-main-2609011200", "2026-09-01T03:00:00.000Z")
 DEV_MAIN_LOOSE = an_image(LOOSE, "temt-dev-main-2609021200", "2026-09-02T03:00:00.000Z")
 
@@ -1075,6 +1096,26 @@ def test_delete_of_a_service_deregisters_its_image(
     stubs.done()
     assert stubs.regions == []
     assert f"deregistered {OLD} (temt-dev-main-2609011200)" in capsys.readouterr().out
+
+
+def test_delete_of_a_service_names_the_region_and_the_account_when_it_asks(
+    stubs: Stubs,
+    configured: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
+    by_id(stubs, OLD, OLD_IMAGE)
+    templates(stubs)
+    identified(stubs)
+
+    with pytest.raises(TemtError, match="cancelled"):
+        images.delete(OLD, configured, None, force=False, yes=False)
+
+    stubs.done()
+    assert capsys.readouterr().err == (
+        f"deregister {OLD} and its snapshots in {REGION} (account {ACCOUNT})? [y/N] "
+    )
 
 
 @pytest.mark.parametrize(

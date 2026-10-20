@@ -26,9 +26,9 @@ from conftest import (
 )
 from types_boto3_ec2_instance_connect.client import EC2InstanceConnectClient
 
-from temt import aws, cli, conf, home, instances, keys, msg, proc, proxy, relay, wait
+from temt import aws, cli, home, instances, keys, msg, proc, proxy, relay, wait
 from temt.msg import TemtError
-from temt.names import Service
+from temt.names import Service, defaults_path
 
 NAME = "temt-dev-main"
 INSTANCE = "i-0123456789abcdef0"
@@ -584,21 +584,85 @@ def test_a_chosen_profile_leaves_the_environment(
     assert "AWS_DEFAULT_PROFILE" not in passed
 
 
-def test_the_profile_option_wins(
+def write_defaults(text: str) -> None:
+    """共通ファイルを書く。"""
+    path = defaults_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_the_profile_option_comes_before_the_defaults_file(
     aws_stubs: Stubs, configured: Service, execs: Exec, required: list[str]
 ) -> None:
-    """--profile は、設定ファイルの AwsProfile より優先して aws-cli に渡る。
+    """--profile は、共通ファイルの AwsProfile より優先して aws-cli に渡る。
 
-    boto3 には、aws.session が conf.OPTION_PROFILE から渡す。
+    boto3 には、aws.session が conf.load の決めた AwsProfile から渡す。
     """
     _ = required
-    profile(configured, "work")
+    write_defaults('AwsProfile = "work"\n')
     ready(aws_stubs)
     assert cli.main(["temt", "--profile", "other", "proxy", "--svc", "dev-main", "2222"]) == 0
-    assert conf.OPTION_PROFILE == "other"
+    assert aws_stubs.passed[0].AwsProfile == "other"
     argv = execs.calls[0][1]
     assert argv[-2:] == ["--profile", "other"]
     assert "portNumber=2222" in argv
+
+
+def test_a_profile_option_other_than_the_written_one_is_a_usage_error(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """設定ファイルに書いた AwsProfile は固定で、違う --profile は使い方の誤りにする。"""
+    _ = (aws_stubs, required)
+    profile(configured, "work")
+    assert cli.main(["temt", "--profile", "other", "proxy", "--svc", "dev-main"]) == 2
+    assert "temt: dev-main has AwsProfile = work; --profile other differs\n" in (
+        capsys.readouterr().err
+    )
+    assert execs.calls == []
+
+
+def test_it_takes_the_region_and_the_profile_passed_by_temt(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """deploy などが実行した ssh から渡されたリージョンとプロファイルは、--region と
+    --profile と同じく、共通ファイルの値より先にする。
+    """
+    _ = required
+    write_defaults('AwsProfile = "common"\nAwsRegion = "eu-west-1"\n')
+    monkeypatch.setenv(proxy.PASSED_REGION_ENV, "us-west-2")
+    monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "work")
+    ready(aws_stubs)
+    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
+    assert aws_stubs.passed[0].AwsRegion == "us-west-2"
+    assert aws_stubs.passed[0].AwsProfile == "work"
+    argv = execs.calls[0][1]
+    assert argv[-4:] == ["--region", "us-west-2", "--profile", "work"]
+
+
+def test_the_command_line_comes_before_what_temt_passed(
+    aws_stubs: Stubs,
+    configured: Service,
+    execs: Exec,
+    required: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """コマンドラインの --region と --profile があれば、渡されたものより先にする。"""
+    _ = required
+    monkeypatch.setenv(proxy.PASSED_REGION_ENV, "us-west-2")
+    monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "work")
+    ready(aws_stubs)
+    args = ["temt", "--region", "eu-west-1", "--profile", "other", "proxy", "--svc", "dev-main"]
+    assert cli.main(args) == 0
+    argv = execs.calls[0][1]
+    assert argv[-4:] == ["--region", "eu-west-1", "--profile", "other"]
 
 
 def test_it_moves_current_from_the_previous_instance(
@@ -873,7 +937,7 @@ def test_it_leaves_the_known_hosts_alone_when_the_agent_stays_offline(
 ) -> None:
     """known_hosts を用意するのは、つなげるようになった後である。締め切りは 5 分。
 
-    締め切りを過ぎたときも、待たずに確かめたときと同じ手がかりを添える。
+    締め切りを過ぎたときは、何を待ったかだけを出し、どうするかは添えない。
     """
     _ = required
     monkeypatch.setattr(wait, "INTERVAL", 60)
@@ -883,8 +947,7 @@ def test_it_leaves_the_known_hosts_alone_when_the_agent_stays_offline(
     with pytest.raises(
         TemtError,
         match=(
-            f"timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online; "
-            "see 'temt status --svc dev-main' or run 'temt reboot --svc dev-main --async'"
+            f"^timed out after 5 minutes waiting for the SSM agent on {INSTANCE} to come online$"
         ),
     ):
         proxy.run(configured, 22)
@@ -1046,16 +1109,13 @@ def test_it_does_not_wait_for_an_old_instance_whose_agent_is_offline(
     clock: Clock,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """起動から時間がたっていれば待たず、1 回だけ確かめて手がかりを添えて終わる。"""
+    """起動から時間がたっていれば待たず、1 回だけ確かめて、何が起きたかだけを出して終わる。"""
     _ = required
     found(aws_stubs, launched_at(an_instance(INSTANCE, "running", address=ADDRESS), LONG_AGO))
     agent(aws_stubs, "ConnectionLost")
     with pytest.raises(
         TemtError,
-        match=(
-            f"the SSM agent on {INSTANCE} is not online; "
-            "see 'temt status --svc dev-main' or run 'temt reboot --svc dev-main --async'"
-        ),
+        match=f"^the SSM agent on {INSTANCE} is not online$",
     ):
         proxy.run(configured, 22)
     aws_stubs.done()

@@ -29,6 +29,8 @@ from temt.names import Service
 
 # AWS につながないクライアントに渡すリージョン
 REGION = "ap-northeast-1"
+# 確認に出す、資格情報のアカウント
+ACCOUNT = "123456789012"
 # テストの手元のタイムゾーン。tzdata に頼らない POSIX の形で書く
 LOCAL_TZ = "JST-9"
 
@@ -257,7 +259,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 
 
 class Session:
-    """aws.session の代わり。用意したクライアントを返す。"""
+    """aws.session の代わり。用意したクライアントを返す。region_name は、決まったリージョン。"""
 
     def __init__(
         self,
@@ -267,7 +269,9 @@ class Session:
         analyzer: AccessAnalyzerClient,
         connect: EC2InstanceConnectClient,
         sts: STSClient,
+        region_name: str = REGION,
     ) -> None:
+        self.region_name = region_name
         self.clients: dict[str, Any] = {
             "ec2": ec2,
             "ssm": ssm,
@@ -323,7 +327,7 @@ def aws_stubs(
         # Conf は後の手順が書き換えるので、渡された時点の姿を控える。テーブルも
         # 書き換わるので、深い複製にする
         passed.append(deepcopy(values))
-        return Session(ec2, ssm, iam, analyzer, connect, sts)
+        return Session(ec2, ssm, iam, analyzer, connect, sts, values.AwsRegion)
 
     monkeypatch.setattr(aws, "session", session)
     with (
@@ -339,15 +343,22 @@ def aws_stubs(
         stubs.done()
 
 
-# apply が新しく書く設定ファイルの、例のコメントを除いた中身に当たる
-CONFIGURED = f"""\
-AwsRegion = "{REGION}"
+def identified(stubs: Stubs) -> None:
+    """確認に添えるアカウントを、STS から引く。"""
+    stubs.sts.add_response("get_caller_identity", {"Account": ACCOUNT}, {})
 
+
+# 確認の問いに添える、リージョンとアカウント
+WHERE = f"in {REGION} (account {ACCOUNT})"
+
+# 書かなければ apply が埋める値も、すべて書いた設定ファイル。[role] は無い。AwsRegion と
+# ImageId はふつうどおり書かない。リージョンは環境から決まる既定の REGION になり、AMI は
+# 起動テンプレートが持つ
+CONFIGURED = """\
 [launch-template]
-ImageId = "ami-0123456789abcdef0"
 InstanceType = "t3.micro"
 InstanceInitiatedShutdownBehavior = "terminate"
-IamInstanceProfile = {{ Name = "${{temt:name}}" }}
+IamInstanceProfile = { Name = "${temt:name}" }
 
 [[launch-template.NetworkInterfaces]]
 DeviceIndex = 0
@@ -365,7 +376,7 @@ CpuCredits = "unlimited"
 
 @pytest.fixture
 def configured(service: Service) -> Service:
-    """設定ファイルのあるサービス。apply が書いたものに当たる。"""
+    """設定ファイルのあるサービス。中身は CONFIGURED。"""
     service.conf_path.parent.mkdir(parents=True, exist_ok=True)
     service.conf_path.write_text(CONFIGURED, encoding="utf-8")
     return service

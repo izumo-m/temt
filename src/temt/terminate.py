@@ -113,7 +113,7 @@ def run(service: Service, *, ids: tuple[str, ...] = (), is_async: bool, yes: boo
         # 手順 3
         _warn_unbaked(ec2, session.client("ssm"), service, chosen)
         listed = ", ".join(f"{one.id} ({one.state})" for one in chosen)
-        msg.confirm(f"terminate {listed}?", yes=yes)
+        aws.confirm(session, f"terminate {listed}", yes=yes)
         # 手順 4
         shut_down(ec2, service, chosen)
         # 手順 5

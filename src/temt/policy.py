@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from temt.names import Service
 
-# <svc>.toml の [[role.policy.<ポリシー名>]] から作るインラインポリシーの名前の頭。後ろに
+# 設定ファイルの [[role.<ポリシー名>]] から作るインラインポリシーの名前の頭。後ろに
 # <ポリシー名> が付く。ロールに付いたインラインポリシーのうち、これで始まるものを
 # temt が持つ
 POLICY_PREFIX = f"{PREFIX}-"
@@ -54,7 +54,7 @@ def variables(service: Service) -> dict[str, str]:
 
 
 def policy_name(name: str) -> str:
-    """[[role.policy.<ポリシー名>]] から作るインラインポリシーの名前 temt-<ポリシー名>。"""
+    """[[role.<ポリシー名>]] から作るインラインポリシーの名前 temt-<ポリシー名>。"""
     return f"{POLICY_PREFIX}{name}"
 
 
@@ -103,55 +103,67 @@ def substitute(value: Any, values: Mapping[str, str]) -> Any:
 
 
 def document(
-    statements: Sequence[Mapping[str, Any]], values: Mapping[str, str], prefix: str
+    statements: Sequence[Mapping[str, Any]], values: Mapping[str, str], places: Sequence[str]
 ) -> dict[str, Any]:
     """Statement の並びから、Effect を補い、変数を置き換えたポリシーの中身を作る。
 
-    Effect の無い Statement には Allow を先頭に補う。prefix は誤りの位置の前に置く、
-    利用者が書いた場所（"<ファイル>: role.policy.<ポリシー名>" など）。
+    Effect の無い Statement には Allow を先頭に補う。places は Statement ごとの、利用者が
+    書いた場所（"<ファイル>: role.<ポリシー名>[<位置>]" など）で、誤りの前に置く。
     """
     made: list[Any] = []
     for index, one in enumerate(statements):
         try:
             statement = substitute(one, values)
         except ValueError as error:
-            raise TemtError(f"{prefix}[{index}] {error}") from None
+            raise TemtError(f"{places[index]} {error}") from None
         if EFFECT not in statement:
             statement = {EFFECT: ALLOW, **statement}
         made.append(statement)
     return {"Version": VERSION, STATEMENT: made}
 
 
-def _where(finding: Mapping[str, Any]) -> str | None:
-    """指摘の位置。最初の位置だけを、Statement の中なら [0].Resource のような形にする。
+def _where(finding: Mapping[str, Any]) -> tuple[int | None, str] | None:
+    """指摘の位置。最初の位置だけを、Statement の番号と、その中の位置（.Resource のような
+    形）の組にする。
 
     利用者が書くのは Statement の並びだけなので、先頭の Statement は省く。位置が
-    Statement の並び全体なら空文字列、位置そのものが無ければ None。
+    Statement の中でなければ、番号は None で、位置は Statement の並び全体なら空文字列。
+    位置そのものが無ければ None。
     """
     locations = finding.get("locations") or []
     if not locations:
         return None
+    index: int | None = None
     where = ""
     for position, element in enumerate(locations[0].get("path") or []):
         if position == 0 and element.get("value") == STATEMENT:
             continue
         if "index" in element:
-            where += f"[{element['index']}]"
+            if position == 1 and index is None and not where:
+                index = element["index"]
+            else:
+                where += f"[{element['index']}]"
         elif "value" in element:
-            where += f".{element['value']}" if where else element["value"]
+            where += f".{element['value']}"
         elif "key" in element:
-            where += f".{element['key']}" if where else element["key"]
-    return where
+            where += f".{element['key']}"
+    return index, where
 
 
 def validate(
-    analyzer: AccessAnalyzerClient, content: Mapping[str, Any], name: str, prefix: str
+    analyzer: AccessAnalyzerClient,
+    content: Mapping[str, Any],
+    name: str,
+    prefix: str,
+    places: Sequence[str],
 ) -> int:
     """ポリシー name の中身 content を ValidatePolicy にかけ、ERROR の数を返す。
 
-    ERROR はすべて挙げ、止めるのは呼ぶ側に任せる。他の指摘は警告として知らせる。prefix は
-    指摘の位置の前に置く、利用者が書いた場所（"role.policy.<ポリシー名>" など）。位置の
-    無い指摘はポリシーの名前を添える。
+    ERROR はすべて挙げ、止めるのは呼ぶ側に任せる。他の指摘は警告として知らせる。places は
+    Statement ごとの、利用者が書いた場所（"<ファイル>: role.<ポリシー名>[<位置>]" など）で、
+    Statement の中の指摘はその後ろに位置を続ける。Statement の中でない指摘は、利用者が
+    書いたポリシーの位置 prefix（"role.<ポリシー名>" など）の後ろに続ける。位置の無い指摘は
+    ポリシーの名前を添える。
     """
     errors = 0
     for page in analyzer.get_paginator("validate_policy").paginate(
@@ -159,13 +171,15 @@ def validate(
     ):
         for finding in page.get("findings", []):
             # 位置と指摘の文は、利用者が書いた Statement のキーや値を含みうる
-            where = _where(finding)
-            if where is None:
+            found = _where(finding)
+            if found is None:
                 place = name
-            elif not where or where.startswith("["):
-                place = f"{prefix}{printable(where)}"
             else:
-                place = f"{prefix}.{printable(where)}"
+                index, where = found
+                if index is not None and 0 <= index < len(places):
+                    place = f"{places[index]}{printable(where)}"
+                else:
+                    place = f"{prefix}{printable(where)}"
             kind = finding["findingType"]
             line = f"{place}: {kind} {finding['issueCode']}: {printable(finding['findingDetails'])}"
             if kind == ERROR:

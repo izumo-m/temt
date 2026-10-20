@@ -41,8 +41,8 @@ SUBNETS = {
 SERVICE_IMAGES = {
     "Owners": ["self"],
     "Filters": [
-        {"Name": "tag:temt:service", "Values": ["dev"]},
-        {"Name": "state", "Values": ["available"]},
+        {"Name": "name", "Values": ["temt-dev-??????????"]},
+        {"Name": "state", "Values": ["available", "pending"]},
     ],
 }
 THE_SUBNET = {"Filters": [{"Name": "subnet-id", "Values": ["subnet-000000c1"]}]}
@@ -346,39 +346,69 @@ def test_subnet_refuses_a_bad_id(ec2: EC2Client, service: Service, subnet_id: st
         stub.assert_no_pending_responses()
 
 
-def test_latest_ami_takes_the_newest_of_the_service(ec2: EC2Client, ssm: SSMClient) -> None:
+def an_ami(image_id: str, name: str, created: str, state: str = "available") -> dict[str, Any]:
+    """describe-images が返す、サービスの AMI 1 つ分。"""
+    return {"ImageId": image_id, "Name": name, "CreationDate": created, "State": state}
+
+
+def test_newest_image_takes_the_newest_by_creation_time(ec2: EC2Client) -> None:
+    """名前の時刻ではなく作成日時で選ぶ。コピーした AMI の作成日時はコピーした時刻である。"""
     images = {
         "Images": [
-            {
-                "ImageId": "ami-old",
-                "Name": "temt-dev-2609010000",
-                "CreationDate": "2026-09-01T00:00:00.000Z",
-            },
-            {
-                "ImageId": "ami-new",
-                "Name": "temt-dev-2609200000",
-                "CreationDate": "2026-09-20T00:00:00.000Z",
-            },
+            an_ami("ami-new", "temt-dev-2609200000", "2026-09-01T00:00:00.000Z"),
+            an_ami("ami-copied", "temt-dev-2609010000", "2026-09-20T00:00:00.000Z"),
         ]
     }
-    with Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
-        ec2_stub.add_response("describe_images", images, SERVICE_IMAGES)
-        # 設定ファイルに書くのは、ID ではなく名前
-        assert aws.latest_ami(ec2, ssm, "dev") == "temt-dev-2609200000"
-        ec2_stub.assert_no_pending_responses()
-        ssm_stub.assert_no_pending_responses()
+    with Stubber(ec2) as stub:
+        stub.add_response("describe_images", images, SERVICE_IMAGES)
+        newest = aws.newest_image(ec2, "dev")
+        assert newest is not None
+        assert newest["ImageId"] == "ami-copied"
+        stub.assert_no_pending_responses()
 
 
-def test_latest_ami_falls_back_to_ubuntu(ec2: EC2Client, ssm: SSMClient) -> None:
-    with Stubber(ec2) as ec2_stub, Stubber(ssm) as ssm_stub:
-        ec2_stub.add_response("describe_images", {"Images": []}, SERVICE_IMAGES)
-        ssm_stub.add_response(
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("temt-dev-main-260920", id="another service"),
+        pytest.param("temt-dev-26092000ab", id="not digits"),
+        pytest.param("temt-dev-2609200000-copy", id="longer"),
+    ],
+)
+def test_newest_image_takes_only_the_exact_name(ec2: EC2Client, name: str) -> None:
+    """名前が temt-<svc>- に 10 桁の数字だけが続く形に合わなければ、候補にしない。"""
+    images = {"Images": [an_ami("ami-other", name, "2026-09-20T00:00:00.000Z")]}
+    with Stubber(ec2) as stub:
+        stub.add_response("describe_images", images, SERVICE_IMAGES)
+        assert aws.newest_image(ec2, "dev") is None
+        stub.assert_no_pending_responses()
+
+
+def test_newest_image_may_be_pending(ec2: EC2Client) -> None:
+    """pending も候補にする。止めるかは呼ぶ側が決める。"""
+    images = {
+        "Images": [
+            an_ami("ami-old", "temt-dev-2609010000", "2026-09-01T00:00:00.000Z"),
+            an_ami("ami-copying", "temt-dev-2609200000", "2026-09-20T00:00:00.000Z", "pending"),
+        ]
+    }
+    with Stubber(ec2) as stub:
+        stub.add_response("describe_images", images, SERVICE_IMAGES)
+        newest = aws.newest_image(ec2, "dev")
+        assert newest is not None
+        assert newest["State"] == "pending"
+        stub.assert_no_pending_responses()
+
+
+def test_ubuntu_image_id(ssm: SSMClient) -> None:
+    with Stubber(ssm) as stub:
+        stub.add_response(
             "get_parameter",
             {"Parameter": {"Name": aws.UBUNTU_AMI_PARAMETER, "Value": "ami-ubuntu"}},
             {"Name": aws.UBUNTU_AMI_PARAMETER},
         )
-        assert aws.latest_ami(ec2, ssm, "dev") == "ami-ubuntu"
-        ssm_stub.assert_no_pending_responses()
+        assert aws.ubuntu_image_id(ssm) == "ami-ubuntu"
+        stub.assert_no_pending_responses()
 
 
 IMAGE_ID = "ami-0123456789abcdef0"
@@ -432,8 +462,8 @@ def test_image_without_the_name(ec2: EC2Client, service: Service) -> None:
             aws.image(ec2, IMAGE_NAME, service.conf_path)
         stub.assert_no_pending_responses()
     assert str(caught.value) == (
-        f"no such AMI: {IMAGE_NAME}; remove launch-template.ImageId from "
-        f"{tilde(service.conf_path)} and run apply again to pick one"
+        f"no such AMI: {IMAGE_NAME}; write another AMI in launch-template.ImageId of "
+        f"{tilde(service.conf_path)}, or remove it and choose one with --image-id"
     )
 
 
@@ -452,7 +482,7 @@ def test_image_without_the_id(ec2: EC2Client, service: Service, answer: str) -> 
             stub.add_response("describe_images", {"Images": [found(answer)]}, BY_ID)
         else:
             stub.add_client_error("describe_images", answer, expected_params=BY_ID)
-        with pytest.raises(TemtError, match=f"no such AMI: {IMAGE_ID}; remove "):
+        with pytest.raises(TemtError, match=f"no such AMI: {IMAGE_ID}; write another AMI "):
             aws.image(ec2, IMAGE_ID, service.conf_path)
         stub.assert_no_pending_responses()
 
@@ -461,7 +491,7 @@ def test_image_without_the_id(ec2: EC2Client, service: Service, answer: str) -> 
 def test_image_that_is_not_usable(ec2: EC2Client, service: Service, state: str) -> None:
     with Stubber(ec2) as stub:
         stub.add_response("describe_images", {"Images": [found(state)]}, BY_NAME)
-        with pytest.raises(TemtError, match=f"the AMI {IMAGE_NAME} is {state}; remove "):
+        with pytest.raises(TemtError, match=f"the AMI {IMAGE_NAME} is {state}; write another AMI "):
             aws.image(ec2, IMAGE_NAME, service.conf_path)
         stub.assert_no_pending_responses()
 
@@ -515,7 +545,9 @@ def test_a_deregistered_image_beside_a_new_one_with_the_name(ec2: EC2Client) -> 
         stub.add_response(
             "describe_images", {"Images": [found("deregistered"), found(image_id=other)]}, BY_NAME
         )
-        assert aws.image_id(ec2, IMAGE_NAME) == other
+        image = aws.find_image(ec2, IMAGE_NAME)
+        assert image is not None
+        assert image["ImageId"] == other
         stub.assert_no_pending_responses()
 
 
@@ -549,33 +581,6 @@ def test_a_name_with_a_wildcard_is_refused(ec2: EC2Client, value: str) -> None:
     with Stubber(ec2) as stub:
         with pytest.raises(TemtError, match="not an AMI id or name: "):
             aws.find_image(ec2, value)
-        # テンプレートと比べるだけのときは、誤りにせず、使える AMI が無いとする
-        assert aws.image_id(ec2, value) is None
-        stub.assert_no_pending_responses()
-
-
-@pytest.mark.parametrize("value", [IMAGE_ID, IMAGE_NAME])
-def test_image_id(ec2: EC2Client, value: str) -> None:
-    with Stubber(ec2) as stub:
-        stub.add_response("describe_images", FOUND, BY_ID if value == IMAGE_ID else BY_NAME)
-        assert aws.image_id(ec2, value) == IMAGE_ID
-        stub.assert_no_pending_responses()
-
-
-@pytest.mark.parametrize("answer", [{"Images": []}, {"Images": [found("failed")]}])
-def test_image_id_without_a_usable_image(ec2: EC2Client, answer: dict[str, Any]) -> None:
-    with Stubber(ec2) as stub:
-        stub.add_response("describe_images", answer, BY_NAME)
-        assert aws.image_id(ec2, IMAGE_NAME) is None
-        stub.assert_no_pending_responses()
-
-
-def test_image_id_of_a_name_that_more_than_one_image_has(ec2: EC2Client) -> None:
-    """表示を止めないよう、誤りにせず None にする。何がいけないかは apply が告げる。"""
-    other = "ami-0fedcba9876543210"
-    with Stubber(ec2) as stub:
-        stub.add_response("describe_images", {"Images": [found(), found(image_id=other)]}, BY_NAME)
-        assert aws.image_id(ec2, IMAGE_NAME) is None
         stub.assert_no_pending_responses()
 
 

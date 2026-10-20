@@ -16,9 +16,6 @@ from temt.table import printable, tilde
 
 # コマンドの名前。リソースの名前とサービスのコマンド名 temt-<svc> の頭にも付く
 PREFIX = "temt"
-# <名前> の長さの上限。IAM ロール名の上限に合わせる
-NAME_MAX = 64
-
 # サービス名は、英小文字で始まり、英小文字・数字・ハイフンが続き、英小文字か数字で終わる
 SVC_RE = re.compile(r"[a-z]([a-z0-9-]*[a-z0-9])?")
 
@@ -276,6 +273,16 @@ def replace_text(path: Path, text: str, *, mode: int = 0o666) -> None:
         raise
 
 
+def create_text(path: Path, text: str) -> None:
+    """ファイルを中身 text で新しく作る。既にあれば FileExistsError にし、触らない。
+
+    行き先の無いシンボリックリンクも、あるものとする。モードは 0o644 に umask を掛けたもの。
+    """
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        _ = file.write(text)
+
+
 def places() -> dict[str, Path]:
     """2 つの場所を、環境変数の名前ごとに返す。並びは conf、ssh の順。
 
@@ -303,8 +310,6 @@ class Service:
             raise UsageError(
                 f"invalid service name: {DEFAULTS} (reserved for the file {DEFAULTS}.toml)"
             )
-        if len(self.name) > NAME_MAX:
-            raise UsageError(f"name longer than {NAME_MAX} characters: {self.name}")
 
     @property
     def name(self) -> str:

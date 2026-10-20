@@ -22,7 +22,7 @@ def written(svc: str, text: str) -> Path:
 def test_list_shows_every_config_file(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """サービス名の順に並べる。既定のある項目は既定を、値の無い項目は - を出す。
 
-    AwsRegion は、書かれていなければ最初の apply が決めるので、それまでは - になる。
+    AwsProfile と AwsRegion は、書かれていなければ - になり、決めているサービスと見分けられる。
     """
     _ = home_dir
     written(
@@ -41,24 +41,17 @@ def test_list_shows_every_config_file(home_dir: Path, capsys: pytest.CaptureFixt
     out, err = capsys.readouterr()
     assert err == ""
     assert out.splitlines() == [
-        "SERVICE    PROFILE   REGION      IMAGE                   TYPE",
-        "dev-main   -         -           -                       t3.micro",
-        "web        work      us-east-1   ami-0123456789abcdef0   t3.small",
+        "SERVICE    PROFILE   REGION      TYPE",
+        "dev-main   -         -           t3.micro",
+        "web        work      us-east-1   t3.small",
     ]
 
 
 def test_list_shows_the_chosen_columns(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """SUBNET は NetworkInterfaces の DeviceIndex が 0 の要素の SubnetId。ほかの要素の
-    SubnetId は出さない。"""
+    """INGRESS は受信規則の数。"""
     _ = home_dir
     written(
         "web",
-        "[[launch-template.NetworkInterfaces]]\n"
-        "DeviceIndex = 1\n"
-        'SubnetId = "subnet-00000000000000001"\n'
-        "[[launch-template.NetworkInterfaces]]\n"
-        "DeviceIndex = 0\n"
-        'SubnetId = "subnet-0123456789abcdef0"\n'
         "[[security-group.ingress]]\n"
         "Port = 22\n"
         'Cidr = "203.0.113.10/32"\n'
@@ -66,58 +59,49 @@ def test_list_shows_the_chosen_columns(home_dir: Path, capsys: pytest.CaptureFix
         "Port = 443\n"
         'Cidr = "203.0.113.10/32"\n',
     )
-    written(
-        "dev-main",
-        '[[launch-template.NetworkInterfaces]]\nDeviceIndex = 1\nSubnetId = "subnet-00000000"\n',
-    )
+    written("dev-main", "")
 
-    services.list_services(None, "service,subnet,ingress")
+    services.list_services(None, "service,ingress")
 
     assert capsys.readouterr().out.splitlines() == [
-        "SERVICE    SUBNET                     INGRESS",
-        "dev-main   -                          0",
-        "web        subnet-0123456789abcdef0   2",
+        "SERVICE    INGRESS",
+        "dev-main   0",
+        "web        2",
     ]
 
 
 def test_list_shows_the_values_over_the_common_file(
     home_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """値は共通ファイルに重ねて読んだもの。同じ DeviceIndex の要素は、要素の中で重なる。
-
-    Defaults = false のサービスは共通ファイルを読まない。
+    """値は共通ファイルに重ねて読んだもの。Defaults = false のサービスは共通ファイルを
+    読まない。
     """
     _ = home_dir
     defaults_path().parent.mkdir(parents=True, exist_ok=True)
     defaults_path().write_text(
-        "[launch-template]\n"
-        'InstanceType = "t3.small"\n'
-        "[[launch-template.NetworkInterfaces]]\n"
-        "DeviceIndex = 0\n"
-        'SubnetId = "subnet-0123456789abcdef0"\n',
+        'AwsRegion = "us-west-2"\n[launch-template]\nInstanceType = "t3.small"\n',
         encoding="utf-8",
     )
-    written(
-        "web",
-        "[[launch-template.NetworkInterfaces]]\nDeviceIndex = 0\nAssociatePublicIpAddress = true\n",
-    )
+    written("web", "")
     written("dev-main", "Defaults = false\n")
 
-    services.list_services(None, "service,type,subnet")
+    services.list_services(None, "service,region,type")
 
     assert capsys.readouterr().out.splitlines() == [
-        "SERVICE    TYPE       SUBNET",
-        "dev-main   t3.micro   -",
-        "web        t3.small   subnet-0123456789abcdef0",
+        "SERVICE    REGION      TYPE",
+        "dev-main   -           t3.micro",
+        "web        us-west-2   t3.small",
     ]
 
 
-def test_list_has_no_volume_size_column(home_dir: Path) -> None:
-    """ルートボリュームの大きさの列は無い。AWS を呼ばないので、どの要素がルートボリュームか
-    分からない。"""
+@pytest.mark.parametrize("column", ["image", "subnet", "volumesize"])
+def test_list_has_no_columns_decided_in_aws(home_dir: Path, column: str) -> None:
+    """AMI とサブネットの列は無い。ふつうは書かず、リージョンごとに AWS で決まる。ルート
+    ボリュームの大きさの列も無い。AWS を呼ばないので、どの要素がルートボリュームか分から
+    ない。"""
     _ = home_dir
-    with pytest.raises(UsageError, match="unknown column in --format: volumesize"):
-        services.list_services(None, "service,volumesize")
+    with pytest.raises(UsageError, match=f"unknown column in --format: {column}"):
+        services.list_services(None, f"service,{column}")
 
 
 def test_list_without_config_files(home_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:

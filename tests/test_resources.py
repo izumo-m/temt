@@ -30,9 +30,15 @@ GROUP = "sg-0123456789abcdef0"
 IMAGE = "ami-0123456789abcdef0"
 TEMPLATE_ID = "lt-0123456789abcdef0"
 WHEN = datetime(2026, 9, 20, tzinfo=UTC)
+REGION = "ap-northeast-1"
 
 # temt が管理していることを示すタグ。4 つに付ける
 MARK: list[dict[str, str]] = [{"Key": "temt:service", "Value": "dev-main"}]
+# インスタンスロールに付けるタグ。temt のタグと、このリージョンのタグ（値は空）
+HERE = f"temt:region:{REGION}"
+ROLE_MARK: list[dict[str, str]] = [*MARK, {"Key": HERE, "Value": ""}]
+# ほかのリージョンのタグのキー
+THERE = "temt:region:us-west-2"
 # インスタンスとそのボリュームとネットワークインターフェース、セキュリティグループに付けるタグ
 TAGS: list[dict[str, str]] = [{"Key": "Name", "Value": NAME}, *MARK]
 # temt が付けないタグ。temt は触らない。Service は、他のツールや手作業でも付けられる
@@ -44,7 +50,7 @@ OTHERS: list[dict[str, str]] = [
 # 値の違う temt のタグと、temt が付けないタグ
 WRONG: list[dict[str, str]] = [{"Key": "temt:service", "Value": "dev"}, *OTHERS]
 
-# [role.policy.jupyter] から作った temt-jupyter の中身
+# [[role.jupyter]] から作った temt-jupyter の中身
 STATEMENT: dict[str, Any] = {
     "Effect": "Allow",
     "Action": "s3:GetObject",
@@ -60,7 +66,7 @@ SSM_CORE = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 MARK_SHOWN = "tags: temt:service=dev-main"
 
 # 受信規則もポリシーも無い設定
-VALUES = Conf()
+VALUES = Conf(AwsRegion=REGION)
 
 # 揃っているときに、detect が AWS を読む順。update が揃える順と同じである。インライン
 # ポリシーは無い
@@ -76,7 +82,7 @@ READS = [
 ]
 
 
-def a_role(tags: list[dict[str, str]] | None = MARK) -> dict[str, Any]:
+def a_role(tags: list[dict[str, str]] | None = ROLE_MARK) -> dict[str, Any]:
     """get-role と create-role が返す形。
 
     タグを 1 つも持たないロールは、AWS が Tags を返さない。tags が None のときがそれに
@@ -384,7 +390,7 @@ def deleted(*numbers: int) -> dict[str, Any]:
 
 def align_role(iam: IAMClient, service: Service) -> None:
     """apply と同じく、IAM ロールの差分を検出してから、その差分で揃える。"""
-    resources.role(iam, service, resources.detect_role(iam, service))
+    resources.role(iam, service, resources.detect_role(iam, service, REGION))
 
 
 def align_profile(iam: IAMClient, service: Service) -> None:
@@ -652,15 +658,19 @@ def test_role_policies_puts_each_and_deletes_the_temt_ones_that_are_gone(
 
 
 def test_role_is_created_with_its_tag(iam: IAMClient, service: Service) -> None:
-    """作るときは信頼ポリシーとタグだけを渡す。権限は、インラインポリシーと管理ポリシーを
-    それぞれ別に揃える。
+    """作るときは信頼ポリシーとタグだけを渡す。タグには、このリージョンのものも入る。権限は、
+    インラインポリシーと管理ポリシーをそれぞれ別に揃える。
     """
     with Stubber(iam) as stub:
         missing(stub, "get_role", "NoSuchEntity", RoleName=NAME)
         stub.add_response(
             "create_role",
             a_role(),
-            {"RoleName": NAME, "AssumeRolePolicyDocument": resources.TRUST_POLICY, "Tags": MARK},
+            {
+                "RoleName": NAME,
+                "AssumeRolePolicyDocument": resources.TRUST_POLICY,
+                "Tags": ROLE_MARK,
+            },
         )
         align_role(iam, service)
         stub.assert_no_pending_responses()
@@ -669,9 +679,15 @@ def test_role_is_created_with_its_tag(iam: IAMClient, service: Service) -> None:
 def test_role_that_is_already_right_is_left_alone(
     iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """タグが揃っていれば、何も書かず、知らせもしない。temt が付けないタグがあってもよい。"""
+    """タグが揃っていれば、何も書かず、知らせもしない。temt が付けないタグや、ほかの
+    リージョンのタグがあってもよい。
+    """
     with Stubber(iam) as stub:
-        stub.add_response("get_role", a_role([*MARK, *OTHERS]), {"RoleName": NAME})
+        stub.add_response(
+            "get_role",
+            a_role([*ROLE_MARK, {"Key": THERE, "Value": ""}, *OTHERS]),
+            {"RoleName": NAME},
+        )
         align_role(iam, service)
         stub.assert_no_pending_responses()
     assert capsys.readouterr().err == ""
@@ -683,7 +699,7 @@ def test_a_role_without_any_tag_gets_it(
     """タグを 1 つも持たないロールは、AWS が Tags を返さない。"""
     with Stubber(iam) as stub:
         stub.add_response("get_role", a_role(None), {"RoleName": NAME})
-        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
+        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": ROLE_MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
     assert f"role {NAME}: updated" in capsys.readouterr().out
@@ -695,9 +711,33 @@ def test_a_role_that_only_has_other_tags_gets_its_tag(
     """temt のタグが無ければ足す。同じ値の Service のタグは、temt のタグと見なさない。"""
     with Stubber(iam) as stub:
         stub.add_response("get_role", a_role(OTHERS), {"RoleName": NAME})
-        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": MARK})
+        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": ROLE_MARK})
         align_role(iam, service)
         stub.assert_no_pending_responses()
+    assert f"role {NAME}: updated" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        pytest.param(MARK, id="no region"),
+        pytest.param([*MARK, {"Key": THERE, "Value": ""}], id="another region"),
+        pytest.param([*MARK, {"Key": HERE, "Value": "x"}], id="another value"),
+    ],
+)
+def test_a_role_gets_the_tag_of_its_region(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str], tags: list[dict[str, str]]
+) -> None:
+    """このリージョンのタグが無いか、値が空でなければ、空の値で付ける。ほかのリージョンの
+    タグは残す。diff にも、足すタグとして出す。
+    """
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        found = resources.detect_role(iam, service, REGION)
+        stub.add_response("tag_role", {}, {"RoleName": NAME, "Tags": [{"Key": HERE, "Value": ""}]})
+        resources.role(iam, service, found)
+        stub.assert_no_pending_responses()
+    assert found.changes() == [Change("~", resources.ROLE, NAME, f"tags: {HERE}=")]
     assert f"role {NAME}: updated" in capsys.readouterr().out
 
 
@@ -705,7 +745,7 @@ def test_other_iam_errors_are_left_to_apply(iam: IAMClient, service: Service) ->
     with Stubber(iam) as stub:
         stub.add_client_error("get_role", service_error_code="AccessDenied", http_status_code=403)
         with pytest.raises(ClientError):
-            _ = resources.detect_role(iam, service)
+            _ = resources.detect_role(iam, service, REGION)
 
 
 def test_the_role_is_detected_without_writing(iam: IAMClient, service: Service) -> None:
@@ -713,11 +753,11 @@ def test_the_role_is_detected_without_writing(iam: IAMClient, service: Service) 
     with Stubber(iam) as stub:
         missing(stub, "get_role", "NoSuchEntity", RoleName=NAME)
         stub.add_response("get_role", a_role(OTHERS), {"RoleName": NAME})
-        absent = resources.detect_role(iam, service)
-        untagged = resources.detect_role(iam, service)
+        absent = resources.detect_role(iam, service, REGION)
+        untagged = resources.detect_role(iam, service, REGION)
         stub.assert_no_pending_responses()
     assert absent.changes() == [Change("+", resources.ROLE, NAME)]
-    assert untagged.changes() == [Change("~", resources.ROLE, NAME, MARK_SHOWN)]
+    assert untagged.changes() == [Change("~", resources.ROLE, NAME, f"{MARK_SHOWN}, {HERE}=")]
 
 
 def test_the_instance_profile_is_created_with_its_tag_and_waited_for(
@@ -1421,7 +1461,7 @@ def test_a_role_or_instance_profile_of_another_service_stops(
             "get_instance_profile", a_profile([NAME], other), {"InstanceProfileName": NAME}
         )
         with pytest.raises(TemtError, match=f"^the role {NAME} has temt:service=other, so it "):
-            _ = resources.detect_role(iam, service)
+            _ = resources.detect_role(iam, service, REGION)
         with pytest.raises(
             TemtError,
             match=(
@@ -1636,8 +1676,49 @@ def test_a_missing_launch_template_is_detected_to_be_created(
         )
         found = resources.detect_template(ec2, service, data)
         stub.assert_no_pending_responses()
-    assert found.changes() == [Change("+", resources.LAUNCH_TEMPLATE, TEMPLATE)]
+    assert found.changes() == [
+        Change("+", resources.LAUNCH_TEMPLATE, TEMPLATE, f"ImageId: {IMAGE}")
+    ]
     assert found.wanted == data
+
+
+@pytest.mark.parametrize(
+    ("note", "shown"),
+    [
+        pytest.param("temt-dev-main-2609200900", "(temt-dev-main-2609200900)", id="name"),
+        pytest.param(
+            "Ubuntu 24.04; no temt-dev-main AMI in ap-northeast-1",
+            "(Ubuntu 24.04; no temt-dev-main AMI in ap-northeast-1)",
+            id="ubuntu",
+        ),
+    ],
+)
+def test_a_template_to_be_created_shows_the_chosen_image(
+    ec2: EC2Client, service: Service, note: str, shown: str
+) -> None:
+    """作るときは項目に開かず、選んだ AMI だけを、名前か Ubuntu を選んだわけを添えて出す。"""
+    with Stubber(ec2) as stub:
+        found = resources.detect_template(ec2, service, wanted(), versions=[], note=note)
+        stub.assert_no_pending_responses()
+    assert [one.detail for one in found.changes()] == [f"ImageId: {IMAGE} {shown}"]
+
+
+def test_a_new_image_is_shown_with_its_name(ec2: EC2Client, service: Service) -> None:
+    """ImageId が変われば、新しい AMI の名前を添える。先に読んだバージョンは読み直さない。"""
+    versions = [a_version(echo(ImageId="ami-0fedcba9876543210"), 3)]
+    with Stubber(ec2) as stub:
+        stub.add_response(
+            "describe_launch_templates",
+            {"LaunchTemplates": [{"LaunchTemplateId": TEMPLATE_ID, "Tags": MARK}]},
+            {"LaunchTemplateNames": [TEMPLATE]},
+        )
+        found = resources.detect_template(
+            ec2, service, wanted(), versions=versions, note="temt-dev-main-2609200900"
+        )
+        stub.assert_no_pending_responses()
+    assert [one.detail for one in found.changes()] == [
+        f"ImageId: ami-0fedcba9876543210 -> {IMAGE} (temt-dev-main-2609200900)"
+    ]
 
 
 def test_the_launch_template_gets_the_id_of_the_security_group_made_after_detecting(
@@ -1821,7 +1902,7 @@ def test_a_template_without_a_default_version(ec2: EC2Client, service: Service) 
     with Stubber(ec2) as stub:
         stub.add_response(
             "describe_launch_template_versions",
-            listed(),
+            listed(a_version(wanted(), 1, default=False)),
             {"LaunchTemplateName": TEMPLATE},
         )
         with pytest.raises(TemtError, match="no single default version"):
@@ -1987,8 +2068,15 @@ def nothing_there(iam_stub: Stubber, ec2_stub: Stubber) -> None:
     )
 
 
+def nothing_to_release(stub: Stubber) -> None:
+    """[role] が無いとき、手放すロールとインスタンスプロファイルが無いことを読む応答を積む。"""
+    missing(stub, "get_role", "NoSuchEntity", RoleName=NAME)
+    missing(stub, "get_instance_profile", "NoSuchEntity", InstanceProfileName=NAME)
+
+
 # 受信規則を 1 つと管理ポリシーを 1 つ書いた設定
 FULL = Conf(
+    AwsRegion=REGION,
     security_group=SecurityGroup(
         ingress=[Ingress(Port=(22, 22), Cidr="203.0.113.10/32", Description="home")]
     ),
@@ -2014,7 +2102,11 @@ def test_update_goes_through_them_in_order(
         iam_stub.add_response(
             "create_role",
             a_role(),
-            {"RoleName": NAME, "AssumeRolePolicyDocument": resources.TRUST_POLICY, "Tags": MARK},
+            {
+                "RoleName": NAME,
+                "AssumeRolePolicyDocument": resources.TRUST_POLICY,
+                "Tags": ROLE_MARK,
+            },
         )
         iam_stub.add_response(
             "put_role_policy", {}, {**THE_POLICY, "PolicyDocument": json.dumps(CONTENT)}
@@ -2135,7 +2227,7 @@ def test_detect_shows_what_update_would_create_in_its_order(
         ("+", resources.INSTANCE_PROFILE, NAME, ""),
         ("+", resources.SECURITY_GROUP, NAME, f"in {VPC}"),
         ("+", resources.INGRESS, "22/tcp", "203.0.113.10/32   home"),
-        ("+", resources.LAUNCH_TEMPLATE, TEMPLATE, ""),
+        ("+", resources.LAUNCH_TEMPLATE, TEMPLATE, f"ImageId: {IMAGE}"),
     ]
 
 
@@ -2163,22 +2255,27 @@ def test_detect_compares_the_template_with_the_group_to_be_created(
     ]
 
 
-def test_detect_reads_no_iam_without_the_instance_profile_of_temt(
+def test_detect_only_reads_what_to_release_without_role(
     ec2: EC2Client, iam: IAMClient, service: Service
 ) -> None:
-    """policies が None（IamInstanceProfile が temt のものを指さない）なら、ロールも
-    インスタンスプロファイルも読まない。IAM の応答は積んでいないので、読めば Stubber が
-    失敗する。
+    """policies が None（[role] が無い）なら、detect はロールもインスタンスプロファイルも
+    読まない。with_release が、起動テンプレートの後に、手放すものがあるかだけを読む。
     """
+    calls = recorded(ec2, iam)
     with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
         groups(ec2_stub, a_group())
         rules(ec2_stub)
         template_in_place(ec2_stub)
         found = resources.detect(ec2, iam, service, VALUES, built(), policies=None)
+        assert found.release is None
+        nothing_to_release(iam_stub)
+        found = resources.with_release(iam, service, found, REGION)
         iam_stub.assert_no_pending_responses()
         ec2_stub.assert_no_pending_responses()
     assert found.iam is None
+    assert found.release == resources.Release(NAME, REGION)
     assert found.changes() == []
+    assert calls == [*READS[4:], "GetRole", "GetInstanceProfile"]
 
 
 @pytest.mark.parametrize(
@@ -2972,3 +3069,340 @@ def test_old_versions_are_deleted_in_batches_aws_accepts(
     err = capsys.readouterr().err
     assert err.count("cannot delete the old versions") == 1
     assert "not allowed" in err
+
+
+@pytest.mark.parametrize(
+    ("policies", "profile", "aligned"),
+    [
+        pytest.param({}, {"Name": NAME}, True, id="role and its instance profile"),
+        pytest.param({}, {"Name": "other"}, False, id="role and another instance profile"),
+        pytest.param(None, {"Name": NAME}, False, id="no role"),
+    ],
+)
+def test_detect_tells_whether_the_template_points_at_the_profile_it_aligns(
+    ec2: EC2Client,
+    iam: IAMClient,
+    service: Service,
+    policies: dict[str, Any] | None,
+    profile: dict[str, str],
+    aligned: bool,
+) -> None:
+    """[role] があり（policies が None でない）、起動テンプレートの IamInstanceProfile が
+    そのインスタンスプロファイルを指すときだけ、起動テンプレートの警告に注記を添える。
+    [role] があれば、IamInstanceProfile がどこを指してもロールは揃える。
+    """
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
+        if policies is not None:
+            iam_in_place(iam_stub)
+        groups(ec2_stub, a_group())
+        rules(ec2_stub)
+        template_in_place(ec2_stub)
+        found = resources.detect(
+            ec2, iam, service, VALUES, built(wanted(IamInstanceProfile=profile)), policies=policies
+        )
+        iam_stub.assert_no_pending_responses()
+        ec2_stub.assert_no_pending_responses()
+    assert found.aligned is aligned
+    assert (found.iam is not None) is (policies is not None)
+
+
+# ロール <名前> が IAM のロール名の上限より長いサービス
+LONG = Service("a" * 60)
+
+
+def in_profiles(stub: Stubber, *profiles: str) -> None:
+    """ロール <名前> を入れたインスタンスプロファイル profiles を読む応答を積む。"""
+    stub.add_response(
+        "list_instance_profiles_for_role",
+        {
+            "InstanceProfiles": [
+                {**a_profile([NAME])["InstanceProfile"], "InstanceProfileName": one}
+                for one in profiles
+            ]
+        },
+        {"RoleName": NAME},
+    )
+
+
+@pytest.mark.parametrize("here", [True, False], ids=["tagged here", "not tagged here"])
+def test_release_keeps_the_role_that_another_region_uses(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str], here: bool
+) -> None:
+    """ほかのリージョンのタグが残っていれば、このリージョンのタグだけを外し、ロールも
+    インスタンスプロファイルも残す。ポリシーもインスタンスプロファイルも読まない。タグが
+    無ければ、何も変えない。
+    """
+    tags = [*MARK, *([{"Key": HERE, "Value": ""}] if here else []), {"Key": THERE, "Value": ""}]
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        found = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+        # 変えるものが無ければ、読み直しもしない
+        if here:
+            stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+            stub.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [HERE]})
+        resources.release(iam, service, found)
+        stub.assert_no_pending_responses()
+    assert found.kept
+    expected = [
+        Change("~", resources.ROLE, NAME, f"untag {HERE}; kept: used in us-west-2"),
+    ]
+    assert found.changes() == (expected if here else [])
+    out = [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()]
+    # 残すことも、ロールの 1 行で知らせる
+    expected_out = [f"role {NAME}: untagged {HERE}", f"role {NAME}: kept (used in us-west-2)"]
+    assert out == (expected_out if here else [])
+
+
+@pytest.mark.parametrize("here", [True, False], ids=["tagged here", "no region tag"])
+def test_release_deletes_the_last_use_after_the_tag(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str], here: bool
+) -> None:
+    """ほかのリージョンのタグが無ければ、このリージョンのタグを外して、インスタンス
+    プロファイルとロールを消す。diff には、消すロールのポリシーと、インスタンスプロファイルを
+    出す。変えないものは知らせない。
+    """
+    tags = [*MARK, *([{"Key": HERE, "Value": ""}] if here else [])]
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        stub.add_response("list_role_policies", {"PolicyNames": [JUPYTER]}, {"RoleName": NAME})
+        stub.add_response("list_attached_role_policies", attached(S3_READ), {"RoleName": NAME})
+        stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
+        found = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+        stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        if here:
+            stub.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [HERE]})
+        in_profiles(stub, NAME)
+        stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
+        stub.add_response(
+            "remove_role_from_instance_profile", {}, {"InstanceProfileName": NAME, "RoleName": NAME}
+        )
+        stub.add_response("delete_instance_profile", {}, {"InstanceProfileName": NAME})
+        stub.add_response("list_attached_role_policies", attached(S3_READ), {"RoleName": NAME})
+        stub.add_response("detach_role_policy", {}, {"RoleName": NAME, "PolicyArn": S3_READ})
+        stub.add_response("list_role_policies", {"PolicyNames": [JUPYTER]}, {"RoleName": NAME})
+        stub.add_response("delete_role_policy", {}, THE_POLICY)
+        stub.add_response("delete_role", {}, {"RoleName": NAME})
+        resources.release(iam, service, found)
+        stub.assert_no_pending_responses()
+    assert found.changes() == [
+        Change(
+            "-",
+            resources.ROLE,
+            NAME,
+            f"inline policies: {JUPYTER}; managed policies: {S3_READ}",
+        ),
+        Change("-", resources.INSTANCE_PROFILE, NAME),
+    ]
+    out = [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()]
+    assert out == [
+        *([f"role {NAME}: untagged {HERE}"] if here else []),
+        f"instance profile {NAME}: {resources.DELETED}",
+        f"role {NAME}: detached {S3_READ}",
+        f"role policy {JUPYTER}: {resources.DELETED}",
+        f"role {NAME}: {resources.DELETED}",
+    ]
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [pytest.param(None, id="untagged"), pytest.param(WRONG, id="another service")],
+)
+def test_release_deletes_only_the_instance_profile_beside_a_role_of_another(
+    iam: IAMClient, service: Service, tags: list[dict[str, str]] | None
+) -> None:
+    """ロールが無いか temt:service=<svc> が付いていなければ、ロールはそのままにし、
+    temt:service=<svc> の付いたインスタンスプロファイルだけを消す。
+    """
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        stub.add_response("get_instance_profile", a_profile([]), {"InstanceProfileName": NAME})
+        found = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+    assert found.changes() == [Change("-", resources.INSTANCE_PROFILE, NAME)]
+
+
+def test_release_deletes_the_instance_profile_and_leaves_a_role_of_another_service(
+    iam: IAMClient, service: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ロールが別のサービスのものなら、インスタンスプロファイルからロール <名前> を外して
+    消し、ロールには触らない。残したロールも、destroy と同じく知らせる。
+    """
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(WRONG), {"RoleName": NAME})
+        stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
+        found = resources.detect_release(iam, service, REGION)
+        stub.add_response("get_role", a_role(WRONG), {"RoleName": NAME})
+        stub.add_response("get_instance_profile", a_profile([NAME]), {"InstanceProfileName": NAME})
+        stub.add_response(
+            "remove_role_from_instance_profile", {}, {"InstanceProfileName": NAME, "RoleName": NAME}
+        )
+        stub.add_response("delete_instance_profile", {}, {"InstanceProfileName": NAME})
+        resources.release(iam, service, found)
+        stub.assert_no_pending_responses()
+    assert found.changes() == [Change("-", resources.INSTANCE_PROFILE, NAME)]
+    assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()] == [
+        f"instance profile {NAME}: {resources.DELETED}",
+        f"role {NAME}: {resources.LEFT.format(svc='dev-main')}",
+    ]
+
+
+def test_release_leaves_an_instance_profile_of_another_alone(
+    iam: IAMClient, service: Service
+) -> None:
+    """temt:service=<svc> の無いインスタンスプロファイルは消さない。ロールも無ければ、何も
+    変えない。
+    """
+    with Stubber(iam) as stub:
+        missing(stub, "get_role", "NoSuchEntity", RoleName=NAME)
+        stub.add_response(
+            "get_instance_profile", a_profile(["other"], WRONG), {"InstanceProfileName": NAME}
+        )
+        found = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+    assert found.changes() == []
+
+
+@pytest.mark.parametrize(
+    ("roles", "profiles", "profile_tags", "error"),
+    [
+        pytest.param(
+            [NAME, "other"],
+            (NAME,),
+            MARK,
+            f"the instance profile {NAME} holds another role: other; remove it by hand and run "
+            "apply again",
+            id="the instance profile holds another role",
+        ),
+        pytest.param(
+            [NAME],
+            (NAME, "shared"),
+            MARK,
+            f"the role {NAME} is also in the instance profile shared; remove it from there by "
+            "hand and run apply again",
+            id="the role is in another instance profile",
+        ),
+        pytest.param(
+            [NAME],
+            (NAME,),
+            WRONG,
+            f"the role {NAME} is also in the instance profile {NAME}, which is left as it is not "
+            "tagged temt:service=dev-main; remove the role from it by hand and run apply again",
+            id="the role is in the instance profile left alone",
+        ),
+    ],
+)
+def test_release_stops_when_it_cannot_delete(
+    iam: IAMClient,
+    service: Service,
+    roles: list[str],
+    profiles: tuple[str, ...],
+    profile_tags: list[dict[str, str]],
+    error: str,
+) -> None:
+    """消せるかは検出するときには確かめず、消すときに確かめて、消せなければ、何も外さず
+    消さずに、destroy と同じ誤りで止まる（やり直すコマンドは apply）。
+    """
+    with Stubber(iam) as stub:
+        stub.add_response("get_role", a_role(MARK), {"RoleName": NAME})
+        stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+        stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+        stub.add_response(
+            "get_instance_profile", a_profile(roles, profile_tags), {"InstanceProfileName": NAME}
+        )
+        found = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+        stub.add_response("get_role", a_role(MARK), {"RoleName": NAME})
+        in_profiles(stub, *profiles)
+        if NAME in profiles and len(profiles) == 1:
+            stub.add_response(
+                "get_instance_profile",
+                a_profile(roles, profile_tags),
+                {"InstanceProfileName": NAME},
+            )
+        with pytest.raises(TemtError) as caught:
+            resources.release(iam, service, found)
+        # 外す、消す呼び出しは積んでいない
+        stub.assert_no_pending_responses()
+    assert str(caught.value) == error
+
+
+def test_a_name_too_long_for_iam_counts_as_absent(
+    iam: IAMClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """<名前> が IAM のロール名の上限より長ければ、IAM を読むだけのところは、呼ばずに
+    ロールもインスタンスプロファイルも無いものとする。呼べば誤りになり、destroy が
+    終わらない。応答は積んでいないので、呼べば Stubber が失敗する。
+    """
+    assert len(LONG.name) > resources.ROLE_NAME_MAX
+    with Stubber(iam) as stub:
+        found = resources.detect_release(iam, LONG, REGION)
+        listed_role = resources.role_release(iam, LONG, REGION)
+        resources.delete_iam(iam, LONG, REGION)
+        stub.assert_no_pending_responses()
+    assert found.changes() == []
+    assert listed_role == resources.Release(LONG.name, REGION)
+    assert [line.split(" ", 1)[1] for line in capsys.readouterr().out.splitlines()] == [
+        f"instance profile {LONG.name}: {resources.ABSENT}",
+        f"role {LONG.name}: {resources.ABSENT}",
+    ]
+
+
+def test_a_name_of_the_limit_is_read(iam: IAMClient, home_dir: Any) -> None:
+    """上限ちょうどの <名前> は、IAM を読む。"""
+    _ = home_dir
+    service = Service("a" * (resources.ROLE_NAME_MAX - len("temt-")))
+    with Stubber(iam) as stub:
+        missing(stub, "get_role", "NoSuchEntity", RoleName=service.name)
+        missing(stub, "get_instance_profile", "NoSuchEntity", InstanceProfileName=service.name)
+        _ = resources.detect_release(iam, service, REGION)
+        stub.assert_no_pending_responses()
+
+
+def test_update_releases_the_role_after_the_launch_template(
+    ec2: EC2Client, iam: IAMClient, service: Service
+) -> None:
+    """[role] が無ければ、起動テンプレートを揃えてから、タグを外し、インスタンス
+    プロファイルとロールを消す。先に消すと、テンプレートの更新が失敗したとき、テンプレートが
+    消えたインスタンスプロファイルを指したまま残る。
+    """
+    calls = recorded(ec2, iam)
+    tags = [*MARK, {"Key": HERE, "Value": ""}]
+    with Stubber(iam) as iam_stub, Stubber(ec2) as ec2_stub:
+        ec2_stub.add_response(
+            "describe_launch_template_versions",
+            listed(a_version(echo(InstanceType="t3.small"))),
+            {"LaunchTemplateName": TEMPLATE},
+        )
+        template_tags(ec2_stub)
+        iam_stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        iam_stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+        iam_stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+        missing(iam_stub, "get_instance_profile", "NoSuchEntity", InstanceProfileName=NAME)
+        found = resources.detect(ec2, iam, service, VALUES, built(uses=False), policies=None)
+        found = resources.with_release(iam, service, found, REGION)
+        calls.clear()
+        new_version(ec2_stub, wanted())
+        iam_stub.add_response("get_role", a_role(tags), {"RoleName": NAME})
+        iam_stub.add_response("untag_role", {}, {"RoleName": NAME, "TagKeys": [HERE]})
+        in_profiles(iam_stub)
+        missing(iam_stub, "get_instance_profile", "NoSuchEntity", InstanceProfileName=NAME)
+        iam_stub.add_response("list_attached_role_policies", attached(), {"RoleName": NAME})
+        iam_stub.add_response("list_role_policies", {"PolicyNames": []}, {"RoleName": NAME})
+        iam_stub.add_response("delete_role", {}, {"RoleName": NAME})
+        resources.update(ec2, iam, service, found)
+        iam_stub.assert_no_pending_responses()
+        ec2_stub.assert_no_pending_responses()
+    assert calls == [
+        "CreateLaunchTemplateVersion",
+        "ModifyLaunchTemplate",
+        "DeleteLaunchTemplateVersions",
+        "GetRole",
+        "UntagRole",
+        "ListInstanceProfilesForRole",
+        "GetInstanceProfile",
+        "ListAttachedRolePolicies",
+        "ListRolePolicies",
+        "DeleteRole",
+    ]

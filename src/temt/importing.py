@@ -1,8 +1,10 @@
-"""ami import の本体。設計の手順 1〜7 を順に行う（design/commands/ami.md の ami import）。
+"""service import の本体。設計の手順 1〜7 を順に行う（design/commands/service.md の
+service import）。
 
 止まっている既存のインスタンスのルートボリュームから AMI を作り、同じインスタンスを
 その AMI から起動できる設定ファイルを書く。起動テンプレートは、続けて打つ apply が作る。
-元のインスタンスと、それが使う AWS のリソースには何もしない。
+元のインスタンスと、それが使う AWS のリソースには何もしない。リージョンとプロファイルは
+apply と同じく設定ファイルに書かず、共通ファイルも読むままにする。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -11,7 +13,6 @@ boto3 を使うので、この module は cli.run が呼ばれたときに読み
 from __future__ import annotations
 
 import copy
-import os
 from typing import TYPE_CHECKING, Any
 
 import tomlkit
@@ -20,16 +21,16 @@ from botocore.exceptions import BotoCoreError, ClientError
 from temt import aws, bake, conf, lock, ltdata, msg, resources
 from temt.aws import error_code, field
 from temt.msg import TemtError
-from temt.names import PREFIX, make_dir
+from temt.names import PREFIX, create_text, make_dir
 from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ssm.client import SSMClient
 
-    from temt.conf import Conf
     from temt.names import Service
 
 STOPPED = "stopped"
@@ -58,8 +59,8 @@ AWS_DEFAULTS = {
 SHUTDOWN_BEHAVIOR = "terminate"
 # CPU クレジットの AWS の既定。t2 は standard、ほかの T 系は unlimited
 T2 = "t2."
-# ami import が新しく作る設定ファイルの先頭のコメント
-HEADER = "# Written by temt ami import. Edit and run apply to update.\n"
+# service import が新しく作る設定ファイルの先頭のコメント
+HEADER = "# Written by temt service import. Edit and run apply to update.\n"
 # AMI に入れない EBS に添える文
 NOT_IN_AMI = (
     "not put in the AMI; to use one, detach it from the source instance and attach it from "
@@ -86,7 +87,7 @@ def _source(ec2: EC2Client, instance_id: str) -> Mapping[str, Any]:
     state = (item.get("State") or {}).get("Name")
     if state != STOPPED:
         raise TemtError(
-            f"{instance_id} is {printable(str(state))}; stop it first (ami import changes "
+            f"{instance_id} is {printable(str(state))}; stop it first (service import changes "
             "nothing on it)"
         )
     return item
@@ -230,19 +231,11 @@ def _registered(ssm: SSMClient, instance_id: str) -> bool:
     return bool(found.get("InstanceInformationList"))
 
 
-def _profile(values: Conf) -> str | None:
-    """設定ファイルに書く AwsProfile。--profile か共通ファイルで選んだときだけ書く。"""
-    return conf.OPTION_PROFILE or values.AwsProfile
-
-
-def _text(values: Conf, data: Mapping[str, Any], *, registered: bool) -> str:
-    """書く設定ファイルの中身。"""
+def _text(data: Mapping[str, Any], *, registered: bool) -> str:
+    """書く設定ファイルの中身。最上位には、SSM に登録されていないときの WaitForSsm だけを
+    書く。
+    """
     document = tomlkit.parse(HEADER)
-    profile = _profile(values)
-    if profile:
-        document["AwsProfile"] = profile
-    document["AwsRegion"] = values.AwsRegion
-    document[conf.DEFAULTS] = False
     if not registered:
         document["WaitForSsm"] = False
     text = tomlkit.dumps(document)
@@ -251,6 +244,7 @@ def _text(values: Conf, data: Mapping[str, Any], *, registered: bool) -> str:
 
 
 def _confirm(
+    session: boto3.Session,
     service: Service,
     instance_id: str,
     item: Mapping[str, Any],
@@ -274,12 +268,12 @@ def _confirm(
         shown_size = f"{size} GiB" if size is not None else "? GiB"
         lines.append(f"EBS {device} {volume} {shown_size}: {NOT_IN_AMI}")
     msg.tell(
-        f"ami import {service.name}:\n"
+        f"service import {service.name}:\n"
         + "".join(f"  {line}\n" for line in lines)
         + f"config file {printable(tilde(service.conf_path))}:\n"
         + "".join(f"  {printable(line)}\n" if line else "\n" for line in shown.splitlines())
     )
-    msg.confirm(f"import {instance_id} as {service.name}?", yes=yes)
+    aws.confirm(session, f"import {instance_id} as {service.name}", yes=yes)
 
 
 def _write(service: Service, text: str) -> None:
@@ -287,13 +281,11 @@ def _write(service: Service, text: str) -> None:
     path = service.conf_path
     make_dir(path.parent)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        create_text(path, text)
     except FileExistsError:
         raise TemtError(
             f"{printable(tilde(path))} was made while importing; it is left as it is"
         ) from None
-    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        file.write(text)
     msg.info(f"wrote {printable(tilde(path))}")
 
 
@@ -302,7 +294,7 @@ def run(service: Service, instance_id: str, *, yes: bool) -> None:
     # 手順 1。既にあるサービスには取り込まない
     if service.conf_path.exists():
         raise TemtError(
-            f"{printable(tilde(service.conf_path))} exists; ami import makes a new service only"
+            f"{printable(tilde(service.conf_path))} exists; service import makes a new service only"
         )
     values = conf.load(service, missing_ok=True)
     session = aws.session(values)
@@ -329,18 +321,16 @@ def run(service: Service, instance_id: str, *, yes: bool) -> None:
             msg.warn(
                 f"the tag {printable(key)} is not copied; AWS reserves keys starting with aws:"
             )
-        text = _text(values, data, registered=registered)
+        text = _text(data, registered=registered)
         # 手順 3
-        _confirm(service, instance_id, item, name, text, raw, yes=yes)
+        _confirm(session, service, instance_id, item, name, text, raw, yes=yes)
         # 手順 4
         root = item.get("RootDeviceName")
         mappings: Sequence[Any] = (
             [{"DeviceName": root, "Ebs": {"DeleteOnTermination": True}}] if root else []
         )
         others = [device for device, _, _ in _others(item, raw)]
-        image_id, _ = bake.create(
-            ec2, service, instance_id, others, mappings, name, command="ami import"
-        )
+        image_id, _ = bake.create(ec2, service, instance_id, others, mappings, name)
         # 手順 5。締め切りは置かない。止めても、元のインスタンスは何も変わっていない
         try:
             why = bake.wait_available(ec2, image_id)

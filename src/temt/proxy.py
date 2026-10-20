@@ -5,8 +5,9 @@
 Connect でインスタンスに送り、known_hosts を用意してから、ssm なら aws-cli を exec
 し、direct なら確かめでつないだ接続と標準入出力を中継する。
 ssh は ProxyCommand に自分の環境変数を渡すので、TEMT_LOGIN=direct ssh <名前> で
-その接続だけ経路を変えられる。ロックは取らない。標準出力は ssh の通信路なので、
-何も書かない。待つあいだの知らせは標準エラー出力に書き、ssh がそのまま画面に出す。
+その接続だけ経路を変えられる。deploy と app remove が実行する ssh からは、そのコマンドが
+決めたリージョンとプロファイルを環境変数で受け取る。ロックは取らない。標準出力は ssh の
+通信路なので、何も書かない。待つあいだの知らせは標準エラー出力に書き、ssh がそのまま画面に出す。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -49,6 +50,13 @@ RULES_HINT = "check the security group ingress rules in the config file"
 # 起動して間もないインスタンスにつながらないまま締め切りを過ぎたときに添える。Host
 # ブロックの Port と、インスタンスの sshd のポートが違うことがある
 PORT_HINT = "the Port of the Host block may differ from the ports sshd listens on; try ssh -p"
+
+# temt が自分で実行する ssh（deploy と app remove）が、決めたリージョンとプロファイルを
+# proxy に渡す環境変数。proxy は --region と --profile と同じ順位で使う。temt の中だけで
+# 使う。AWS_REGION で渡さないのは、どちらかのファイルの AwsRegion がそれより先に立つから
+# である
+PASSED_REGION_ENV = "TEMT_PROXY_REGION"
+PASSED_PROFILE_ENV = "TEMT_PROXY_PROFILE"
 
 # プロセスを置き換える。テストから差し替える
 execvpe = os.execvpe
@@ -96,6 +104,33 @@ def _align_profile(values: Conf, env: dict[str, str]) -> None:
             env[name] = chosen
 
 
+def passed_env(values: Conf) -> dict[str, str]:
+    """temt が実行する ssh の環境。ProxyCommand の proxy に、決めたリージョンとプロファイルを
+    渡す。ssh は自分の環境を ProxyCommand に渡す。
+
+    values は aws.session でリージョンを決めたもの。プロファイルを選んでいなければ渡さず、
+    proxy も AWS の既定の規則に任せる。
+    """
+    env = dict(os.environ)
+    env[PASSED_REGION_ENV] = values.AwsRegion
+    profile = aws.profile(values)
+    if profile:
+        env[PASSED_PROFILE_ENV] = profile
+    else:
+        env.pop(PASSED_PROFILE_ENV, None)
+    return env
+
+
+def _take_passed() -> None:
+    """temt が実行した ssh から渡されたリージョンとプロファイルを、--region と --profile と
+    同じ順位で使う。コマンドラインで与えたものがあれば、そちらを使う。
+    """
+    if conf.OPTION_REGION is None:
+        conf.OPTION_REGION = os.environ.get(PASSED_REGION_ENV) or None
+    if conf.OPTION_PROFILE is None:
+        conf.OPTION_PROFILE = os.environ.get(PASSED_PROFILE_ENV) or None
+
+
 def _login() -> str:
     """環境変数 TEMT_LOGIN が選ぶ経路。無いか空なら ssm。他の値はエラーにする。
 
@@ -132,24 +167,20 @@ def _running(ec2: EC2Client, service: Service) -> tuple[Instance, bool]:
     return one, instances.recent(one)
 
 
-def _ssm_ready(ssm: SSMClient, service: Service, one: Instance, *, fresh: bool) -> None:
+def _ssm_ready(ssm: SSMClient, one: Instance, *, fresh: bool) -> None:
     """SSM エージェントが Online になるのを確かめる。起動して間もなければ待つ。
 
     起動して間もなければ、起動した時刻より後の Online の報告を待つ（停止してすぐ
-    再開したときに、止まる前の報告を数えない）。
+    再開したときに、止まる前の報告を数えない）。待ち切れなくても、Online でなくても、
+    何が起きたかだけを知らせ、どうするかは添えない。
     """
     instance_id = one.id
-    hint = instances.login_hint(service)
     if fresh:
         instances.wait_online(
-            ssm,
-            instance_id,
-            f"waiting for the SSM agent on {instance_id}",
-            since=one.launched,
-            hint=hint,
+            ssm, instance_id, f"waiting for the SSM agent on {instance_id}", since=one.launched
         )
     elif not instances.is_online(ssm, instance_id):
-        raise TemtError(f"the SSM agent on {instance_id} is not online; {hint}")
+        raise TemtError(f"the SSM agent on {instance_id} is not online")
 
 
 def _send_key(session: boto3.Session, one: Instance, user: str, public_key: str) -> None:
@@ -208,6 +239,7 @@ def run(service: Service, port: int, user: str | None = None) -> None:
     ssh -G のユーザーを使う。
     """
     route = _login()
+    _take_passed()
     values = conf.load(service)
     for command in COMMANDS[route]:
         proc.require(command)
@@ -222,7 +254,7 @@ def run(service: Service, port: int, user: str | None = None) -> None:
             home.use_known_hosts(service, one.id)
             relay.run(connection)
         return
-    _ssm_ready(session.client("ssm"), service, one, fresh=fresh)
+    _ssm_ready(session.client("ssm"), one, fresh=fresh)
     _send_key(session, one, user, public_key)
     argv = _ssm_argv(values, one.id, port)
     env = dict(os.environ)

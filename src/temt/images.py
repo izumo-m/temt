@@ -41,6 +41,7 @@ from temt.names import PREFIX, Service, ssh_dir
 from temt.resources import TemplateVersion
 
 if TYPE_CHECKING:
+    import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ec2.type_defs import FilterTypeDef
 
@@ -181,15 +182,27 @@ def _table_row(image: Image, refs: References | None) -> dict[str, str]:
     }
 
 
-def _ec2(service: Service | None, region: str | None) -> tuple[EC2Client, str | None]:
-    """扱う環境の EC2 と、扱う AMI のサービス名。
+def _session(service: Service | None, region: str | None) -> tuple[boto3.Session, str | None]:
+    """扱う環境の Session と、扱う AMI のサービス名。
 
     service があれば、その設定ファイルで環境が決まり、そのサービスの AMI だけを扱う。
     無ければ、--profile と --region で決まる環境の、すべての temt の AMI を扱う。
     """
     if service is None:
-        return aws.environment(region).client("ec2"), None
-    return aws.session(conf.load(service)).client("ec2"), service.svc
+        return aws.environment(region), None
+    return aws.session(conf.load(service)), service.svc
+
+
+def _confirm(session: boto3.Session, svc: str | None, question: str, *, yes: bool) -> None:
+    """消す前の確認。question は ? を除いた問い。
+
+    --svc があれば、リージョンとアカウントを添える。無ければ、環境は始めに 1 行で知らせて
+    あるので添えない。
+    """
+    if svc is None:
+        msg.confirm(f"{question}?", yes=yes)
+    else:
+        aws.confirm(session, question, yes=yes)
 
 
 def list_images(service: Service | None, region: str | None, spec: str | None) -> None:
@@ -199,7 +212,8 @@ def list_images(service: Service | None, region: str | None, spec: str | None) -
     読むのは、USED を出すときだけである。
     """
     chosen = COLUMNS.choose(spec)
-    ec2, svc = _ec2(service, region)
+    session, svc = _session(service, region)
+    ec2 = session.client("ec2")
     images = temt_images(ec2, svc)
     refs = None
     if images and "USED" in chosen:
@@ -279,7 +293,8 @@ def prune(service: Service | None, region: str | None, *, yes: bool) -> None:
     # ロックの場所は ssh ディレクトリの下にある。TEMT_SSH_DIR の誤りは、確認の後で
     # AMI を消す途中に止まらないよう、ここで先に出す
     _ = ssh_dir()
-    ec2, svc = _ec2(service, region)
+    session, svc = _session(service, region)
+    ec2 = session.client("ec2")
     # AMI を先に集め、テンプレートを後で読む。逆にすると、テンプレートを読んだ後に
     # available になり、bake が向けた AMI を、指されていないものとして挙げうる
     candidates = [one for one in temt_images(ec2, svc) if _prunable(one)]
@@ -295,7 +310,7 @@ def prune(service: Service | None, region: str | None, *, yes: bool) -> None:
     rows = [_row(one) for one in doomed]
     msg.tell("deregister:\n")
     msg.columns(rows)
-    msg.confirm(f"deregister {_count(len(doomed))} and their snapshots?", yes=yes)
+    _confirm(session, svc, f"deregister {_count(len(doomed))} and their snapshots", yes=yes)
     left: list[str] = []
     for one in doomed:
         why = _prune_one(ec2, one)
@@ -330,7 +345,8 @@ def delete(
     なら、force が無ければ何も消さずにエラーにする。force なら、その理由を警告として
     挙げてから消す。消す前に確認する。yes なら確認しない。
     """
-    ec2, svc = _ec2(service, region)
+    session, svc = _session(service, region)
+    ec2 = session.client("ec2")
     item = aws.find_image(ec2, target, own=True)
     if item is None:
         raise TemtError(f"no such AMI in this account: {table.printable(target)}")
@@ -352,5 +368,5 @@ def delete(
         msg.warn(f"{image.image_id}: {reason}")
     msg.tell("deregister:\n")
     msg.columns([_row(image)])
-    msg.confirm(f"deregister {image.image_id} and its snapshots?", yes=yes)
+    _confirm(session, svc, f"deregister {image.image_id} and its snapshots", yes=yes)
     _deregister(ec2, image)

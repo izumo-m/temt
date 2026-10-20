@@ -1,4 +1,4 @@
-"""ami import の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
+"""service import の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
 端から端まで（importing.run か cli.main）を通し、手順の順序、写す設定の直し方、書いた
 設定ファイルの中身とそれが読めること、止まったときに何も書かないことを確かめる。
@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import REGION, Clock, Stubs
+from conftest import WHERE, Clock, Stubs, identified
 from types_boto3_ec2.client import EC2Client
 
 from temt import bake, cli, conf, home, importing, lock, wait
@@ -58,7 +58,7 @@ CREATE = {
     ],
 }
 THE_IMAGE = {"ImageIds": [NEW]}
-PROMPT = f"import {SOURCE} as {NAME}? [y/N] "
+PROMPT = f"import {SOURCE} as {NAME} {WHERE}? [y/N] "
 NOT_IN_AMI = (
     "not put in the AMI; to use one, detach it from the source instance and attach it from "
     "inside the instance"
@@ -199,11 +199,10 @@ COPIED: dict[str, Any] = {
     "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 2},
 }
 
-# 書く設定ファイル。共通ファイルを読まず、SSM に登録されているので WaitForSsm は書かない
+# 書く設定ファイル。apply と同じく AwsRegion も AwsProfile も書かず、共通ファイルを読む
+# ままにする（Defaults = false も書かない）。SSM に登録されているので WaitForSsm も書かない
 WRITTEN = f"""\
-# Written by temt ami import. Edit and run apply to update.
-AwsRegion = "{REGION}"
-Defaults = false
+# Written by temt service import. Edit and run apply to update.
 
 [launch-template]
 ImageId = "{IMAGE_NAME}"
@@ -257,7 +256,7 @@ def told(text: str) -> list[str]:
 def listing(*lines: str, written: str = WRITTEN) -> str:
     """手順 3 の確認で見せるもの。lines は取り込むものの行で、続けて書く設定ファイルを見せる。"""
     return (
-        f"ami import {NAME}:\n"
+        f"service import {NAME}:\n"
         + "".join(f"  {line}\n" for line in lines)
         + "config file ~/.config/temt/dev-main.toml:\n"
         + "".join(f"  {line}\n" if line else "\n" for line in written.splitlines())
@@ -379,6 +378,7 @@ def test_it_imports_a_stopped_instance(
     確認の前に、作る AMI、写す設定、起動のたびに変わるアドレス、AMI に入れない EBS を
     見せる。元のインスタンスには何もしない。
     """
+    identified(aws_stubs)
     read(aws_stubs)
     made(aws_stubs)
 
@@ -403,27 +403,30 @@ def test_it_imports_a_stopped_instance(
 
 
 def test_the_config_file_it_writes_is_read_as_it_is(aws_stubs: Stubs, service: Service) -> None:
-    """書いた設定ファイルはそのまま読め、共通ファイルを読まない（Defaults = false）。"""
+    """書いた設定ファイルはそのまま読め、ほかのサービスと同じく共通ファイルも読む。"""
     read(aws_stubs)
     made(aws_stubs)
 
     importing.run(service, SOURCE, yes=True)
 
     aws_stubs.done()
-    # 取り込んだあとに置いた共通ファイルも読まない
-    defaults_path().write_text(
-        '[launch-template]\nInstanceType = "t3.large"\n'
-        '\n[[security-group.ingress]]\nPort = 22\nCidr = "203.0.113.10/32"\n',
-        encoding="utf-8",
-    )
     values = conf.load(service)
-    assert values.AwsRegion == REGION
+    assert values.AwsRegion is conf.UNSET
     assert values.AwsProfile is None
-    assert values.Defaults is False
+    assert values.Defaults is True
     assert values.WaitForSsm is True
     assert values.launch_template == COPIED
     assert values.security_group.ingress == []
     assert not values.role
+    # 取り込んだあとに置いた共通ファイルも読む。元に無い項目は足され、ある項目は元の値が勝つ
+    defaults_path().write_text(
+        '[launch-template]\nInstanceType = "t3.large"\nEbsOptimized = true\n'
+        '\n[[security-group.ingress]]\nPort = 22\nCidr = "203.0.113.10/32"\n',
+        encoding="utf-8",
+    )
+    values = conf.load(service)
+    assert values.launch_template == {**COPIED, "EbsOptimized": True}
+    assert len(values.security_group.ingress) == 1
 
 
 def test_copied_fixes_the_items_as_the_design_says(aws_stubs: Stubs, ec2: EC2Client) -> None:
@@ -568,7 +571,7 @@ def test_it_copies_the_cpu_credits_as_they_are(
 
 
 def test_it_starts_the_config_file_with_its_own_heading(aws_stubs: Stubs, service: Service) -> None:
-    """ami import が書いたことと、書き換えたら apply を実行することを、先頭のコメントで示す。"""
+    """service import が書いたことと、書き換えたら apply を実行することを、先頭のコメントで示す。"""
     read(aws_stubs)
     made(aws_stubs)
 
@@ -576,7 +579,7 @@ def test_it_starts_the_config_file_with_its_own_heading(aws_stubs: Stubs, servic
 
     aws_stubs.done()
     assert text_of(service).startswith(
-        "# Written by temt ami import. Edit and run apply to update.\n"
+        "# Written by temt service import. Edit and run apply to update.\n"
     )
 
 
@@ -639,13 +642,14 @@ def test_it_warns_and_does_not_wait_for_ssm_when_the_source_is_not_registered(
     aws_stubs: Stubs, service: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """SSM に登録されていなければ、確認の前に警告し、WaitForSsm = false を書く。"""
+    identified(aws_stubs)
     read(aws_stubs, is_registered=False)
     made(aws_stubs)
 
     importing.run(service, SOURCE, yes=False)
 
     aws_stubs.done()
-    written = WRITTEN.replace("Defaults = false\n", "Defaults = false\nWaitForSsm = false\n")
+    written = WRITTEN.replace("update.\n", "update.\nWaitForSsm = false\n", 1)
     assert text_of(service) == written
     assert conf.load(service).WaitForSsm is False
     captured = capsys.readouterr()
@@ -702,13 +706,13 @@ def test_it_stops_when_the_config_file_exists(
     """取り込むのは設定ファイルの無いサービスにだけである。AWS には触れない。"""
     before = text_of(configured)
 
-    assert cli.main(["temt", "ami", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
+    assert cli.main(["temt", "service", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
 
     aws_stubs.done()
     assert aws_stubs.passed == []
     assert text_of(configured) == before
     assert capsys.readouterr().err == (
-        "temt: ~/.config/temt/dev-main.toml exists; ami import makes a new service only\n"
+        "temt: ~/.config/temt/dev-main.toml exists; service import makes a new service only\n"
     )
 
 
@@ -723,7 +727,7 @@ def test_it_stops_when_the_instance_is_not_stopped(
 
     with pytest.raises(
         TemtError,
-        match=f"^{SOURCE} is {state}; stop it first \\(ami import changes nothing on it\\)$",
+        match=f"^{SOURCE} is {state}; stop it first \\(service import changes nothing on it\\)$",
     ):
         importing.run(service, SOURCE, yes=False)
 
@@ -794,10 +798,11 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    identified(aws_stubs)
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     read(aws_stubs)
 
-    assert cli.main(["temt", "ami", "import", "--svc", "dev-main", SOURCE]) == 1
+    assert cli.main(["temt", "service", "import", "--svc", "dev-main", SOURCE]) == 1
 
     # create_image は積んでいないので、AMI を作れば Stubber が失敗する
     aws_stubs.done()
@@ -870,9 +875,7 @@ def test_it_stops_when_an_ami_with_the_name_exists(aws_stubs: Stubs, service: Se
     with pytest.raises(TemtError) as caught:
         importing.run(service, SOURCE, yes=True)
 
-    assert str(caught.value) == (
-        f"an AMI named {IMAGE_NAME} already exists; wait a minute and run ami import again"
-    )
+    assert str(caught.value) == (f"an AMI named {IMAGE_NAME} already exists")
     aws_stubs.done()
     assert not service.conf_path.exists()
 
@@ -902,10 +905,12 @@ def test_it_does_not_overwrite_a_config_file_made_while_waiting(
     assert text_of(service) == mine
 
 
-def test_it_writes_the_profile_and_the_region_given_on_the_command_line(
+def test_it_does_not_write_the_profile_and_the_region_given_on_the_command_line(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """--profile で選んだプロファイルと、--region で指したリージョンを書く。"""
+    """--profile と --region は、その実行で元のインスタンスを探すのに使い、設定ファイルには
+    書かない。
+    """
     read(aws_stubs)
     made(aws_stubs)
 
@@ -913,7 +918,7 @@ def test_it_writes_the_profile_and_the_region_given_on_the_command_line(
         cli.main(
             [
                 "temt",
-                "ami",
+                "service",
                 "import",
                 "--svc",
                 "dev-main",
@@ -929,20 +934,18 @@ def test_it_writes_the_profile_and_the_region_given_on_the_command_line(
     )
 
     aws_stubs.done()
-    assert text_of(service) == WRITTEN.replace(
-        f'AwsRegion = "{REGION}"\n', 'AwsProfile = "work"\nAwsRegion = "us-west-2"\n'
-    )
-    values = conf.load(service)
-    assert values.AwsProfile == "work"
-    assert values.AwsRegion == "us-west-2"
+    assert aws_stubs.passed[0].AwsProfile == "work"
+    assert aws_stubs.passed[0].AwsRegion == "us-west-2"
+    assert text_of(service) == WRITTEN
 
 
-def test_it_writes_the_profile_and_the_region_of_the_defaults_file(
+def test_it_reads_the_defaults_file_and_writes_none_of_it(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """共通ファイルの AwsProfile と AwsRegion は書く。ほかの項目は写さない。
+    """共通ファイルの AwsProfile と AwsRegion で取り込み、どちらも書かない。
 
-    書いた設定ファイルは共通ファイルを読まないので、使っていた値を残す。
+    書いた設定ファイルも共通ファイルを読むので、取り込んだサービスはそのまま同じ
+    プロファイルとリージョンを使う。[launch-template] は、元のインスタンスの値が勝つ。
     """
     defaults_path().parent.mkdir(parents=True)
     defaults_path().write_text(
@@ -956,11 +959,13 @@ def test_it_writes_the_profile_and_the_region_of_the_defaults_file(
     importing.run(service, SOURCE, yes=True)
 
     aws_stubs.done()
+    assert aws_stubs.passed[0].AwsProfile == "work"
     assert aws_stubs.passed[0].AwsRegion == "us-east-1"
-    assert text_of(service) == WRITTEN.replace(
-        f'AwsRegion = "{REGION}"\n', 'AwsProfile = "work"\nAwsRegion = "us-east-1"\n'
-    )
-    assert conf.load(service).launch_template["InstanceType"] == "t3.small"
+    assert text_of(service) == WRITTEN
+    values = conf.load(service)
+    assert values.AwsProfile == "work"
+    assert values.AwsRegion == "us-east-1"
+    assert values.launch_template["InstanceType"] == "t3.small"
 
 
 def test_it_does_not_write_the_profile_from_the_environment(
@@ -990,13 +995,13 @@ def test_it_stops_when_another_command_holds_the_lock(aws_stubs: Stubs, service:
     assert not service.conf_path.exists()
 
 
-def test_ami_import_takes_one_instance_id() -> None:
-    request = cli.parse(["ami", "import", "--svc", "dev-main", SOURCE, "--yes"])
+def test_service_import_takes_one_instance_id() -> None:
+    request = cli.parse(["service", "import", "--svc", "dev-main", SOURCE, "--yes"])
     assert request.instance_ids == (SOURCE,)
     assert request.yes is True
     with pytest.raises(UsageError):
-        cli.parse(["ami", "import", "--svc", "dev-main"])
-    with pytest.raises(UsageError, match="ami import: the instance id "):
-        cli.parse(["ami", "import", "--svc", "dev-main", "web-server"])
+        cli.parse(["service", "import", "--svc", "dev-main"])
+    with pytest.raises(UsageError, match="service import: the instance id "):
+        cli.parse(["service", "import", "--svc", "dev-main", "web-server"])
     with pytest.raises(UsageError):
-        cli.parse(["ami", "import", "--svc", "dev-main", SOURCE, "i-0fedcba9876543210"])
+        cli.parse(["service", "import", "--svc", "dev-main", SOURCE, "i-0fedcba9876543210"])

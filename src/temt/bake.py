@@ -1,13 +1,14 @@
 """bake の本体。設計の手順 1〜9 を順に行う。
 
-インスタンスを停止して AMI にし、AMI が使えるようになってから、設定ファイルの
-ImageId、起動テンプレート、deploy の記録を新しい AMI に向け、インスタンスを終了
-する。AMI が作れないか、待つあいだに AWS の誤りが出れば、何も向けずに、その誤りと
-今の状態を知らせて終了する。
+インスタンスを停止して AMI にし、AMI が使えるようになってから、そのリージョンの
+起動テンプレートと deploy の記録を新しい AMI に向け、インスタンスを終了する。設定
+ファイルには書かない。AMI が作れないか、待つあいだに AWS の誤りが出れば、何も向けずに、
+その誤りと今の状態を知らせて終了する。
 
-app deploy と app remove の --bake も、同じロックを持ったまま、手順 3 の check、
-手順 4 の確認に並べる plan、手順 5〜9 の make を使う。ssh set-port も、同じロックを
-持ったまま、手順 3 の check_template と check_size、手順 5〜9 の make を使う。
+app deploy と app remove の --bake も、手順 1 の check_unfixed を何かする前に呼び、同じ
+ロックを持ったまま、手順 3 の check、手順 4 の確認に並べる plan、手順 5〜9 の make を使う。
+ssh set-port も同じく check_unfixed を呼び、同じロックを持ったまま、手順 3 の
+check_template と check_size、手順 5〜9 の make を使う。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -15,6 +16,7 @@ boto3 を使うので、この module は cli.run が呼ばれたときに読み
 
 from __future__ import annotations
 
+import copy
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -23,13 +25,14 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from temt import app, aws, conf, instances, lock, ltbuild, ltdata, msg, resources, terminate, wait
 from temt.aws import error_code, field
-from temt.msg import TemtError
+from temt.msg import TemtError, UsageError
 from temt.names import PREFIX
 from temt.table import aws_error, printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef, TagTypeDef
     from types_boto3_ssm.client import SSMClient
@@ -54,6 +57,21 @@ localtime = time.localtime
 def image_name(svc: str) -> str:
     """AMI の名前 temt-<svc>-<YYMMDDHHMM>。"""
     return f"{PREFIX}-{svc}-{time.strftime(NAME_TIME, localtime())}"
+
+
+def check_unfixed(service: Service, values: Conf) -> None:
+    """手順 1。ImageId を書いていれば（共通ファイルも含む）、AMI は固定なので、何かする前に
+    引数の誤りで止める。焼くには ImageId の行を消すよう告げる。
+
+    set-port、deploy --bake、app remove --bake も、同じく呼ぶ。
+    """
+    if ltbuild.IMAGE_ID not in values.launch_template:
+        return
+    key = conf.launch_template_key(ltbuild.IMAGE_ID)
+    raise UsageError(
+        f"{key} in {printable(tilde(conf.source(service, key)))} fixes the AMI; "
+        f"remove the line to bake"
+    )
 
 
 def _one(service: Service, found: list[Instance]) -> Instance:
@@ -88,30 +106,24 @@ def check_template(ec2: EC2Client, service: Service, values: Conf) -> ltbuild.Bu
     """手順 3 のうち、テンプレートが設定ファイルと揃っていることを確かめ、設定ファイルから
     組み立てた中身を返す。
 
-    diff と同じく、設定ファイルから組み立てた中身（ltbuild.build）と既定バージョンの中身の
-    全体を比べる。apply がまだ書いていない項目や、まだ無い temt のセキュリティグループが
-    あれば揃っていない。ImageId が無いか、指す AMI が使えなければ、ImageId が揃って
-    いないとして apply を促す（apply が行を消すよう案内する）。set-port も、sshd を変える
-    前に呼ぶ。
+    diff と同じく、書かれていない項目を apply と同じく埋め（ltbuild.fill）、設定ファイルから
+    組み立てた中身（ltbuild.build）と既定バージョンの中身の全体を比べる。まだ無い temt の
+    セキュリティグループがあれば揃っていない。ImageId は書かれていない（check_unfixed）ので、
+    既定バージョンのものを使い、比べない。その AMI が無いか available でなければ、apply と
+    同じく、--image-id で選ぶよう告げて止める。set-port も、sshd を変える前に呼ぶ。values には
+    埋めた値を入れない。
     """
     current = resources.default_version(resources.versions(ec2, service), service)
     data = current.get("LaunchTemplateData") or {}
-    built = None
-    try:
-        built = ltbuild.build(ec2, service, values)
-    except ltbuild.UnusableImage:
-        differ = ["ImageId"]
-    else:
-        # apply がまだ書いていない項目があれば、次の apply が書いて中身も変えうる
-        differ = [
-            *ltbuild.unfilled(values, ipv6=built.ipv6),
-            *resources.template_differ(data, built.data),
-        ]
-        differ = list(dict.fromkeys(differ))
-        if not differ and not ltdata.same(ltdata.normalize(data), ltdata.normalize(built.data)):
-            # 位置に開くと違いが見えない（同じ ResourceType の要素が 2 つあるなど）
-            differ = ["the content"]
-    if differ or built is None:
+    filled = copy.deepcopy(values)
+    known = ltbuild.fill(ec2, service, filled)
+    image = ltbuild.kept_image(ec2, service, data)
+    built = ltbuild.build(ec2, service, filled, image=image, known=known)
+    differ = resources.template_differ(data, built.data)
+    if not differ and not ltdata.same(ltdata.normalize(data), ltdata.normalize(built.data)):
+        # 位置に開くと違いが見えない（同じ ResourceType の要素が 2 つあるなど）
+        differ = ["the content"]
+    if differ:
         raise TemtError(
             f"the launch template {service.launch_template} does not match "
             f"{printable(tilde(service.conf_path))} in {', '.join(differ)}; "
@@ -154,16 +166,15 @@ def plan(service: Service, one: Instance) -> list[str]:
     return [
         *lines,
         f"make an AMI of {one.id}",
-        f"point ImageId in {printable(tilde(service.conf_path))} and the launch template at "
-        "the AMI when it is available",
+        f"point the launch template {service.launch_template} at the AMI when it is available",
         f"terminate {one.id}",
     ]
 
 
-def _confirm(service: Service, one: Instance, *, yes: bool) -> None:
+def _confirm(session: boto3.Session, service: Service, one: Instance, *, yes: bool) -> None:
     """手順 4。何をするかを挙げて確認する。"""
     msg.tell(f"bake {service.name}:\n" + "".join(f"  {line}\n" for line in plan(service, one)))
-    msg.confirm(f"bake {one.id} ({one.state})?", yes=yes)
+    aws.confirm(session, f"bake {one.id} ({one.state})", yes=yes)
 
 
 def _tags(service: Service, name: str) -> list[TagTypeDef]:
@@ -181,18 +192,16 @@ def create(
     others: Sequence[str],
     mappings: Sequence[BlockDeviceMappingTypeDef] = (),
     name: str | None = None,
-    command: str | None = None,
 ) -> tuple[str, str]:
     """手順 6。停止したインスタンスから AMI を作り、その ID と名前を返す。
 
     ルートボリューム以外の EBS（デバイス名 others）は NoDevice にして、AMI に入れない。
     create-image は、既定では付いているすべての EBS をスナップショットにして入れる。
-    mappings は足す指定で、ami import がルートボリュームの DeleteOnTermination に使う。
-    name は AMI の名前で、省けば今の時刻で決める。ami import は確認に出した名前を渡す。
-    command は、同じ名前の AMI があるときにやり直すよう告げるコマンドで、省けば bake。
+    mappings は足す指定で、service import がルートボリュームの DeleteOnTermination に使う。
+    name は AMI の名前で、省けば今の時刻で決める。service import は確認に出した名前を渡す。
+    同じ名前の AMI があれば（同じ分のうちに 2 度焼いたとき）、そのことだけを告げて止める。
     """
     name = name or image_name(service.svc)
-    again = command or "bake"
     tags = _tags(service, name)
     try:
         made = ec2.create_image(
@@ -210,9 +219,7 @@ def create(
     except ClientError as e:
         if error_code(e) != DUPLICATE_NAME:
             raise
-        raise TemtError(
-            f"an AMI named {name} already exists; wait a minute and run {again} again"
-        ) from None
+        raise TemtError(f"an AMI named {name} already exists") from None
     image_id = field(made, "ImageId")
     msg.info(f"creating the AMI {image_id} ({name}) from {instance_id}")
     return image_id, name
@@ -262,32 +269,15 @@ def wait_available(ec2: EC2Client, image_id: str) -> str | None:
 def _left(service: Service, one: Instance) -> None:
     """手順 7 で止まるときに、今の状態を知らせる。
 
-    bake はまだ設定ファイル、テンプレート、記録に何も書いていない。--bake を付けた
-    deploy と app remove は記録を書き換えているので、bake の範囲に限って知らせる。
-    続くエラーに添えるので、標準エラー出力に書く。
+    bake はまだテンプレートにも記録にも何も書いていない。--bake を付けた deploy と
+    app remove は記録を書き換えているので、bake の範囲に限って知らせる。続くエラーに
+    添えるので、標準エラー出力に書く。
     """
     msg.tell(
-        f"bake has not changed {printable(tilde(service.conf_path))}, the launch template "
-        f"or the deploy records; {one.id} is left {instances.STOPPED}\n",
+        f"bake has not changed the launch template {service.launch_template} or the deploy "
+        f"records; {one.id} is left {instances.STOPPED}\n",
         side=True,
     )
-
-
-def _point(ec2: EC2Client, service: Service, name: str, image_id: str) -> None:
-    """手順 8。設定ファイルの ImageId に AMI の名前 name を書き、テンプレートを向ける。
-
-    image_id はその AMI の ID。設定ファイルは読み直してから書く。無ければ作らずに
-    終了する。テンプレートには ImageId だけを替えたバージョンを作って既定にし、他の
-    バージョンを消す。
-    """
-    values = conf.load(service)
-    was = values.launch_template.get("ImageId")
-    key = conf.launch_template_key("ImageId")
-    if conf.update(service, values, key, name):
-        # 待つあいだに行が消されていれば、元の値は無い
-        note = "" if was is None else f" (was {printable(str(was))})"
-        msg.info(f"wrote {key} = {name} in {printable(tilde(service.conf_path))}{note}")
-    resources.point_image(ec2, service, image_id)
 
 
 def _mark(ssm: SSMClient, service: Service, one: Instance, image_id: str) -> None:
@@ -317,7 +307,7 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
         instances.wait_stopped(ec2, one.id)
     # 手順 6
     image_id, name = create(ec2, service, one.id, one.other_devices)
-    # 手順 7。ここで止まれば、設定ファイルもテンプレートも記録も元のまま
+    # 手順 7。ここで止まれば、テンプレートも記録も元のまま
     try:
         why = wait_available(ec2, image_id)
     except (ClientError, BotoCoreError):
@@ -327,8 +317,9 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
     if why is not None:
         _left(service, one)
         raise TemtError(why)
-    # 手順 8
-    _point(ec2, service, name, image_id)
+    # 手順 8。テンプレートは ImageId だけを替えたバージョンを作って既定にし、他のバージョンを
+    # 消す
+    resources.point_image(ec2, service, image_id)
     _mark(ssm, service, one, image_id)
     # 手順 9。手順 1 で読んだ状態は running のことがあるので、止めた後の状態から待つ
     halted = replace(one, state=instances.STOPPED)
@@ -343,10 +334,12 @@ def run(service: Service, *, yes: bool) -> None:
     yes なら確認しない。
     """
     values = conf.load(service)
+    # 手順 1
+    check_unfixed(service, values)
     session = aws.session(values)
     ec2 = session.client("ec2")
     with lock.hold(service):
-        # 手順 1。テンプレートが無ければ、ここで apply を促して終わる
+        # テンプレートが無ければ、ここで apply を促して終わる
         resources.require_template(ec2, service)
         found = instances.find(ec2, service)
         # 手順 2
@@ -354,5 +347,5 @@ def run(service: Service, *, yes: bool) -> None:
         # 手順 3
         check(ec2, service, values, one)
         # 手順 4
-        _confirm(service, one, yes=yes)
+        _confirm(session, service, one, yes=yes)
         make(ec2, session.client("ssm"), service, one)
