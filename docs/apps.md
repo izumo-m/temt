@@ -399,7 +399,7 @@ status` が `stale` を添える。`idle-shutdown` は、これで電源を切�
 
 temt と一緒に配る `idle-shutdown` も同じ形のアプリである。systemd のタイマー、PAM、
 sshd の設定、ログインのメッセージを入れて外す `install` と `uninstall` がある。
-入っている temt の中のディレクトリは、`temt app list` の `PATH` に出る。土台にするなら、写してから直す。
+入っている temt の中のディレクトリは、`temt app list` の `PATH` に出る。土台にするなら、コピーしてから直す。
 
     temt app list
     mkdir -p ~/src/my-apps

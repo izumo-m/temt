@@ -44,7 +44,7 @@ AWS とのやり取りを本物で通しで確かめるときは、自分の `~/
     HOME="$home" PATH="$home/bin:$PWD/.venv/bin:$PATH" bash
 
 ssh は、`~/.ssh/config` をログインユーザーのホームから読み、設定ファイルの `~` も
-そこで展開する。`$home/bin/ssh` は、仮のホームの ssh の設定の `~/` を書き換えた写しを
+そこで展開する。`$home/bin/ssh` は、仮のホームの ssh の設定の `~/` を書き換えたコピーを
 `-F` で読ませる。`deploy` などで temt が呼ぶ ssh も、これを使う。
 
 開いたシェルで試す。
