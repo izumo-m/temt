@@ -16,8 +16,9 @@ here changes nothing, so the deploy record stays as it was.
 
 1. Convert `size` to bytes. More than 9 digits is refused, since bash integers would
    overflow.
-2. `/swapfile` is missing or a regular file (not a symlink, directory, or other type):
-   `install: /swapfile is not a regular file; move it away and deploy again`.
+2. `/swapfile` is missing or a regular file (not a symlink, directory, or other type);
+   otherwise the failure says it is not a regular file and asks the user to move it
+   away and deploy again.
 3. If `/swapfile` is in use as swap and has the same size, leave the file alone; a
    redeploy and an instance launched from a baked AMI take this path. If it is not in
    use, recreate it even at the same size, since it is unknown whether it holds the swap
@@ -40,8 +41,8 @@ lines are kept. The file is rewritten only when it changes, through a temporary 
 
     /swapfile none swap sw,nofail 0 0
 
-Finally, check that `/swapfile` is in use as swap and print
-`swapfile: /swapfile <size>, active, <used> used`.
+Finally, check that `/swapfile` is in use as swap and report its size and how much of
+it is used.
 
 systemd turns the fstab swap line into the unit `swapfile.swap` under `swap.target`.
 `swap.target` is only wanted (`Wants=`) by `sysinit.target`, so unlike file systems

@@ -9,7 +9,8 @@ This file sets what to prefer when design options diverge.
 ## Assumptions
 
 - The user operates temt from Linux (Ubuntu 24.04 / 26.04). WSL2 is fine.
-- One service is defined by one config file and has one instance. To run the same
+- One service is defined by one config file and has one instance in each region.
+  Applying the same config file in another region makes a clone there. To run the same
   purpose with different settings, copy the config file and make it another service.
 
 ## Priorities

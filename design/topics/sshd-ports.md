@@ -31,50 +31,56 @@ Rejected, in the order discussed with the requester:
 ## When `Port` and the instance differ
 
 The Host block's `Port` and the instance's ports drift when the launch template's AMI
-changes (an older AMI, another service's AMI, an AMI baked before `destroy`, reselecting
-Ubuntu by deleting the `ImageId` line, an `ImageId` of the defaults file or a
-`resolve:ssm:` that moves) and when `set-port` fails. The user fixes the Host block's
-`Port` by hand (`deploy` and `app remove` follow it too), or gives `ssh -p` for one
-connection. Running `set-port` again also aligns them, but it launches and bakes.
+changes (an older AMI or another service's AMI chosen with `apply --image-id`, the AMI
+`apply` chooses when it creates the template again after `destroy`, a written
+`ImageId`, the defaults file's included, or a `resolve:ssm:` that moves), when
+`set-port` fails, and in a clone in another region whose AMI lacks the ports. The Host
+block is one per service, so its `Port` applies to every region; the user runs
+`set-port` in the clone's region too.
 
-When `direct` passes its deadline, the error of `proxy` adds the port it tried and that
-`Port` may differ from the instance (`ssh -p` tries another). How it looks through
-Session Manager (an error from session-manager-plugin) is in the usage doc.
+The user fixes the Host block's `Port` by hand (`deploy` and `app remove` follow it
+too), or gives `ssh -p` for one connection. Running `set-port` again also aligns them,
+but it launches and bakes; with `ImageId` written, `set-port` is a usage error, so the
+user fixes `Port` by hand or deletes the `ImageId` line first.
+
+When `direct` passes its deadline, the error of `proxy` names the port it tried and says
+that `Port` may differ from the instance (`ssh -p` tries another). Through Session
+Manager there is no such hint: the error comes from session-manager-plugin, and how it
+looks is in the usage doc.
 
 An imported instance whose sshd already listens on a port other than 22 gets that port
 in the Host block's `Port` by hand; nothing inside the instance changes.
 
 ## Script
 
-Run by step 4 of `set-port` as root with `sh` (dash on Ubuntu) through
-`AWS-RunShellScript`, so it is POSIX sh. Lines it reports start with `temt-sshd:`, and
-port lists are joined with `,` (`22 -> 2222,443`). It writes
+Run by step 5 of `set-port` as root with `sh` (dash on Ubuntu) through
+`AWS-RunShellScript`, so it is POSIX sh. It writes
 `/etc/ssh/sshd_config.d/temt-sshd-ports.conf`: `Port <port>` lines, in the order given.
-The whole script runs under `flock`, since a Ctrl-C on the client leaves the command
-running on the instance.
+Runs of the script on one instance never overlap, since a Ctrl-C on the client leaves
+the command running on the instance.
 
 Below, "effective ports" are the `port` values printed by `sshd -T`, and "listening
-ports" are the listeners seen by `ss -Hltnp "sport = :<port>"` whose owner is `sshd` or
-`systemd` (which holds the listener under socket activation). Listeners of other
+ports" are the TCP listeners on those ports whose owner is `sshd` or `systemd` (which
+holds the listener under socket activation). Listeners of other
 processes do not count. Port lists are compared ignoring order.
 
 1. Create `/run/sshd` if missing. It does not exist until sshd has started once, and
    `sshd -t` and `sshd -T` fail without it.
 2. If the effective ports equal the given ports and all of them are listening, report
-   `unchanged <ports>` and exit 0, without touching sshd.
+   them as unchanged and finish successfully, without touching sshd.
 3. Write the `Port` lines to a temporary file and move it into place. Create
    `sshd_config.d` if missing.
-4. Check with `sshd -t`. If rejected, exit 1; sshd is not restarted.
+4. Check with `sshd -t`. If rejected, fail; sshd is not restarted.
 5. Check that the effective ports equal the given ports. If not, another file also has
-   `Port` lines and sshd would listen on their union; exit 1, naming the files that
+   `Port` lines and sshd would listen on their union; fail, naming the files that
    have `Port` lines.
 6. Make sshd reload. First `systemctl daemon-reload`; the `ssh.socket` listeners are
    generated from `sshd_config` at this point. Then, if `ssh.socket` is enabled
    (`systemctl is-enabled`; socket activation on Ubuntu 24.04), restart `ssh.socket`,
    otherwise restart `ssh.service`. Existing connections are not cut.
-7. Check that all of the given ports are now listening (20 checks 0.5 seconds apart).
-   If not, exit 1.
-8. Report `changed <previous ports> -> <current ports>`.
+7. Check that all of the given ports are now listening, checking for about 10 seconds.
+   If not, fail.
+8. Report the change from the previous ports to the current ones.
 
 At the end, whatever the outcome, it prints the ports actually listening (`ss`). It
 neither backs up nor restores: a failure is left for the user to fix

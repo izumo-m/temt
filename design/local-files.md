@@ -26,9 +26,10 @@ reuse a cached build, which it did not), so CONTRIBUTING.md just says to run it 
 
 ```
 ~/.local/bin/
-    <name>                      service command; apply writes it if absent, destroy removes it
+    <name>                      service command; apply writes it if absent
 ~/.config/temt/                 conf directory; mode 700 when temt creates it
-    <svc>.toml                  config file of the service; apply writes it if absent
+    <svc>.toml                  config file of the service; apply writes the scaffold if
+                                absent
     defaults.toml               defaults file: values common to every service; placed by
                                 the user, never written by temt
     apps/<app ID>/              app that deploy looks up first by app ID; placed by the user
@@ -58,9 +59,18 @@ change in how or which version of `temt` is installed needs no rewrite.
 
 ```sh
 #!/bin/sh
-# Written by temt apply for the service <svc>; temt destroy removes it.
+# Written by temt apply for the service <svc>.
 exec temt --svc <svc> "$@"
 ```
+
+## What destroy leaves
+
+`destroy` deletes, of the local files, only the known_hosts files of the instances it
+terminated, as `terminate` does ([topics/ssh.md](topics/ssh.md#known_hosts)). The known_hosts
+directory, the service command, the config file, and the Host block stay and are listed
+as left for the next `apply`; a clone in another region may still use them. The lock
+stays per service; nothing is done for clones operated at the same time, where the
+later command stops on the lock.
 
 ## Location environment variables
 

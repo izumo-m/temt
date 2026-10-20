@@ -8,7 +8,9 @@ stopped one. `reboot` reboots it without terminating. Each command's steps are i
 ## Finding
 
 Find instances whose tag `temt:service` is `<svc>` and whose state is one of `pending`,
-`running`, `stopping`, `stopped`, `shutting-down`. The `Name` tag is not used to manage
+`running`, `stopping`, `stopped`, `shutting-down`. They are looked for in the region decided for the
+run ([config.md](../config.md#region)) only, so the instance of a clone in another region
+is not seen. The `Name` tag is not used to manage
 anything, so it may hold any value (an imported service may keep the source's `Name`).
 
 - `start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `set-port`, `deploy`,
@@ -64,10 +66,13 @@ do the following in order. With two or more, do it for all of them.
    pointed at it and is now a dangling link, delete `current` too. EC2 never reuses
    instance IDs, so this need not wait for termination.
 
+`destroy` terminates the same way and keeps the known_hosts directory, since a clone in
+another region may still use it ([commands/service.md](../commands/service.md#destroy)).
+
 ## Waiting
 
 Each waiting stage has a deadline, except `bake` (and `--bake`, `set-port`, and
-`ami import`) waiting for the AMI (below). (`apply`
+`service import`) waiting for the AMI (below). (`apply`
 waiting for `.config.lock` is not a stage here and has none either; see
 [cli.md](../cli.md#deadlines).)
 
@@ -128,11 +133,12 @@ for the last seen state's change. A resume that fails at once and returns to `st
 
 ## Locks
 
-`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`, `set-port`,
+`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `service import`, `set-port`,
 `deploy`, and `app remove` take an exclusive lock on the lock file `.lock` in the
 known_hosts directory before acting. If the lock cannot be taken, temt exits saying another command is running,
 without waiting. Locks are per service, so different services can be operated in
-parallel. Before taking the lock, the ssh directory and `keys/` are prepared as in
+parallel. They are not per region: operating clones of one service in two regions at
+once makes the later command stop, which is accepted. Before taking the lock, the ssh directory and `keys/` are prepared as in
 `apply` step 3 (created with mode 700, or tightened to 700) and the known_hosts directory
 is created if missing, without reporting it.
 

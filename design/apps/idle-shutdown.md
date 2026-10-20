@@ -34,7 +34,8 @@ days, or `off`.
    which apps need the tag (installing emacs does not). Rejected: `deploy` writing the
    service name into a file (it would be baked into the AMI, and another service using
    that AMI, such as one made by copying the config file, would read the original
-   name; the default policy writes only under its own `/temt-<svc>`); writing it with
+   name; the `[[role.ec2]]` the scaffold writes allows writing only under the service's
+   own `/temt-<svc>`); writing it with
    cloud-init through the user data (temt would add its own part to the user's user
    data, against the config file being the whole template, and what changes at every
    launch comes from the instance metadata anyway).
@@ -131,8 +132,8 @@ The file name tells who touched it (shown as `since <name>` in the report and
 
 ## Check and power-off
 
-The timer runs the program without arguments (root required; otherwise
-`checking needs root; try idle-shutdown -n or idle-shutdown status`). If in use, touch
+The timer runs the program without arguments (root required; otherwise it fails,
+pointing at `idle-shutdown -n` and `idle-shutdown status`). If in use, touch
 `root/in-use`. Otherwise, if the idle time since the last activity is at least the
 limit, run `systemctl poweroff`. Print the result as one line
 ([Reporting](#reporting)) to stdout (the journal), and write it to the SSM parameter.
@@ -175,8 +176,7 @@ refused. The limit is shown as `1d2h`, `1h30m`, `45s`. The source is `set until 
 `set at deploy`, or `default`.
 
 Without root, `status` (except `--login`) and `-n` skip in-use.d and say so (`status`
-prints `in-use.d:     not checked; run sudo idle-shutdown status to include it`; `-n`
-warns on stderr).
+on its in-use.d line, with a pointer to `sudo`; `-n` on stderr).
 
 `status` and `-n` are usually run over ssh, so they do not count the caller's own
 session, which is:
@@ -200,7 +200,7 @@ shown.
 `touch` names: start with a letter, digit, or `_`, followed by letters, digits, `.`,
 `_`, `-`, at most 64 characters. The file is opened without following symlinks and
 without blocking (a FIFO does not hang it); another user's file that cannot be written
-fails with `cannot touch <path>; it belongs to another user`.
+fails, saying it belongs to another user.
 
 ## Reporting
 
@@ -239,11 +239,14 @@ The write is `aws ssm put-parameter --type String --overwrite` with `AWS_PAGER` 
 The name `temt-<svc>` is made from the instance metadata tag `temt:service`, and the
 region comes from `placement/region`, through IMDSv2 without proxies (2 seconds per
 request); temt fills `MetadataOptions.InstanceMetadataTags = "enabled"` in the launch
-template, and `install` checks it. The permission is in the default inline policy
-`temt-ec2` of the instance role ([conf.md](../../docs/conf.md#role)). `aws` is looked up in `/snap/bin` (the aws-cli
-snap), `/usr/local/bin`, `/usr/bin`, not through `PATH`. Each write gets 15 seconds. A
+template, and `install` checks it. The region is the instance's own, so a clone
+writes in its region. The permission is in the `[[role.ec2]]` that the scaffold of a new
+config file writes ([conf.md](../../docs/conf.md#role)). An instance without the
+permission (no instance role, or a role that does not allow it, such as one copied by
+`role import` without it) cannot write the status and only warns, as below. `aws` is looked up
+in `/snap/bin` (the aws-cli snap), `/usr/local/bin`, `/usr/bin`, not through `PATH`. Each write gets 15 seconds. A
 missing aws-cli, unreadable metadata, or a failed write (no permission, no network) only
-warns (`cannot report the status: ...`); the check and power-off go on.
+warns that the status cannot be reported; the check and power-off go on.
 
 ## Login message
 

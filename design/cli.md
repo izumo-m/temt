@@ -2,17 +2,15 @@
 
 ## Implementation
 
-All client operations are done by the command `temt`, written as the Python 3 (3.12 or
-later) package `src/temt/`. The repository's `.venv` is for development and is made by
-`uv sync`.
+All client operations are done by the command `temt`, written in Python 3 (3.12 or
+later).
 
 - A bundled app that `deploy` names by app ID comes from the package of the `temt` that
   runs. The `temt` in `.venv` points at the repository, so what is being edited there is
   what gets sent.
 - The service command and the `ProxyCommand` call `temt` by name, not by path, so the
   `temt` on PATH at that time runs.
-- AWS is called through boto3. aws-cli is run only by `proxy` when it connects through
-  Session Manager.
+- aws-cli is needed only by `proxy` when it connects through Session Manager.
 
 ## Grammar
 
@@ -44,10 +42,11 @@ The service is selected with `--svc <svc>`:
 
 | Target | Command | Short form |
 | --- | --- | --- |
-| `service` | `service apply --svc <svc> [--yes]` | `apply` |
-| | `service diff --svc <svc>` | `diff` |
+| `service` | `service apply --svc <svc> [--image-id <AMI ID or name>] [--yes]` | `apply` |
+| | `service diff --svc <svc> [--image-id <AMI ID or name>]` | `diff` |
 | | `service destroy --svc <svc> [--yes]` | `destroy` |
 | | `service list [--svc <svc>] [--format <columns>]` | |
+| | `service import --svc <svc> <instance ID> [--yes]` | |
 | `instance` | `instance start --svc <svc> [--async]` | `start` |
 | | `instance stop --svc <svc> [--async] [--yes]` | `stop` |
 | | `instance terminate --svc <svc> [<instance ID>...] [--async] [--yes]` | `terminate` |
@@ -55,7 +54,6 @@ The service is selected with `--svc <svc>`:
 | | `instance show --svc <svc>` | `status` |
 | | `instance list [--svc <svc>] [--format <columns>]` | |
 | `ami` | `ami bake --svc <svc> [--yes]` | `bake` |
-| | `ami import --svc <svc> <instance ID> [--yes]` | |
 | | `ami list [--svc <svc>] [--format <columns>]` | |
 | | `ami prune [--svc <svc>] [--yes]` | |
 | | `ami delete [--svc <svc>] <AMI ID or name> [--force] [--yes]` | |
@@ -81,8 +79,8 @@ The service is selected with `--svc <svc>`:
 
 - Command-line options may appear anywhere after `temt`, each at most once.
 - Options that take a value (`--svc`, `--profile`, `--region`, `--format`, `--user`,
-  `--description`) take the next word as the value. The value must not be empty, except
-  that an empty `--description` clears the description.
+  `--description`, `--image-id`) take the next word as the value. The value must not be
+  empty, except that an empty `--description` clears the description.
 - Any other word starting with `-` is read as a command-line option; an unknown one is a
   usage error. No positional argument starts with `-`. The `<key>=<value>` of `app set`
   and the `<name>=<value>` of `deploy` are single positional words that start with the
@@ -122,16 +120,19 @@ operations can be typed in this form.
 
 ### Profile and region
 
-- `--profile <profile>` uses that profile for this run only, over `AwsProfile` in the
-  config file and the defaults file ([config.md](config.md#profile)). `apply` and
-  `ami import` write the value to `AwsProfile`, so later commands use the same profile. It is a usage error for
-  the commands that do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`,
-  and `app list` without `--svc`.
-- `--region <region>` is accepted by the commands that call AWS. With `--svc`, it is
-  used only while the config file has no `AwsRegion`; the first `apply` and `ami import`
-  write it there, and a `--region` with another value is then a usage error
+- `--profile <profile>` uses that profile for this run only
+  ([config.md](config.md#profile)). No command writes it to the config file. With
+  `--svc`, a `--profile` that differs from `AwsProfile` written in the service's config
+  file is a usage error, as for the region. It is a usage error for the commands that
+  do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`, and `app list`
+  without `--svc`.
+- `--region <region>` is accepted by the commands that call AWS, for this run only. No
+  command writes it to the config file. With `--svc`, a `--region` that differs from
+  `AwsRegion` written in the service's config file is a usage error
   ([config.md](config.md#region)). It is a usage error for the commands that do not
   call AWS, as `--profile` is.
+- The region and the account are shown in the confirmations
+  ([Confirmation](#confirmation)), not in the other output of commands with `--svc`.
 
 ### Messages
 
@@ -143,31 +144,30 @@ operations can be typed in this form.
   so that they stay on screen when stdout goes to a file or a pipe.
 - Also on stderr, so that stdout holds only the data: the environment line of the
   commands without `--svc` ([List tables](#list-tables)), and every message of `diff`
-  and `sg diff`, `no differences` included (empty stdout means no differences).
+  and `sg diff`, the report that there are no differences included (empty stdout means
+  no differences).
 - Lines that belong to a warning or an error go to stderr with it: the instances found
-  before a too-many or unknown-ID error, the state `bake` leaves before its error, and the newline that closes
-  `^C` on an interrupt.
+  before a too-many or unknown-ID error, the state `bake` leaves before its error, and
+  the newline that closes `^C` on an interrupt.
 - If stdout is closed at start (`>&-`), messages that would go to stdout go to stderr,
   and data for other programs (tables, `app get`, diff changes, `--help`, `--version`)
   is dropped silently, since nobody reads it. If stderr is closed at start (`2>&-`),
   what would go there is dropped; the exit code is unchanged.
-- The stdout of `install` and `uninstall` is read by temt and written to stdout, so that
-  a reader that closes early (`| head`) does not cut them off: the rest is dropped and
-  they run to the end.
+- The stdout of `install` and `uninstall` passes through temt, so a reader that closes
+  early (`| head`) does not cut them off: the rest is dropped and they run to the end.
 - Everything `proxy` writes goes to stderr, because as the ProxyCommand its stdout is
   the ssh channel.
-- Before writing to one stream, the other is flushed, so the order holds on a terminal;
-  each write is flushed, so progress shows at once through a pipe. Characters the
+- The order of stdout and stderr holds on a terminal, and progress shows at once
+  through a pipe. Characters the
   locale cannot encode are written as backslash escapes. If the reader of stdout or
   stderr closes early (`| head`, `2>&1 | head`), the rest of that stream is dropped
   silently and the command goes on. The stderr of ssh, and of `install` and `uninstall`
   through it, is not read by temt, so such a reader may still cut ssh off.
 - Progress lines carry the time; error lines carry the program name.
 - A path under the home directory is shown starting with `~/`
-  (`~/.config/temt/<svc>.toml`), in every message and in the paths of an `OSError`
-  (the requester: shorter, and the same as the ssh side; a shell expands it when
-  pasted). Rejected: the path from `/`. A path given as an argument is shown as given
-  (`no app directory: ./web`), and text from Python (an `ImportError`) as it is.
+  (`~/.config/temt/<svc>.toml`), in every message, errors from the OS included (the
+  requester: shorter, and the same as the ssh side; a shell expands it when pasted).
+  Rejected: the path from `/`. A path given as an argument is shown as given.
 - Wording is English, ASCII only.
 - Exception: text that is not temt's own wording is shown as is, Japanese included:
   values from the user's side (config file, ssh config, environment variables,
@@ -179,8 +179,8 @@ operations can be typed in this form.
   - A multi-line AWS error text is joined into one line with `; ` (after a line ending in
     `:`, with a space).
   - Not replaced: values that follow rules set by temt or AWS (AWS IDs, AMI names,
-    states, names that passed a rule), and fixed text returned by the OS or Python (the
-    reason of an `OSError`, etc.).
+    states, names that passed a rule), and fixed text from the OS (the reason of a file
+    error, etc.).
   - Exception: `manifest.toml` values and app option values. In messages and in
     `app show`, only the unprintable characters that disturb the terminal are replaced
     ([commands/app.md](commands/app.md#app-options)). In a list table, all unprintable
@@ -194,12 +194,11 @@ operations can be typed in this form.
 
 ### Bytes that cannot be read
 
-Python reads bytes that its encoding cannot decode (in arguments, environment variables
-and file names) as lone surrogates. temt treats them the same way everywhere:
+Bytes that the locale's encoding cannot decode (in arguments, environment variables and
+file names) are treated the same way everywhere:
 
 - Shown (messages, tables, `app get`): replaced by `?`, like other unprintable
-  characters. An `OSError` is shown as its reason and its paths, not as Python's text,
-  which writes paths in `repr` form (`\udcff`).
+  characters, in the paths of errors from the OS too.
 - Output of an external command that temt reads (`ssh-keygen`, `ssh -G`): decoded as
   file names are, and shown with `?`.
 - Files temt reads (config files, `manifest.toml`, the ssh config): must be UTF-8;
@@ -212,8 +211,8 @@ and file names) as lone surrogates. temt treats them the same way everywhere:
   never hold them.
   A file path given as an argument may hold them.
 - A `[y/N]` answer that cannot be read is not `y`.
-- temt expects a UTF-8 locale (C included, where Python uses UTF-8). Under a locale with
-  another encoding, it does not crash, but text it writes to files is UTF-8.
+- temt expects a UTF-8 locale (C included, which temt reads as UTF-8). Under a locale
+  with another encoding, it does not crash, but text it writes to files is UTF-8.
 
 ### Exit codes
 
@@ -233,35 +232,37 @@ missing, it exits naming it.
   `TEMT_LOGIN` is `ssm`.
 - `ssh`: `deploy` and `app remove`.
 
-If boto3 cannot be imported, every command exits saying so, except those that do not
-call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and `app list` without
-`--svc`).
+If the AWS SDK for Python (boto3) is not installed, every command exits saying so,
+except those that do not call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and
+`app list` without `--svc`).
 
 ### Deadlines
 
 Waiting for AWS or the instance to reach a state is done in stages, each with a deadline
-([topics/instance.md](topics/instance.md#waiting)), except `bake` (and `deploy`/
-`app remove` with `--bake`, `set-port`, and `ami import`) waiting for the AMI. When a deadline passes, the command
-exits saying which stage did not finish. Each stage reached is reported once.
+([topics/instance.md](topics/instance.md#waiting)), except `bake` (and `deploy` and
+`app remove` with `--bake`, `set-port`, and `service import`) waiting for the AMI. When
+a deadline passes, the command exits saying which stage did not finish. Each stage
+reached is reported once.
 
-Other waits have no deadline of temt's own: `apply` waiting for `.config.lock` (held
-only while one file is rewritten), the ssh sessions of `deploy` and `app remove` (while
-`install` or `uninstall` runs), and name resolution in the global IP address lookup.
-`apply`'s wait for a new instance profile uses the boto3 waiter's own limit, and its
-failure surfaces as the botocore error.
+Other waits have no deadline of temt's own: `apply` waiting for the lock of the ssh
+config (held only while one file is rewritten), the ssh sessions of `deploy` and
+`app remove` (while `install` or `uninstall` runs), and name resolution in the global
+IP address lookup. `apply`'s wait for a new instance profile has the limit of the AWS SDK,
+and its failure is shown as the SDK's error.
 
 ### Missing config file
 
-- A command run with `--svc` other than `apply`, `destroy`, and `ami import` exits,
-  prompting to run `apply`, if the config file is missing. `apply` starts from the
-  defaults.
-- `ami import` requires the config file to be missing: it imports only into a service
-  that has none, and with one it exits doing nothing
-  ([commands/ami.md](commands/ami.md#ami-import)).
-- `destroy` does not prompt `apply`, since it would delete what `apply` makes. It needs
-  the config file for the region and profile (`AwsRegion`, `AwsProfile`); if the file is
-  missing, it exits
-  with `no config file: <path>; destroy needs AwsRegion from it`.
+- A command run with `--svc` other than `apply`, `destroy`, and `service import` exits,
+  prompting to run `apply`, if the config file is missing.
+- `apply` asks whether to create the service and writes the scaffold
+  ([commands/service.md](commands/service.md#scaffold)).
+- `service import` requires the config file to be missing: it imports only into a
+  service that has none, and with one it exits doing nothing
+  ([commands/service.md](commands/service.md#service-import)).
+- `destroy` exits saying only that the config file is missing; it does not prompt
+  `apply`, since it would delete what `apply` makes. A mistyped service name stops
+  there. To clean up a service whose config file was deleted, the user creates an empty
+  one and runs `destroy`.
 
 ### Not applied
 
@@ -270,7 +271,7 @@ failure surfaces as the botocore error.
   their first operation on AWS, and if it is missing, exit prompting to run `apply`.
   `start` checks the template also when it resumes a stopped instance.
 - These do not check: `apply`, `diff`, `destroy`, `stop`, `terminate`, `reboot`,
-  `status`, `instance list`, `ami import`, `ami list`, `ami prune`, `ami delete`,
+  `status`, `instance list`, `service import`, `ami list`, `ami prune`, `ami delete`,
   `role import`, `role delete`, `sg diff`, `sg show`, `proxy`.
   - `status` does not stop; it shows that the service is not applied.
   - `sg show` shows that the next `apply` will create the security group if it is
@@ -316,22 +317,36 @@ as absent for most commands. The rules are in
 ### Confirmation
 
 - Before changing anything, these list the targets and ask for confirmation with
-  `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`,
+  `[y/N]`: `apply`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `service import`,
   `ami prune`, `ami delete`, `role import`, `role delete`, `set-port`, and `deploy` and
   `app remove` with `--bake`.
-- `apply` ends without asking if there are no differences.
+- `apply` ends without asking if there are no differences. For a new service it also
+  asks first whether to create it ([commands/service.md](commands/service.md#apply)).
+- The confirmations of these commands with `--svc` name the region and the account the
+  command acts in, so a run against an unintended region or account (a forgotten
+  `--profile`, ...) is noticed there: `apply` (the question whether to create the
+  service included), `destroy`, `stop`, `terminate`, `reboot`, `bake`, `set-port`,
+  `deploy --bake`, `app remove --bake`, `service import`, `role delete`, `ami prune`,
+  and `ami delete`. The account is looked up for this, one more AWS call; with `--yes` nothing is asked, so it
+  is not looked up. `ami prune`
+  and `ami delete` without `--svc` already show the environment line
+  ([List tables](#list-tables)). `role import` rewrites only the local config file, so
+  its confirmation names neither. The other commands with `--svc` do not show the
+  region (the requester: in a destructive operation's confirmation, knowing which
+  region's resources are affected is enough).
 - The list of targets goes to stdout and the prompt to stderr; `stop`, `terminate`, and
-  `reboot` print no separate list and name their targets in the prompt itself
-  (`terminate i-... (running)? [y/N]`). The answer is read from stdin. Any answer other than `y`
+  `reboot` print no separate list and name their targets (instance IDs and states) in
+  the prompt itself. The answer is read from stdin. Any answer other than `y`
   or `Y` ends with exit code 1 without doing anything.
 - `--yes` skips the confirmation. If stdin is not a terminal and `--yes` is not given,
   the command exits saying `--yes` is needed.
 
 ### Locks
 
-`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `ami import`, `set-port`,
-`deploy`, and `app remove` take the per-service lock before acting. `ami prune` takes the lock of an AMI's service each
-time it deletes one AMI ([topics/instance.md](topics/instance.md#locks)).
+`start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `service import`, `set-port`,
+`deploy`, and `app remove` take the per-service lock before acting. `ami prune` takes
+the lock of an AMI's service each time it deletes one AMI
+([topics/instance.md](topics/instance.md#locks)).
 
 ## List tables
 

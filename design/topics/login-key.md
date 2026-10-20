@@ -5,7 +5,7 @@ temt registers no EC2 key pair and does not write `KeyName`. Each time ssh conne
 Connect (`send-ssh-public-key`), right before handing the connection to ssh
 ([commands/ssh.md](../commands/ssh.md#connecting)). The instance accepts that key for
 60 seconds, and ssh authenticates with it right after. A `KeyName` the user writes in
-`[launch-template]` (`ami import` copies the source's) goes into the launch template as
+`[launch-template]` (`service import` copies the source's) goes into the launch template as
 it is ([launch-template.md](launch-template.md#filled-when-missing)); the key pair's key
 then logs in alongside the one `proxy` sends.
 
@@ -41,18 +41,18 @@ The ssh config alone decides it; the config file has no key setting.
   ([ssh.md](ssh.md#the-ssh-directorys-config)). To use another key, edit
   `IdentityFile` there.
 - `proxy` asks `ssh -G <name>` for `user` and the `identityfile` lines, in ssh's order.
-  With `--user`, it asks `ssh -G -l <user> <name>`, so that `Match user` blocks are read
+  With `--user`, it passes that user to `ssh -G`, so that `Match user` blocks are read
   as ssh reads them.
   `ssh -G` prints them unexpanded, so `proxy` expands a leading `~`, `%d` (home), `%u`
-  (local user), `%r` (remote user), and `%%`; any other token, or `${NAME}`, stops with
-  `temt cannot expand IdentityFile <value>; write it as a path`.
+  (local user), `%r` (remote user), and `%%`; any other token, or `${NAME}`, stops,
+  asking for the `IdentityFile` to be written as a path.
 - It sends the `.pub` next to the first key that has one, as `<type> <body>`; the
   comment is not sent. A passphrase-protected key works if its `.pub` is there. An
   `IdentityFile` that is itself a `.pub` (the private key held by ssh-agent or a
-  hardware key) is sent as it is. With
-  none: `no public key for 'ssh <name>': no .pub next to its IdentityFile (<values>);
-  put the .pub next to the key, or delete IdentityFile from the Host <name> block and
-  run 'temt apply' to use the default key`. This is decided before calling AWS.
+  hardware key) is sent as it is. With none, `proxy` stops, naming the `IdentityFile`
+  values and telling the user to put the `.pub` next to the key, or to delete
+  `IdentityFile` from the Host block and run `apply` to use the default key. This is
+  decided before calling AWS.
 - The OS user sent with the key, and the one `%r` expands to, is the `--user` value
   (`%r` from `ProxyCommand`), else `ssh -G`'s `user`. A user given on ssh's command line
   must follow the user-name rule ([commands/app.md](../commands/app.md#users)); one
@@ -75,12 +75,12 @@ In step 6 of [`apply`](../commands/service.md#apply), if the block (after its ed
 uses the default key, that is, its first `IdentityFile` line is the default value:
 
 - Neither the key nor its `.pub` exists: create both with `ssh-keygen -t ed25519`
-  before writing the block. `diff` shows `+ key ~/.ssh/temt/keys/temt  ssh-keygen -t
-  ed25519`. `ssh-keygen` is needed only then.
-- Only the key exists: stop with `<path>.pub does not exist; make it with 'ssh-keygen -y
-  -f <path> > <path>.pub'`.
-- Only the `.pub` exists: stop with `<path>.pub exists without <path>; remove it to
-  create a new key`.
+  before writing the block. `diff` shows the key to be created. `ssh-keygen` is needed
+  only then.
+- Only the key exists: stop, telling the user to make the `.pub` from the key with
+  `ssh-keygen -y`.
+- Only the `.pub` exists: stop, telling the user to remove it so that a new key is
+  created.
 
 Both stops happen at detection, before confirmation. A key the user put in
 `IdentityFile` is neither created nor checked by `apply`.

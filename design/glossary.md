@@ -9,11 +9,13 @@ avoid the ones marked "not".
 
 | English | Japanese | Notes |
 | --- | --- | --- |
-| service | サービス | One purpose, one config file, one instance |
+| service | サービス | One purpose, one config file, one instance in each region |
+| clone | クローン | The same service applied in another region |
 | service name, `<svc>` | サービス名、`<svc>` | |
 | `<name>` (`temt-<svc>`) | 名前、`<名前>` | Base of every resource name |
 | config file (`<svc>.toml`) | 設定ファイル | |
 | defaults file (`defaults.toml`) | 共通ファイル | Values common to every service |
+| scaffold | 雛形 | The config file `apply` writes, after asking, when none exists |
 | conf directory | `TEMT_CONF_DIR` のディレクトリ、設定ファイルとアプリを置くディレクトリ | `~/.config/temt` by default |
 | ssh directory | ssh ディレクトリ、`TEMT_SSH_DIR` のディレクトリ | `~/.ssh/temt` by default |
 | service command (`~/.local/bin/<name>`) | サービスのコマンド | |
@@ -63,8 +65,8 @@ avoid the ones marked "not".
 | instance role | インスタンスロール | The IAM role in an instance profile. AWS calls it the IAM role for Amazon EC2. Not ロール alone |
 | IAM role (in general) | IAM ロール | `role import` takes one by name or ARN |
 | instance profile | インスタンスプロファイル | Not プロファイル alone, which is the AWS profile |
-| import (`ami import`) | 取り込む | Make an AMI and a config file from an existing stopped instance |
-| source instance (of `ami import`) | 元のインスタンス | |
+| import (`service import`) | 取り込む | Make an AMI and a config file from an existing stopped instance |
+| source instance (of `service import`) | 元のインスタンス | |
 | start (launch or resume) | 起動する、再開する | 再開 is starting a stopped instance |
 | stop | 停止する、止める | |
 | terminate | 終了する | |
@@ -80,6 +82,7 @@ avoid the ones marked "not".
 | EC2 Instance Connect | EC2 Instance Connect | |
 | bake | 焼く、AMI にする | |
 | tag | タグ | AWS resource tag only |
+| region tag (`temt:region:<region>` on the instance role) | リージョンのタグ | |
 | git tag | git のタグ | Never just タグ |
 | direct connection (`TEMT_LOGIN=direct`) | 直接接続 | |
 | login message (motd) | ログインのメッセージ | |
@@ -112,5 +115,5 @@ avoid the ones marked "not".
 | --- | --- | --- |
 | table (`[x]`) | テーブル | Not セクション |
 | array of tables (`[[x]]`) | テーブルの配列 | Not セクション |
-| `<policy name>` (`[[role.policy.<policy name>]]`) | `<ポリシー名>` | |
+| `<policy name>` (`[[role.<policy name>]]`) | `<ポリシー名>` | |
 | key (of the config file), value | 項目、値 | |

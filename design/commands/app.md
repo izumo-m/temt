@@ -121,15 +121,15 @@ values, so they are not columns.
 
 Prints the `deploy` record, the declared options (below), and the list of keys
 other than `deploy` directly under the app's hierarchy (key, last modified time), in
-this order. Values are not shown. Without a record, it says the app is not deployed
-(`app <app ID>: not deployed`). Keys that break the key rule are listed too. The
+this order. Values are not shown. Without a record, it says the app is not deployed.
+Keys that break the key rule are listed too. The
 record's `options` and `baked_options` are shown as `<name>=<value>` separated by
 spaces, each value quoted for the shell when needed so it can be typed on a command line
-as is; a malformed field is shown as `(unreadable)`.
+as is; a malformed field is shown as unreadable.
 
 If there is an app that `deploy` can use by this app ID, it lists the options its
 `manifest.toml` declares (name, default, description). Defaults are quoted like values;
-an option without a default shows `(required)`. If the `manifest.toml` cannot be read, it
+an option without a default is shown as required. If the `manifest.toml` cannot be read, it
 warns.
 
 The record and the keys can be written from the instance, so unprintable characters such
@@ -179,9 +179,9 @@ value does not exist, it says so and does not treat it as an error.
 [--bake] [--yes]` (short form `deploy`)
 
 Installs an app on the running instance. It does not touch the role's policies: the
-permissions an app uses are written in `[[role.policy.<policy name>]]` of the config file
+permissions an app uses are written in `[[role.<policy name>]]` of the config file
 and attached by `apply` ([conf.md](../../docs/conf.md#role),
-[resources.md](../resources.md#instance-role)). temt does not create the AWS resources an app
+[resources.md](../resources.md#instance-profile-and-instance-role)). temt does not create the AWS resources an app
 uses, such as S3 buckets, either. An app is one directory:
 
 ```
@@ -201,16 +201,15 @@ uses, such as S3 buckets, either. An app is one directory:
 The instance user that runs `install` is the `--user` value, else `user` in
 `manifest.toml`, else root. `uninstall` runs as the recorded `user` (see
 [`app remove`](#app-remove) step 1). While a record is left, including one with `removed`,
-`deploy` refuses another user (`<app ID> was deployed as <user> (<record>), not <user>;
-...`). Otherwise, if an unbaked version deployed as another user were lost, the instance
+`deploy` refuses another user, naming the recorded one. Otherwise, if an unbaked version deployed as another user were lost, the instance
 would come back from the AMI with the baked version, and `app remove` would run its
 `uninstall` as the wrong user. To change the user, remove the app first, and bake if it
 is in the AMI. A user name starts with a lowercase letter or `_`,
 continues with lowercase letters, digits, `_`, and `-`, and has at most 32 characters; a
 name that breaks the rule is a usage error or an error in `manifest.toml`. A non-root user
-runs the script through `sudo -n -H -u <user>`, so `HOME` is that user's home and `PATH`
-is sudo's `secure_path`; such an `install` runs `sudo` itself for operations that need
-root. For root, the script runs directly inside the ssh session's `sudo -n`.
+runs the script through `sudo` as that user with its home, so `HOME` is that user's home
+and `PATH` is sudo's `secure_path`; such an `install` runs `sudo` itself for operations
+that need root. Root runs the script under `sudo` without a password prompt.
 
 ### Writing install and uninstall
 
@@ -230,13 +229,17 @@ taking the name. For an app ID, it looks for `apps/<app ID>/` in the conf direct
 ([local-files.md](../local-files.md#files-in-the-users-home)) and otherwise uses the
 bundled app. A user can override a bundled app by placing an app with the same ID. If
 `apps/<app ID>` is not a directory (a file or a broken link) and a bundled app exists, it
-warns and uses the bundled app. If neither exists, it lists the usable app IDs, adds a
-close name as `did you mean` if there is one, and exits. The app ID rule is that of
+warns and uses the bundled app. If neither exists, it lists the usable app IDs, suggests
+a close name if there is one, and exits. The app ID rule is that of
 [App IDs and keys](#app-ids-and-keys).
 
 ### Steps
 
-1. Locate the app directory and report where it came from; for a link, add its target.
+1. With `--bake`, if the config file (with the defaults file) writes `ImageId`, the AMI
+   is fixed, so stop with a usage error before doing anything else, as
+   [`bake`](ami.md#bake) does.
+
+   Locate the app directory and report where it came from; for a link, add its target.
    Read `manifest.toml`, and check that `install` exists and `temt-options.env` does not.
    Check the app options given on the command line against the declarations
    ([App options](#app-options)). Up to here, nothing touches AWS or the instance.
@@ -247,44 +250,42 @@ close name as `did you mean` if there is one, and exits. The app ID rule is that
    resuming with `start`; with two or more, list them and stop as `start` does. It never
    launches or resumes an instance itself.
 
-   Connect with `ssh -T <name>` and read `/var/lib/cloud/data/instance-id` with `sudo -n`
-   to confirm that it reached the instance found. If it cannot connect, `sudo` is not
-   usable, or it reached another instance, exit without changing anything. This is
-   needed because the `proxy` in ssh's `ProxyCommand` does not receive `--profile`; it
-   looks up the instance with `AwsProfile` of the config file, or the profile chosen by
-   AWS's default rules ([commands/ssh.md](ssh.md), [config.md](../config.md#profile)).
-   The error adds no hint about `--profile`: the user docs say it does not reach ssh,
-   and a hint could not tell `AWS_PROFILE` from `AwsProfile` for the user. The
-   `ProxyCommand`'s waiting notices and ssh's errors go to stderr as they are.
+   Connect with `ssh -T <name>`, passing the region and profile decided for this run to
+   `proxy` ([ssh.md](ssh.md#region-and-profile)), and read the instance ID from inside
+   the instance with `sudo` to confirm that it reached the instance found. If it cannot
+   connect, `sudo` is not usable, or it reached another instance, exit without changing
+   anything. ssh may not call `proxy` at all: the user's ssh config can route the
+   connection elsewhere, and a `ControlMaster` connection of the user is reused, even
+   one opened to another region's instance
+   ([topics/ssh.md](../topics/ssh.md#regions)). The `ProxyCommand`'s waiting notices
+   and ssh's errors go to stderr as they are.
 
    Read the previous record. If it has a `user` other than the one that would run
    `install`, exit without changing anything ([Users](#users)).
 
-   If the user that runs `install` is not root, check with `id -u` that the user exists on
-   the instance; if not, exit without changing anything.
+   If the user that runs `install` is not root, check that the user exists on the
+   instance; if not, exit without changing anything.
 
    Decide the option values to use, and report each on one
-   line with its source. Check that the record fits in an SSM parameter, and pack the
-   directory into a tar.gz. If the record cannot be read from SSM (no permission, etc.),
+   line with its source. Check that the record fits in an SSM parameter, and prepare the
+   directory for sending. If the record cannot be read from SSM (no permission, etc.),
    exit without changing anything, even with `--reset`.
 
-   With `--bake`, check as in `bake` step 3 ([ami.md](ami.md#bake)) that the template
-   matches the config file and that the instance's root volume is not larger than
-   the root volume element's `Ebs.VolumeSize`; then list the install and what `bake`
-   will do, and ask for confirmation.
-3. Connect with `ssh -T <name>` and stream the tar.gz to stdin. On the instance, with
-   `sudo`, extract it into a temporary directory under `/opt/temt/apps/` and swap it with
-   `/opt/temt/apps/<app ID>/`. On failure partway, the temporary directory is removed and
-   the old directory remains. Temporary directories left by an earlier interrupted run
-   are removed first. Then connect again and run `bash /opt/temt/apps/<app ID>/install`
-   as the user, with `/` as the current directory. ssh's output goes to stdout and
-   stderr as it is.
+   With `--bake`, run the checks of `bake` step 3 ([ami.md](ami.md#bake)); then list
+   the install and what `bake` will do, and ask for confirmation, with the region and
+   account ([cli.md](../cli.md#confirmation)).
+3. Send the directory over ssh and, as root, replace `/opt/temt/apps/<app ID>/` with it
+   in one step: on failure partway the old directory remains, and leftovers of an
+   earlier interrupted run are cleaned up. Then run `bash /opt/temt/apps/<app ID>/install`
+   over ssh as the user, with `/` as the current directory. ssh's output goes to stdout
+   and stderr as it is.
 4. Write the record `/<name>/<app ID>/deploy`: `user` is the user that ran `install`,
    `deployed` is when `install` finished by the client's clock, in UTC, `instance` is the ID of
    the instance, and `options` is the values decided in step 2 whose source is `given` or
    `kept`. Carry over `baked_version`, `baked_image`, and `baked_options` from the
    previous record.
-5. With `--bake`, do `bake` steps 5-9 ([ami.md](ami.md#bake)) holding the same lock.
+5. With `--bake`, bake as `bake` does after its confirmation ([ami.md](ami.md#bake)),
+   holding the same lock; only that region's launch template gets the new AMI.
    Without it, report that the app will not be in the next instance until baked.
 
 The whole directory is sent, including hidden files. If the app directory itself is a
@@ -334,8 +335,8 @@ The value used is decided per declared option in this order:
    no value here makes `deploy` exit. `<name>=` for an option without a default makes
    step 1 exit.
 
-The record's `options` holds only the values decided by 1 and 2. The report line is
-`option <name>=<value> (<source>)`, with the value quoted for the shell when needed.
+The record's `options` holds only the values decided by 1 and 2. The report line names
+the option, the value (quoted for the shell when needed), and the source.
 Depending on the previous record:
 
 | Previous record | Behavior |
@@ -354,11 +355,11 @@ bake (with `options` also copied to `baked_options`); if either exceeds 4096 byt
 exits without changing anything.
 
 The values used, for all declared options, are passed to `install` in the file
-`temt-options.env`, added directly under the app directory. It goes into the tar.gz owned
-by root with mode 644, so the values never pass through a command line. One line per
+`temt-options.env`, added directly under the app directory. It is sent owned by root
+with mode 644, so the values never pass through a command line. One line per
 option, in declaration order, of the form `TEMT_OPTION_<NAME>=<value>`: the variable name
-is the option name upper-cased with `-` turned into `_`. Values are quoted with Python's
-`shlex.quote`, so sourcing the file with bash's `.` expands nothing. The first line is a
+is the option name upper-cased with `-` turned into `_`. Values are quoted for the shell,
+so sourcing the file with bash's `.` expands nothing. The first line is a
 comment with the app ID and version. Apps that declare no options do not get the file.
 It is swapped together with the directory and stays in the AMI when baked, so
 `uninstall` can read the same values.
@@ -381,10 +382,13 @@ anyone on the instance, so options must not carry secrets.
 `app remove --svc <svc> <app ID> [--user <user>] [--bake] [--yes]`
 
 Removes an app from the running instance. The instance requirements are those of
-[`deploy`](#deploy) step 2. The `[[role.policy.<policy name>]]` written for the app is
+[`deploy`](#deploy) step 2. The `[[role.<policy name>]]` written for the app is
 removed from the config file and `apply`ed by the user after removing the app.
 
-1. Confirm, as in `deploy` step 2, that ssh reaches the instance found. Check that
+1. With `--bake`, if the config file (with the defaults file) writes `ImageId`, stop
+   with a usage error before doing anything else, as in `deploy` step 1.
+
+   Confirm, as in `deploy` step 2, that ssh reaches the instance found. Check that
    `/opt/temt/apps/<app ID>/` and its `uninstall` exist on the instance. If `uninstall`
    does not exist, exit without changing anything. If neither the directory nor the
    record exists, take the app ID as a typo and exit.
@@ -396,8 +400,9 @@ removed from the config file and `apply`ed by the user after removing the app.
    is not root, check that the user exists on the instance as in `deploy` step 2. If the
    directory does not exist, warn; no user is decided.
 
-   In both cases, with `--bake`, run the check of `bake` step 3 and ask for confirmation
-   as in `deploy` step 2, listing the user when there is one. Then go to step 2, or to
+   In both cases, with `--bake`, run the checks of `bake` step 3 and ask for
+   confirmation as in `deploy` step 2 (with the region and account), listing the user
+   when there is one. Then go to step 2, or to
    step 3 when the directory does not exist.
 2. Run `bash /opt/temt/apps/<app ID>/uninstall` as that user with `/` as the current
    directory, and on success delete the directory as root. On failure, leave the record
@@ -410,17 +415,27 @@ removed from the config file and `apply`ed by the user after removing the app.
    and `baked_options` (what comes back if the removal is lost; an unreadable
    `baked_options` is copied as written). Otherwise delete it. If the rewritten record
    would not fit in an SSM parameter, warn and delete it, since a retry could never
-   write it. When the directory is absent, the warning is
-   `<directory> is not on <instance-id>; updating only the record`. The status is
+   write it. When the directory is absent, the warning of step 1 says that only the
+   record is updated. The status is
    deleted because otherwise `status` keeps showing the old state of the removed app.
    The record goes last so that, if anything fails partway, the remaining record lets a
    retry continue from where it stopped. Other values of the app and the role's policies
    are not deleted.
-4. With `--bake`, do `bake` steps 5-9 ([ami.md](ami.md#bake)) holding the same lock.
-   Without it, report
-   `removed <app ID> from <instance-id>; run 'temt bake --svc <svc>' to remove it from
-   the next instance too`. This is printed even when the record was deleted because the
+4. With `--bake`, bake as in `deploy` step 5. Without it, report that the app was
+   removed from that instance and that baking removes it from the next instance too.
+   This is reported even when the record was deleted because the
    app is not in the template's AMI, where baking changes nothing for it.
+
+## Clones in other regions
+
+SSM parameters are per region, so a clone in another region
+([config.md](../config.md#clones)) has none of the deploy records or app values of the
+region it was copied from. temt does nothing about it (the requester). In the clone's
+region, `deploy` and `app remove` work as they are (`app remove` removes an app whose
+directory exists even without a record); `app list` and `app show` do not show the apps
+baked into the copied AMI until they are deployed there again; app values are set again
+with `app set`. The usage doc gives these as steps of making a clone. Records are
+matched to the AMI by its ID, which differs in each region, not by its name.
 
 ## Bundled apps
 

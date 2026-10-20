@@ -18,15 +18,13 @@ Directories are mode 700, files mode 600.
 
 On every connection, `proxy` prepares the ssh directory, `keys/`, and the known_hosts
 directory as the commands that take the lock do ([instance.md](instance.md#locks)),
-opens the `<instance-id>` file in append mode, sets it to mode 600, closes it, and
-repoints `current` to it.
+makes sure the `<instance-id>` file exists with mode 600, and repoints `current` to it.
 
-- Append mode creates an empty file if missing and leaves an existing file's content
-  untouched, so a host key just written by a concurrent connection is not erased.
-- `current` is replaced by creating a symlink under a temporary name (containing the
-  process ID, so concurrent connections do not collide) and renaming it over `current`.
-  Deleting and recreating would let an ssh reading known_hosts in between treat the host
-  as unknown.
+- A missing file is created empty; an existing file's content is never touched, so a
+  host key just written by a concurrent connection is not erased.
+- `current` is switched in one step, never deleted and recreated: an ssh reading
+  known_hosts in between would treat the host as unknown. Concurrent connections do not
+  collide while switching it.
 - ssh reads known_hosts after starting the ProxyCommand, so the repointing is in time.
 
 Host keys are not fetched in advance. The file for an `instance-id` seen for the first
@@ -37,6 +35,33 @@ When the port it connects to (`Port`, or the `-p` value) is not 22, ssh writes t
 known_hosts host name as `[<name>]:<port>`. The file is per instance, so this is
 harmless, but if the port of a running instance changes, the next connection asks to
 confirm the host key again.
+
+`terminate` and `destroy` delete the file of each instance they terminate
+([instance.md](instance.md#terminating)). The directory stays: `destroy` leaves it for
+the next `apply`, since a clone in another region may still use it.
+
+## Regions
+
+The ssh directory has one `Host <name>` block per service, whichever regions the service
+has clones in. ssh, like `start` and the others, reaches the instance in the region
+decided at that time ([commands/ssh.md](../commands/ssh.md#region-and-profile)). To be
+connected to two regions at once, the user sets up two services. known_hosts files are
+per instance ID, so the clones' host keys do not mix.
+
+- `current` is one per service. Connecting to two regions' instances at once may point
+  it at the other one's file while ssh reads it. ssh then stops on the host key
+  mismatch, or, for an empty file with `StrictHostKeyChecking accept-new`, writes the
+  key into the other instance's file, and the next connection to that instance reports
+  a changed host key. temt does nothing about it: ssh stops rather than connecting
+  wrongly.
+- A `ControlMaster` connection of the user is reused after switching the region: ssh
+  does not run `proxy` and silently reaches the previous instance. temt does nothing
+  and does not write `ControlPath none` into the Host block; the usage doc mentions it.
+- VS Code's Remote-SSH runs ssh with the environment VS Code was started with, so to
+  reach another region it is started again with `AWS_REGION` set; the usage doc
+  mentions it.
+- The Host block's `Port` is one for every region; the user runs `set-port` in a
+  clone's region too ([sshd-ports.md](sshd-ports.md#when-port-and-the-instance-differ)).
 
 ## The ssh directory's config
 
@@ -137,10 +162,9 @@ the ssh destination and the AWS resources get overwritten by whichever `apply` r
   one definition, and `apply` proceeds.
 - If the previous location cannot be checked, `apply` exits.
 
-The message is `<name> is set up from another config directory: <path> exists`,
-followed by `, and so does <current path>; remove one of them and run apply again` when
-the current location also has the config file, and otherwise by
-`; run apply with TEMT_CONF_DIR=<previous dir>, or move that file to <current dir>`.
+The error names the config file found there. When the current location also has the
+config file, it tells the user to remove one of them; otherwise, to run `apply` with
+`TEMT_CONF_DIR` set to the previous location, or to move that file to the current one.
 
 ## The Include in ~/.ssh/config
 
@@ -158,9 +182,8 @@ rewrites it when the ssh directory changes.
 - If the marker is followed by an `Include`, that line is replaced. If it is followed
   by something else, that line stays and the `Include` is inserted between them.
 - When replacing, if the file the old line pointed to still exists and has `Host` lines,
-  ssh stops reading it, so `apply` warns, naming that file and those `Host` names
-  (`~/.ssh/config no longer includes <file>; ssh cannot reach <hosts> there`). `diff`
-  shows the same as `ssh cannot reach <hosts> in <file>`. Not named: `Host` names also
+  ssh stops reading it, so `apply` warns that ssh can no longer reach those hosts,
+  naming that file and those `Host` names; `diff` shows the same. Not named: `Host` names also
   present in the new `config`, and wildcard (`*`, `?`) and negated (`!`) patterns. With
   nothing to name, no warning. A file that resolves to the new `config` is skipped. If
   the old file cannot be checked or read, the line is rewritten without a warning.

@@ -10,6 +10,11 @@
 変えられる（[場所を変える環境変数](#場所を変える環境変数)）。全サービスに共通の値は、
 同じ場所の `defaults.toml` に書ける（[全サービスに共通の値](#全サービスに共通の値)）。
 
+このファイルには、既定から変えたいものだけを書く。既定のある項目は、書いていなければ
+`apply` と `diff` のたびに既定で埋める（[書かなければ既定で埋める項目](#書かなければ既定で埋める項目)）。
+`apply` は、すでにあるファイルを書き換えない。ファイルが無いときにだけ、雛形を作る
+（[雛形](#雛形)）。
+
 ## 形式
 
 TOML 1.0.0。リソースをまたぐ項目は最上位に、リソースごとの項目はそのリソース
@@ -49,22 +54,24 @@ Description = "home"
   規則を両方に書くとエラーになる。`sg add` と `sg remove` が書き換えるのは
   `<svc>.toml` だけで、共通ファイルの規則を消すときや説明を変えるときは、共通ファイルを
   直すよう告げて止まる。
-- ポリシーは名前ごとに重ねる。同じ名前のポリシーは、`<svc>.toml` のものだけを使う。
+- ポリシー（`[[role.<ポリシー名>]]`）も、共通ファイルの Statement の後ろに
+  `<svc>.toml` の同じ名前の Statement をつなげる。`ManagedPolicyArns` は、`<svc>.toml` に
+  書けば共通ファイルのものを置き換える。
 - `[launch-template]` は項目ごとに重ねる。`NetworkInterfaces` は `DeviceIndex`、
   `BlockDeviceMappings` は `DeviceName`、`TagSpecifications` は `ResourceType`、タグは
   `Key` が同じ要素どうしを、要素の中の項目ごとに重ね、違う要素は両方を使う。たとえば、
   共通ファイルに書いたインスタンスのタグ `Owner` と、`<svc>.toml` に書いたインスタンスの
   タグ `Env` は、両方付く。ほかの配列（`Groups` など）は、`<svc>.toml` に書けば共通
-  ファイルのものを丸ごと置き換える。
+  ファイルのものを丸ごと置き換える。`IamInstanceProfile` も、`<svc>.toml` に書けば
+  共通ファイルのものを丸ごと置き換える。
 - 空の値は書かれていないのと同じなので、共通ファイルの値を `<svc>.toml` で消すことは
   できない。共通ファイルを使わないサービスは、`<svc>.toml` に `Defaults = false` と
   書く（[最上位](#最上位)）。
-- `apply` は、共通ファイルの値も既定と同じように `<svc>.toml` に書く
-  （[`apply` が書くこと](#apply-が書くこと)）。`AwsRegion` と、`[launch-template]` の
-  [書かなければ `apply` が書く項目](#書かなければ-apply-が書く項目)は最初の `apply` で
-  書かれるので、あとで共通ファイルを直しても、作ってあるサービスは変わらない。
-  書かれない `AwsProfile`、`[launch-template]` のほかの項目、受信規則、ポリシーは、直せば
-  すべてのサービスに効く。AWS に反映するのは、サービスごとの `apply` である。
+- 共通ファイルを直せば、すべてのサービスに効く。AWS に反映するのは、サービスごとの
+  `apply` である。共通ファイルに `ImageId` を書くと、すべてのサービスの AMI が固定
+  される（[`ImageId`](#imageid)）。`[role]` を書くと、取り込んだサービスも含めて
+  `Defaults = false` でないすべてのサービスにインスタンスロール `temt-<svc>` ができる。インスタンスに付くかは、
+  サービスごとの `IamInstanceProfile` で決まる（[`[role]`](#role)）。
 - `--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も、
   共通ファイルの `AwsProfile` と `AwsRegion` を使う。環境変数 `AWS_PROFILE` や
   `AWS_REGION` より優先する。
@@ -78,39 +85,42 @@ Description = "home"
 
 | 項目 | 読むコマンド | 既定 |
 | --- | --- | --- |
-| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | 無し。書かなければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
+| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
 | `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
 | `Defaults` | `--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
 | `WaitForSsm` | `start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
 
-**`AwsProfile`。** AWS のプロファイルを固定するには、次の 3 つの方法がある。
+**`AwsProfile`。** `<svc>.toml` に書けば、そのサービスはいつもその AWS のプロファイルを
+使う。違う値の `--profile` を付けると、引数の誤りになる。書かなければ、コマンドの
+たびに上の順で決める。`--profile` はその実行のあいだだけ効き、`apply` も
+`service import` もこの項目を書かない。
 
-- `--profile <プロファイル>` を付ける（`temt apply --svc <svc> --profile work`）。
-  `apply` と `ami import` はその値を `AwsProfile` に書くので、次からは付けなくてよい。
-  ほかのコマンドでは、その実行のあいだだけ効く。
-- `AwsProfile = "work"` と書く。共通ファイルに書けば、全サービスに効く。
-- 環境変数 `AWS_PROFILE` を設定する。`AWS_DEFAULT_PROFILE` と両方に別の値を
-  入れると、temt は `AWS_DEFAULT_PROFILE` を使う。aws-cli v2 を単独で使うときは
-  `AWS_PROFILE` が先なので、両方を使うなら同じ値にする。
+環境変数 `AWS_PROFILE` は、`--profile` も `AwsProfile` も無いときに使われる。
+`AWS_DEFAULT_PROFILE` と両方に別の値を入れると、temt は `AWS_DEFAULT_PROFILE` を使う。
+aws-cli v2 を単独で使うときは `AWS_PROFILE` が先なので、両方を使うなら同じ値にする。
 
-`--profile` を付けずに `apply` を実行しても、この項目が書き直されることはない。
+**`AwsRegion`。** `<svc>.toml` に書けば、そのサービスはそのリージョンに固定される。
+違う値の `--region` を付けると、引数の誤りになる。書かなければ、コマンドのたびに
+上の順で決める。`apply` も `service import` もこの項目を書かない。同じ設定ファイルを
+別のリージョンで `apply` すると、そのリージョンにクローンができる
+（[usage.md](usage.md#別のリージョンにクローンを作る)）。
 
-**`AwsRegion`。** 無ければ、上の順に探したリージョンを使い、最初の `apply` と
-`ami import` がその値を書く。書いたあとは、この値だけを使う。違う値の `--region` を
-付けると、引数の誤りになる。1 つのファイルは 1 つのインスタンスに対応するので、別の
-リージョンを使うときは、別の `<svc>` として立てる。
+`<svc>.toml` か共通ファイルに `AwsRegion` を書いてあれば、環境変数ではリージョンが
+切り替わらない。環境変数で切り替えるなら、どちらにも書かない。`<svc>.toml` の
+`AwsRegion` を書き換えると、前のリージョンのクローンは、戻すまでそのサービスのコマンドでは
+扱えない（`--svc` を付けない `instance list` や `ami list` に `--region` を付ければ見える）。
+共通ファイルに書いたときは、`--region` を付ければ扱える。
 
 ログインに使う鍵は、このファイルには書かない。手元の ssh の設定の
 `IdentityFile` で決まる（[usage.md](usage.md#ログインの鍵)）。
 
 **`Defaults`。** `Defaults = false` と書けば、このサービスは共通ファイルを読まず、
-このファイルだけで決まる。`ami import` がこれを書く。共通ファイルの値が入ると、取り込んだ
-サービスが元のインスタンスと違うものになるからである。共通ファイルを使うなら、この行を
-消す。
+このファイルだけで決まる。取り込んだサービスを元のインスタンスと同じに保ちたいときなど、
+共通ファイルの値を効かせたくないサービスに書く。
 
 **`WaitForSsm`。** `WaitForSsm = false` と書けば、`start` はインスタンスが動き出した
 （`running` になった）ところで終わり、SSM エージェントを待たない。SSM エージェントが
-登録されないインスタンスのためのもので、`ami import` は、元のインスタンスが SSM に
+登録されないインスタンスのためのもので、`service import` は、元のインスタンスが SSM に
 登録されていなければこれを書く。Session Manager 経由の `ssh`、`reboot`、`set-port` は
 SSM エージェントを使うので、そうしたインスタンスでは失敗するか、締め切りで止まる。
 
@@ -121,32 +131,22 @@ get-launch-template-data` の出力（`create-launch-template` の `--launch-tem
 に渡す JSON）と同じ名前と入れ子で書く。変えたら `apply` を実行する。動いている
 インスタンスは変わらず、次の `start` から反映される。
 
-起動テンプレートの中身は、ここと共通ファイルに書いた項目と、temt が足すもの（下）
-だけになる。行を消せば（共通ファイルにも無ければ）、次の `apply` で起動テンプレート
-からも消える。AWS のコンソールなどで起動テンプレートを手で変えても、次の `apply` で
-ここに書いたとおりに戻る。
+起動テンプレートの中身は、ここと共通ファイルに書いた項目、書いていない項目の既定（下）、
+temt が足すもの（下）だけになる。行を消せば（共通ファイルにも無ければ）、次の `apply` で
+起動テンプレートからも消えるか、既定に戻る。AWS のコンソールなどで起動テンプレートを
+手で変えても、次の `apply` でここに書いたとおりに戻る。`ImageId` だけは例外で、
+書いていなければ起動テンプレートの値をそのまま使う（[`ImageId`](#imageid)）。
 
 ```toml
 [launch-template]
-ImageId = "temt-web-2610101230"
 InstanceType = "t3.small"
-InstanceInitiatedShutdownBehavior = "terminate"
-IamInstanceProfile = { Name = "${temt:name}" }
-
-[[launch-template.NetworkInterfaces]]
-DeviceIndex = 0
-SubnetId = "subnet-0123456789abcdef0"
-AssociatePublicIpAddress = true
+IamInstanceProfile.Name = "${temt:name}"
 
 [[launch-template.BlockDeviceMappings]]
 Ebs.VolumeSize = 30    # DeviceName を省いたので、ルートボリューム
 
 [launch-template.MetadataOptions]
-HttpTokens = "required"
-InstanceMetadataTags = "enabled"
-
-[launch-template.CreditSpecification]
-CpuCredits = "unlimited"
+HttpPutResponseHopLimit = 2
 ```
 
 AWS の項目の値は、次の TOML の型で書く。値は書いたまま AWS に渡る（`UserData` も
@@ -154,7 +154,8 @@ base64 のまま書く）。知らない項目名と型の違う値はエラー�
 使う boto3 の版で決まる。
 
 - まとまり（`MetadataOptions` など）はテーブル。ドット付きのキー
-  （`Ebs.VolumeSize = 30`）や、インラインテーブル（`{ Name = "..." }`）で書いてもよい。
+  （`Ebs.VolumeSize = 30`、`IamInstanceProfile.Name = "..."`）や、インラインテーブル
+  （`{ Name = "..." }`）で書いてもよい。
 - まとまりの並び（`NetworkInterfaces` など）はテーブルの配列、文字列の並び（`Groups`
   など）は文字列の配列。
 - 文字列、整数、真偽値、小数、日時は、TOML の同じ型。
@@ -163,32 +164,38 @@ AWS が読み出しのときにだけ返す 4 つの項目（`MetadataOptions.St
 項目どうしの組み合わせ（`SecurityGroupIds` と `NetworkInterfaces` の `Groups` など）は
 temt では確かめず、AWS が断る。
 
-#### 書かなければ `apply` が書く項目
+#### 書かなければ既定で埋める項目
 
-次の項目は、書いていなければ `apply` が値を決めて、このファイルに書く。行を消した
-ときも、次の `apply` で書き戻す。入れたくない値は、行を消さずに別の値で書く
-（`CpuCredits = "standard"`、`Ipv6AddressCount = 0` など）。
+次の項目は、書いていなければ、`apply` と `diff` のたびに既定で埋めて起動テンプレートに
+入れる。`apply` はこのファイルに書かない（`service import` は元のインスタンスの値を書く）。temt の版が上がって既定が変われば、次の `apply` の
+差分に出る。入れたくない値は、別の値で書く（`CpuCredits = "standard"`、
+`Ipv6AddressCount = 0` など）。
 
 | 項目 | 既定 |
 | --- | --- |
-| `ImageId` | このサービスから焼いた（`temt:service=<svc>` のタグを持つ）`available` な AMI のうち、`CreationDate` が最も新しいもの。無ければ Canonical の Ubuntu 24.04 |
 | `InstanceType` | `t3.micro` |
-| `NetworkInterfaces` の `DeviceIndex = 0` の要素の `SubnetId` | 既定 VPC のサブネットのうち、`MapPublicIpOnLaunch` が true で、アベイラビリティゾーン名が辞書順で最も小さいもの |
+| `NetworkInterfaces` の `DeviceIndex = 0` の要素の `SubnetId` | そのリージョンの既定 VPC のサブネットのうち、`MapPublicIpOnLaunch` が true で、アベイラビリティゾーン名が辞書順で最も小さいもの |
 | 同じ要素の `AssociatePublicIpAddress` | `true` |
-| 同じ要素の `Ipv6AddressCount` | `1`。サブネットに IPv6 の CIDR が結び付いているときだけ書く |
+| 同じ要素の `Ipv6AddressCount` | `1`。サブネットに IPv6 の CIDR が結び付いているときだけ入れる |
 | `MetadataOptions.HttpTokens` | `required` |
 | `MetadataOptions.InstanceMetadataTags` | `enabled`。アプリが、インスタンスメタデータのタグからサービスの名前を読めるようにする（[apps.md](apps.md#aws-を使う)） |
 | `InstanceInitiatedShutdownBehavior` | `terminate`。インスタンスの中で電源を切ると、止まるのではなく終了する |
-| `CreditSpecification.CpuCredits` | `unlimited`。`InstanceType` が T 系（`t3.micro` など）のときだけ書く |
+| `CreditSpecification.CpuCredits` | `unlimited`。`InstanceType` が T 系（`t3.micro` など）のときだけ入れる |
 
-`NetworkInterfaces` に `DeviceIndex = 0` の要素が無ければ、要素を足して書く。その要素に
+`SubnetId` と `Ipv6AddressCount` は、そのたびにそのリージョンの AWS を見て決める。
+既定 VPC が無いか、パブリックなサブネットが無ければ、`apply` や `diff` は止まる。
+そのときは `SubnetId` を書く。
+
+`NetworkInterfaces` に `DeviceIndex = 0` の要素が無ければ、要素を足して入れる。その要素に
 `NetworkInterfaceId` があれば、`SubnetId`、`AssociatePublicIpAddress`、
-`Ipv6AddressCount` は書かない。書き足す先がインラインテーブルの中なら、書かずに、手で
-書くよう告げて止まる。
+`Ipv6AddressCount` は入れない。
 
-`CreditSpecification` と `Ipv6AddressCount` は、書いたときの `InstanceType` と
-サブネットで決める。あとで T 系でない型や IPv6 の無いサブネットに変えても残り、次の
-`start` を AWS が断る。そのときは行を消して `apply` する（[項目を消す](#項目を消す)）。
+書いた `CpuCredits` と `Ipv6AddressCount` は、`InstanceType` やサブネットを変えても
+そのまま残る。T 系でない型や IPv6 の無いサブネットと組み合わさると、次の `start` を
+AWS が断る（[項目を消す](#項目を消す)）。
+
+`ImageId` は、ここには入らない。書いていなければ起動テンプレートの値を保つ
+（[`ImageId`](#imageid)）。
 
 どの項目も、`apply`、`diff`、`bake`（`--bake` を付けた `deploy` と `app remove`、
 `set-port` を含む）が読む。`SubnetId` は `sg diff` と `sg show` も読む。
@@ -207,19 +214,42 @@ temt では確かめず、AWS が断る。
 インスタンス、ボリューム、ネットワークインターフェースには、書いても書かなくても、
 タグ `temt:service=<svc>` が付く。temt はこのタグでサービスのインスタンスを見分ける。
 
-#### 項目ごとの説明
+#### `ImageId`
 
-**`ImageId`。** AMI の ID か名前を書く。`ami-` に続けて小文字の 16 進数が 8 桁か
-17 桁なら ID、それ以外は名前として扱う。名前で指せるのは自分のアカウントの AMI
-だけで、`*` と `?` は使えない。書かれていれば、`apply` はその値をそのまま使う。
-このサービスの最新の AMI に選び直すには、行を消すか空にして `apply` を実行する。
-指している AMI の登録が解除されているか使えない状態なら、`apply` はそう告げて止まる。
-テンプレートが指している AMI の登録を解除すると、次の `start` が失敗する。どちらも
-同じ手順で直る。他のサービスから焼いた AMI を使うときは、その名前か ID を
-書く。そのときに行を消すと、他のサービスの AMI ではなく、このサービスから焼いた
-AMI（無ければ Ubuntu 24.04）から選び直す。`bake` は、この項目を焼いた AMI の名前に
-書き換える。書き換え方は `apply` と同じで、項目の順序とコメントを保つ。ファイルが
-無ければ作らない。
+ふつうは書かない。書いていなければ、`apply` は起動テンプレートの `ImageId` をそのまま
+使い、差分にしない。`bake`（`--bake` を付けた `deploy` と `app remove`、`set-port` を
+含む）は、そのリージョンの起動テンプレートの `ImageId` だけを焼いた AMI に替え、
+このファイルには触らない。
+
+起動テンプレートを作る `apply` は、次の順に AMI を選ぶ。`apply` と `diff` は、選んだ
+AMI の名前を表示し、Ubuntu 24.04 を選んだときはこのサービスの AMI が無いことも添える。
+
+- `--image-id` に渡した AMI（名前か ID）。
+- 自分のアカウントの AMI のうち、名前が `temt-<svc>-` に 10 桁の数字が続き、
+  `available` か `pending` のもので、作成日時が最も新しいもの。それがまだ `pending`（コピーの途中など）なら、`apply` は
+  止まる。終わってから実行し直す。
+- Canonical の Ubuntu 24.04。
+
+起動テンプレートがあっても、`--image-id` を付ければその AMI に替わる。前の AMI に
+戻すときや、他のサービスの AMI から始めるときに使う。`diff` にも付けられる。
+`destroy` すると起動テンプレートとともに選んだ AMI も忘れられ、次の `apply` は上の順で
+選び直す。起動テンプレートが指す AMI の登録を解除すると（`ami delete --force` など）、
+次の `start` が失敗し、`apply` も止まる。`--image-id` で選び直す。
+
+`ImageId` を書けば、その AMI に固定される。値は AMI の ID か名前で、`ami-` に続けて
+小文字の 16 進数が 8 桁か 17 桁なら ID、それ以外は名前として扱う。名前で指せるのは
+自分のアカウントの AMI だけで、`*` と `?` は使えない。指している AMI の登録が解除されて
+いるか使えない状態なら、`apply` はそう告げて止まる。固定しているあいだは、AMI を焼く
+コマンド（`bake`、`set-port`、`--bake` を付けた `deploy` と `app remove`）は、何も
+せずに引数の誤りで止まり、`--image-id` を付けても引数の誤りになる。焼くには、行を消す。
+行を消すと、起動テンプレートの AMI をそのまま使う。`service import` は焼いた AMI の
+名前を書くので、取り込んだサービスで焼くときも、この行を消す。
+
+AMI の ID はリージョンごとに違う。別のリージョンにクローンを作るなら、`ImageId` を
+書かないか名前で書き、AMI を同じ名前でそのリージョンに写す
+（[usage.md](usage.md#別のリージョンにクローンを作る)）。
+
+#### 項目ごとの説明
 
 **`SubnetId`。** サブネットに IPv6 の CIDR が結び付いていれば、インスタンスには
 IPv4 のパブリックアドレスに加えて IPv6 アドレスも付く。IPv4 の CIDR を持たない
@@ -231,21 +261,38 @@ IPv4 のパブリックアドレスに加えて IPv6 アドレスも付く。IPv
 グループで、無ければ `apply` が作る。`Groups` を書けば、temt のセキュリティグループは
 そこに書いたときだけ付く（[`[security-group]`](#security-group)）。
 
-**`IamInstanceProfile`。** インスタンスプロファイル。書かなければ、インスタンス
-プロファイル無しで起動する。サービスを作る最初の `apply` が
-`IamInstanceProfile = { Name = "${temt:name}" }` を書く。temt が作るインスタンス
-プロファイル `temt-<svc>` を指しているあいだだけ、`apply` は `[role]` のとおりに
-インスタンスロールとインスタンスプロファイルを作って揃える（[`[role]`](#role)）。
-ほかのインスタンスプロファイルを書けば、temt は IAM に何もしない。それが無ければ、
-`start` を AWS が断る。
+**`IamInstanceProfile`。** インスタンスに付けるインスタンスプロファイル。書いたまま
+起動テンプレートに入る。書かなければ、インスタンスロール無しで起動する。そのとき
+`WaitForSsm = false` でなければ、SSM エージェントが登録されず `start` が締め切りまで
+待つことがあるので、`apply` と `diff` が警告する。
 
-**`KeyName`。** ログインの鍵は temt が接続のたびに送るので、要らない。書けば（`ami
+temt が作るインスタンスロールを付けるには、次のように書く。雛形と `role import` も
+この形で書く。`"temt-<svc>"` と書いても同じものを指すが、ファイルを別のサービスに
+写すと、写した先で元のサービスのインスタンスロールが付く。
+
+```toml
+[launch-template]
+IamInstanceProfile.Name = "${temt:name}"
+```
+
+ほかのインスタンスプロファイルは、`IamInstanceProfile.Name = "my-role"` か
+`IamInstanceProfile.Arn = "arn:aws:iam::123456789012:instance-profile/my-role"` と書く。
+`[role]` とは別に決まり、`[role]` を書いていてもほかのインスタンスプロファイルを指せる
+（[`[role]`](#role)）。temt のインスタンスプロファイルを指しているのに、どのファイルにも
+`[role]` が無ければ、`apply` と `diff` は AWS に何もせずにエラーにする。
+
+共通ファイルの `IamInstanceProfile` は `<svc>.toml` から消せない。そのサービスでだけ
+外すには、`<svc>.toml` で別のインスタンスプロファイルを指すか、`Defaults = false` を
+書く。
+
+**`KeyName`。** ログインの鍵は temt が接続のたびに送るので、要らない。書けば（`service
 import` は元のインスタンスの値を写す）、そのまま起動テンプレートに入り、そのキーペアの
-鍵でもログインできる。
+鍵でもログインできる。キーペアはリージョンごとにあるので、クローンを作るリージョンにも
+同じ名前で入れる。
 
 **ルートボリュームの大きさ。** `BlockDeviceMappings` の要素の `DeviceName` を省けば、
-temt が `ImageId` の AMI のルートボリュームのデバイス名を入れる（このファイルには
-書かない）。`ImageId` を別の OS の AMI に変えても、ルートボリュームを指し続ける。
+temt が起動テンプレートの AMI のルートボリュームのデバイス名を入れる（このファイルには
+書かない）。AMI を別の OS のものに替えても、ルートボリュームを指し続ける。
 省けるのは 1 つの要素だけである。その要素の `Ebs.VolumeSize`（GiB）で、起動する
 インスタンスのルートボリュームの大きさを決める。書かなければ AMI と同じ大きさで
 起動する。`DeviceName` を書くなら、AMI のルートボリュームのデバイス名（Ubuntu は
@@ -258,9 +305,8 @@ Ubuntu の AMI（とそこから焼いた AMI）では、起動するとイン�
 動いているインスタンスと止めてあるインスタンスは変わらない。広げ方は
 [usage.md](usage.md#ディスクを広げる) にある。
 
-`ImageId` が指す AMI のルートボリュームより小さい値は、AWS が起動を断るので書けない。
-`apply` と `diff` は、そう告げて何も変えずに止まる。`ImageId` を書かず、`apply` が
-このサービスの最新の AMI を選ぶときも同じである。AMI に EBS のルートボリュームが
+起動テンプレートの AMI のルートボリュームより小さい値は、AWS が起動を断るので書けない。
+`apply` と `diff` は、そう告げて何も変えずに止まる。AMI に EBS のルートボリュームが
 無ければ、大きさを決められないので、`Ebs.VolumeSize` は書けない。EBS は縮められない
 ので、大きくして焼いた AMI は、そのあと行を消しても、焼いたときの大きさのまま
 起動する。
@@ -272,30 +318,34 @@ Ubuntu の AMI（とそこから焼いた AMI）では、起動するとイン�
 #### 項目を消す
 
 起動テンプレートから項目を消すには、行を消して `apply` する。共通ファイルにある項目は、
-共通ファイルから消すか、このファイルに `Defaults = false` を書く。[書かなければ `apply` が
-書く項目](#書かなければ-apply-が書く項目)は、消しても書き戻されるので、別の値で書く。
+共通ファイルから消すか、このファイルに `Defaults = false` を書く。[書かなければ既定で
+埋める項目](#書かなければ既定で埋める項目)は、行を消すと既定に戻るので、入れたくない
+ときは別の値で書く。
 
 `apply` や `start` を AWS が断るときは、AWS の誤りから、どの項目かが分かる。その行を
 直すか消し、`diff` で確かめてから `apply` する。
 
-#### 別のアカウントで作るとき
+#### 別のアカウントやリージョンで使うとき
 
 ファイルにアカウントは書かないので、別のアカウントの AWS のプロファイルを `--profile` に
-付けて `apply` を実行すれば、そのアカウントにサービスを新しく作る。ただし、
-アカウントの中のリソースを指す項目（`SubnetId`、`ImageId`、書いていれば ID で書いた
-`Groups`、`${temt:name}` でない `IamInstanceProfile`、`KeyName` など）は、先に消すか
-書き換える。`SubnetId` と `ImageId` は、消せば `apply` が選び直す。消さなければ、`apply`
-はサブネットが無いと告げて止まる。そのときは何も書かないので、行を消してから、同じ
-`--profile` を付けてやり直す。
-元のアカウントも使い続けるなら、別の `<svc>` の名前でファイルを写し、写した方
-から行を消して、`AwsProfile` も直す。
+付けて `apply` を実行すれば、そのアカウントにサービスを新しく作る。`AwsRegion` を
+書いていなければ、別のリージョンで `apply` すると、そのリージョンにクローンができる。
+
+どちらの場合も、アカウントやリージョンの中のリソースを指す項目（`SubnetId`、ID で書いた
+`ImageId` と `Groups`、`KeyName` など）は、そのままでは使えない。先に消すか書き換える。
+別のアカウントでは、名前で書いた `ImageId` と、`${temt:name}` でない
+`IamInstanceProfile` も使えない。`IamInstanceProfile` はリージョンには依らない。
+
+`AwsProfile` を `<svc>.toml` に書いたサービスは、そのアカウントに固定される。別の
+アカウントにも置くなら、別の `<svc>` の名前でファイルを写し、写した方の `AwsProfile` を
+直す。
 
 ### `[security-group]`
 
 temt が作るセキュリティグループ `temt-<svc>` の受信規則。`[[security-group.ingress]]` を
 規則の数だけ繰り返して書く。`apply` が AWS 側の受信規則をここに書いたものに揃え、書いて
 いない規則（手で足したものを含む）は消す。`[launch-template]` の `Groups` を書いて、
-temt のセキュリティグループを使っていないサービス（`ami import` で取り込んだサービス
+temt のセキュリティグループを使っていないサービス（`service import` で取り込んだサービス
 など）では、受信規則があると `apply` がエラーにする。使うなら、`Groups` に
 `${temt:name}` を足す。共通ファイルにも 1 つも無ければ受信規則は無く、ログインは Session
 Manager 経由だけになる。変えたら `apply` を実行する。動いているインスタンスにも
@@ -363,22 +413,33 @@ VPC で立つ。古い VPC に残ったセキュリティグループは `destro
 ### `[role]`
 
 temt が作るインスタンスロール `temt-<svc>` の権限。インスタンスロールは、インスタンス
-プロファイルに入っている IAM ロールで、インスタンスはその権限で AWS を呼べる。temt は、
-`[launch-template]` の `IamInstanceProfile` が temt のインスタンスプロファイル
-`temt-<svc>`（`${temt:name}`）を指しているときだけ、インスタンスロールとインスタンス
-プロファイル `temt-<svc>` を作り、ここに書いたとおりに揃える。指していない（書いて
-いないときも含む）のに `[role]` を書くと、`apply` がエラーにする。共通ファイルの
-`[role]` も同じで、どのファイルの項目かを告げる。ほかのインスタンスロールの権限を
-temt で扱うには、`role import` で temt の管理に移す
+プロファイルに入っている IAM ロールで、インスタンスはその権限で AWS を呼べる。
+`<svc>.toml` か共通ファイルにポリシーか `ManagedPolicyArns` があれば、`apply` は
+インスタンスロールとインスタンスプロファイル `temt-<svc>` を作り、ここに書いたとおりに
+揃える。中身の無い `[role]` は、書いていないのと同じである。インスタンスに付けるかは
+`[launch-template]` の `IamInstanceProfile` で決まり、付けるには
+`IamInstanceProfile.Name = "${temt:name}"` と書く（[`IamInstanceProfile`](#項目ごとの説明)）。
+ほかのインスタンスロールの権限を temt で扱うには、`role import` で temt の管理に移す
 （[usage.md](usage.md#インスタンスロールを-temt-の管理に移す)）。
 
-名前を付けたポリシーを `[[role.policy.<ポリシー名>]]` に書く。
-`[[role.policy.<ポリシー名>]]` の 1 つが IAM のポリシーの Statement 1 つで、
-同じ名前で繰り返した並びが 1 つのポリシーになる。`apply` が、名前ごとにインスタンス
-ロールのインラインポリシー `temt-<ポリシー名>` を作る。名前が `temt-` で始まるインライン
-ポリシーは temt のものとみなし、設定ファイルに無ければ、手で付けたものでも
-`apply` が消す。変えたら `apply` を実行する。動いているインスタンスにも、IAM の反映を
-待てば効く。
+インスタンスロールとインスタンスプロファイルは、どのリージョンのクローンでも同じ
+`temt-<svc>` を使う。`[role]` を変えて `apply` すると、すべてのリージョンのクローンに
+一度に効く。リージョンで違うリソースを指すときは、ARN のリージョンを `*` にするか、
+リージョンごとの ARN を並べる。
+
+どのファイルからも `[role]` を消すときは、`IamInstanceProfile` が temt の
+インスタンスプロファイルを指したままだとエラーになるので、その行も消すか替えてから
+`apply` する。ほかのリージョンで `[role]` のある設定を `apply` したままでなければ、
+インスタンスロールとインスタンスプロファイルも消える。どうなるかは `diff` と確認に出る。
+外し方と、戻すときの注意は [usage.md](usage.md#インスタンスロールを外す) にある。
+
+名前を付けたポリシーを `[[role.<ポリシー名>]]` に書く。`[[role.<ポリシー名>]]` の
+1 つが IAM のポリシーの Statement 1 つで、同じ名前で繰り返した並びが 1 つのポリシーに
+なる。共通ファイルにも同じ名前があれば、共通ファイルの Statement の後ろにつながる。
+`apply` が、名前ごとにインスタンスロールのインラインポリシー `temt-<ポリシー名>` を
+作る。名前が `temt-` で始まるインラインポリシーは temt のものとみなし、設定ファイルに
+無ければ、手で付けたものでも `apply` が消す。変えたら `apply` を実行する。動いている
+インスタンスにも、IAM の反映を待てば効く。
 
 管理ポリシー（AWS 管理のものと、自分で作ったもの）は、ARN の配列を
 `ManagedPolicyArns` に書く。`apply` は、ここに書いた管理ポリシーを付け、書いていない
@@ -394,18 +455,12 @@ ManagedPolicyArns = ["arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"]
 ```
 
 **`ec2`。** ポリシー名 `ec2` は、アプリに結びつかない、インスタンスそのものの権限に
-使う。temt が動くのに要る SSM エージェントの権限と、自分の階層 `/temt-<svc>/` の SSM
-パラメータを読み書きする権限が入り、そのインスタンスで何をしたいかに応じて足す。
-`apply` は、`IamInstanceProfile` が temt のインスタンスプロファイルを指していて、
-設定ファイルにも共通ファイルにも `[[role.policy.ec2]]` が 1 つも無ければ、
-次の既定を設定ファイルに書いてから付ける。あれば、書かれたものをそのまま使うので、絞ることも足すこともできる。
+使う。雛形は、temt が動くのに要る次の既定を書く。SSM エージェントの権限と、自分の階層
+`/temt-<svc>/` の SSM パラメータを読み書きする権限で、そのインスタンスで何をしたいかに
+応じて足す。temt がこの既定を足すことはなく、インスタンスロールに付くのは書いたポリシーだけである。
 
 ```toml
-# Permissions of the instance role that are not tied to one app. temt needs
-# the first two statements (SSM Agent; the parameters of this service). Keep
-# them and add whatever else this instance may do. apply writes
-# [[role.policy.ec2]] only when there is none.
-[[role.policy.ec2]]
+[[role.ec2]]
 Action = [
     "ssm:UpdateInstanceInformation",
     "ssmmessages:CreateControlChannel",
@@ -415,7 +470,7 @@ Action = [
 ]
 Resource = "*"
 
-[[role.policy.ec2]]
+[[role.ec2]]
 Action = [
     "ssm:GetParameter",
     "ssm:GetParameters",
@@ -437,14 +492,15 @@ Resource = [
 - 2 つ目は自分の階層の SSM パラメータ。アプリが値を読み
   （[apps.md](apps.md#アプリの値)）、状態を書く（[apps.md](apps.md#アプリの状態)）。
   `GetParametersByPath` は階層そのもの（`parameter/${temt:name}`）で権限を調べる
-  ので、`/*` と並べて書く。`SecureString` を使うなら、既定の鍵 `aws/ssm` で
+  ので、`/*` と並べて書く。リージョンを `*` にしてあるので、どのリージョンの
+  クローンでも使える。`SecureString` を使うなら、既定の鍵 `aws/ssm` で
   暗号化したものは KMS の権限を足さずに読み書きできる。自分で作った鍵を使うときは、
   その鍵への `kms:Encrypt` と `kms:Decrypt` をここに足し、鍵ポリシーでもインスタンス
   ロールに許す。パラメータの層（tier）が Advanced なら、`kms:GenerateDataKey` も足す。
 
-足すときは、既定の 2 つの Statement を残す。消すと、ssh も `reboot` も `set-port` も
-効かなくなる。`[[role.policy.ec2]]` をすべて消して `apply` すれば、
-既定に戻る（共通ファイルに `ec2` があれば、そちらになる）。
+足すときは、既定の 2 つの Statement を残す。1 つ目が無ければ、SSM エージェントが
+登録されないことがあり、そのときは `start` が締め切りで止まり、Session Manager 経由の
+ssh も `reboot` も `set-port` も効かない。2 つ目が無ければ、アプリが値を読めず、状態を書けない。
 
 アプリが使う権限は、アプリごとに別の名前で書く。`deploy` はインスタンスロールに触らないので、
 権限を変える時点とアプリを入れ替える時点を分けられる。例えば、先に `apply` で
@@ -454,7 +510,7 @@ Resource = [
 <ポリシー名> は、英小文字で始まり、英小文字・数字・ハイフンが続き、英小文字か数字で
 終わる、64 文字までの名前とする。
 
-`[[role.policy.<ポリシー名>]]` の中の項目名は、IAM の Statement のものをそのまま使う。
+`[[role.<ポリシー名>]]` の中の項目名は、IAM の Statement のものをそのまま使う。
 
 | 項目 | 読むコマンド | 値 |
 | --- | --- | --- |
@@ -465,11 +521,11 @@ Resource = [
 | `Sid` | `apply`、`diff` | Statement の名前。任意 |
 
 ```toml
-[[role.policy.jupyter]]
+[[role.jupyter]]
 Action = ["s3:GetObject", "s3:PutObject"]
 Resource = "arn:aws:s3:::my-bucket/${temt:name}/*"
 
-[[role.policy.jupyter]]
+[[role.jupyter]]
 Effect = "Deny"
 Action = "s3:DeleteObject"
 Resource = "arn:aws:s3:::my-bucket/*"
@@ -488,17 +544,17 @@ Resource = "arn:aws:s3:::my-bucket/*"
 | `${temt:service}` | `web` |
 
 **確かめ方。** temt が読むときに確かめるのは、<ポリシー名> が上の規則に従うこと、
-`role.policy.<ポリシー名>` が空でないテーブルの配列であること、値が文字列、数、真偽値、
+`role.<ポリシー名>` が空でないテーブルの配列であること、値が文字列、数、真偽値、
 配列、テーブルのいずれかであること（日時、`nan`、`inf` は書けない）、知らない変数が無い
-ことだけである。`[role.policy.<ポリシー名>]` と角かっこ 1 つで書いたテーブル
-（`[[role.policy.<ポリシー名>.Statement]]` のように中に階層を作ったものも同じ）は、
-`[[role.policy.<ポリシー名>]]` と書くよう告げて誤りにする。書式と中身は、`apply` が
+ことだけである。`[role.<ポリシー名>]` と角かっこ 1 つで書いたテーブル
+（`[[role.<ポリシー名>.Statement]]` のように中に階層を作ったものも同じ）は、
+`[[role.<ポリシー名>]]` と書くよう告げて誤りにする。書式と中身は、`apply` が
 `Effect` の無い Statement に `Allow` を補い、変数を置き換えたあと、インスタンスロールに付ける
 前に IAM Access Analyzer の `ValidatePolicy` にかけて確かめる。`ERROR` の指摘が
-1 つでもあれば、すべてを `role.policy.jupyter[0].Resource` のような位置とともに
-挙げ、AWS に何も書かずに終了する。ほかの指摘（`SECURITY_WARNING`、`WARNING`、
-`SUGGESTION`）は警告として挙げ、そのまま続ける。`ec2` の既定も確かめるので、
-`apply` を実行する資格情報には `access-analyzer:ValidatePolicy` の権限が要る。
+1 つでもあれば、すべてを、どのファイルのどのポリシーの何番目の Statement の項目かと
+ともに挙げ、AWS に何も書かずに終了する。ほかの指摘（`SECURITY_WARNING`、`WARNING`、
+`SUGGESTION`）は警告として挙げ、そのまま続ける。`[role]` があれば、`apply` を実行する
+資格情報には `access-analyzer:ValidatePolicy` の権限が要る。
 
 `Version` は temt が `2012-10-17` に決めるので書かない。インスタンスロールのインラインポリシー
 は、分けても合わせて 10,240 文字までで、超えると `apply` は IAM の誤りで止まる。
@@ -506,73 +562,30 @@ Resource = "arn:aws:s3:::my-bucket/*"
 ポリシーと書くポリシーを合わせて上限を超えるなら、先に消すものだけを設定ファイル
 から消して一度 `apply` してから、書き足す。
 
-## `apply` が書くこと
+## 雛形
 
-`apply` は、書く項目を検出して表示し、確認のあとの更新で、このファイルに書く。
-ファイルが無ければ作り、テーブルが無ければ足す。書かれている値が決まった値と同じ
-であれば、その行には触らない。書き換えるとき、既に書かれている項目とテーブルの
-順序、項目に付いたコメントは変えない。最上位の項目は最初のテーブルの前に足すので、
-テーブルの前に置いたコメントは、足した項目の前に残る。テーブルの項目は、そのテーブルの
-最後の項目の次に足すので、その後ろのコメントは、次の見出しの前に残る。
+設定ファイルが無いとき、`apply` はサービスを作るかを確かめてから、雛形の設定ファイルを
+作る。書くのは次のものだけで、ほかの項目は既定で埋まる。
 
-- `AwsRegion` と、[書かなければ `apply` が書く項目](#書かなければ-apply-が書く項目)は、
-  既定や共通ファイルの値を使ったときもその値を書く。
-- `ImageId` には選んだ AMI の名前を書く。Ubuntu 24.04 の公開 AMI は自分の
-  アカウントのものではなく名前では指せないので、ID を書く。
-- `SubnetId` には選んだサブネットの ID を書く。既定のサブネットが見つからなければ
-  （既定 VPC が無い、パブリックなサブネットが無い）、`SubnetId` を書いたファイルを
-  用意するよう告げて、何も書かずに終了する。
-- ファイルが無いとき（サービスを作るとき）は、
-  `IamInstanceProfile = { Name = "${temt:name}" }` を書く。
-- `AwsProfile` は、`--profile` が指定されたときだけその値を書く。
-- `[[role.policy.ec2]]` は、`IamInstanceProfile` が temt のインスタンスプロファイルを
-  指していて、このファイルにも共通ファイルにも 1 つも無ければ既定を、
-  コメントとともに書く
-  （[`[role]`](#role)）。項目を書き終えたあとに書くので、新しく作るファイルでは
-  項目の次、例のコメントより前に、既にあるファイルでは末尾に置かれる。書いたら
-  `wrote the default [[role.policy.ec2]] in <ファイル>` と知らせる。足したあとの中身を
-  読んで照合し、読めなければ（`role` をインラインテーブルで書いてあるなど）、書かずに、
-  手で足すよう告げて止まる。ほかのポリシーには触らない。
-- 新しく作るファイルの先頭にはコメントで、`apply` が書いたこと、直して `apply` を
-  もう一度実行すれば反映されることを英語で記す。項目と `[[role.policy.ec2]]` を
-  書き終えたあと、末尾には `[[security-group.ingress]]` と
-  `[[role.policy.<ポリシー名>]]` の例をコメントアウトして置く。`apply` はこの例を
-  書き換えない。
+- 先頭の説明のコメント。
+- temt のインスタンスロールを付ける `IamInstanceProfile.Name = "${temt:name}"`。
+- [`ec2`](#role) の既定。
+- 受信規則とポリシーの例。コメントにしてある。
 
-空でない値を `apply` が書き換えるのは、`--profile` で選ばれた `AwsProfile` だけで
-ある。
-
-初回の `apply` が書くファイルは次のようになる。サービスの AMI がまだ無いので、
-`ImageId` は Ubuntu 24.04 の ID になる。サブネットに IPv6 の CIDR が結び付いていれば、
-`NetworkInterfaces` に `Ipv6AddressCount = 1` も書く。
+共通ファイルに `IamInstanceProfile` があれば、雛形にはその行を書かず、共通ファイルの値を
+使う。共通ファイルの値が temt のインスタンスプロファイルを指していれば `ec2` の既定を
+書き、ほかのものを指していれば書かない。
 
 ```toml
 # Written by temt apply. Edit and run apply again to update.
-AwsRegion = "ap-northeast-1"
 
 [launch-template]
-ImageId = "ami-0123456789abcdef0"
-InstanceType = "t3.micro"
-InstanceInitiatedShutdownBehavior = "terminate"
-IamInstanceProfile = { Name = "${temt:name}" }
-
-[[launch-template.NetworkInterfaces]]
-DeviceIndex = 0
-SubnetId = "subnet-0123456789abcdef0"
-AssociatePublicIpAddress = true
-
-[launch-template.MetadataOptions]
-HttpTokens = "required"
-InstanceMetadataTags = "enabled"
-
-[launch-template.CreditSpecification]
-CpuCredits = "unlimited"
+IamInstanceProfile.Name = "${temt:name}"
 
 # Permissions of the instance role that are not tied to one app. temt needs
 # the first two statements (SSM Agent; the parameters of this service). Keep
-# them and add whatever else this instance may do. apply writes
-# [[role.policy.ec2]] only when there is none.
-[[role.policy.ec2]]
+# them and add whatever else this instance may do.
+[[role.ec2]]
 Action = [
     "ssm:UpdateInstanceInformation",
     "ssmmessages:CreateControlChannel",
@@ -582,7 +595,7 @@ Action = [
 ]
 Resource = "*"
 
-[[role.policy.ec2]]
+[[role.ec2]]
 Action = [
     "ssm:GetParameter",
     "ssm:GetParameters",
@@ -604,22 +617,23 @@ Resource = [
 
 # Permissions for an app, as a named IAM policy. Uncomment and edit; see
 # docs/conf.md.
-# [[role.policy.example]]
+# [[role.example]]
 # Action = ["s3:GetObject"]
 # Resource = "arn:aws:s3:::example-bucket/${temt:name}/*"
 ```
 
 最初の `apply` の前に決めておきたい項目があるときは、ファイルを先に作っておく。
-残りの項目は `apply` が埋める。`IamInstanceProfile` は、ファイルが無いときにしか
-書かないので、先に作るファイルには自分で書く。書かなければ、インスタンスプロファイル
-無しで起動する。
+そのときは雛形を作らないので、temt のインスタンスロールを付けるなら、
+`IamInstanceProfile.Name = "${temt:name}"` と `ec2` の既定も自分で書く。
 
     mkdir -p ~/.config/temt
     cat > ~/.config/temt/<svc>.toml <<'EOF'
     [launch-template]
     InstanceType = "t3.small"
-    IamInstanceProfile = { Name = "${temt:name}" }
+    IamInstanceProfile.Name = "${temt:name}"
     EOF
+
+このあと、上の雛形の `[[role.ec2]]` を写して足す。
 
 ## 設定ファイルに書かないもの
 
@@ -632,15 +646,16 @@ Resource = [
 | `TEMT_CONF_DIR` | すべて | 設定ファイルとアプリを置くディレクトリ。無ければ `~/.config/temt` |
 | `TEMT_SSH_DIR` | `--svc` を付けたもののうち ssh の設定、鍵、ロックを使うもの（`apply`、`proxy` など）と、`ami prune` | ssh の設定・鍵・known_hosts を置くディレクトリ。無ければ `~/.ssh/temt` |
 | `AWS_PROFILE` | AWS を使うすべて（`proxy` を含む） | `--profile` も `AwsProfile` も無いときに使う AWS のプロファイル（[最上位](#最上位)） |
-| `AWS_REGION`、`AWS_DEFAULT_REGION` | AWS を使うすべて | `--region` も `AwsRegion` も無いときに使うリージョン（[最上位](#最上位)） |
+| `AWS_REGION`、`AWS_DEFAULT_REGION` | AWS を使うすべて（`proxy` を含む） | `--region` も `AwsRegion` も無いときに使うリージョン（[最上位](#最上位)） |
 
 `TEMT_LOGIN` は `proxy` が接続のたびに読む。ssh は ProxyCommand に自分の環境変数を
 渡すので、シェルの初期化で決めることも、`TEMT_LOGIN=direct ssh <名前>`
 のようにその接続だけ変えることもできる。`apply` は `TEMT_LOGIN` を見ない。
-`TEMT_LOGIN` と `AWS_PROFILE` は ProxyCommand に書かれないので、ssh を呼ぶエディター
-（VS Code の Remote-SSH など）にも渡るように設定する。
+`TEMT_LOGIN`、`AWS_PROFILE`、`AWS_REGION` は ProxyCommand に書かれないので、ssh を
+呼ぶエディター（VS Code の Remote-SSH など）にも渡るように設定する。
 
-`--profile` は ssh の ProxyCommand には届かない。
+`--profile` と `--region` は、自分で打つ ssh の ProxyCommand には届かない。ssh でつなぐ先の
+リージョンは、`AwsRegion` か環境変数で決まる（`AWS_REGION=us-west-2 ssh <名前>`）。
 
 ## 場所を変える環境変数
 
@@ -666,8 +681,8 @@ known_hosts の場所である。どちらにも次の規則を当て、破っ�
 - `TEMT_SSH_DIR` は `~/.ssh` そのものを指せない。temt の `config` が
   `~/.ssh/config` と同じファイルになり、自分自身を `Include` してしまう。
 
-無ければ temt が作る。`TEMT_CONF_DIR` のディレクトリは、`apply` が設定ファイルを
-書くときに作る。
+無ければ temt が作る。`TEMT_CONF_DIR` のディレクトリは、`apply` が雛形を
+書くときと、`service import` が設定ファイルを書くときに作る。
 `TEMT_SSH_DIR` のディレクトリと、その中の `keys/`、`known_hosts.d/<名前>/` は、
 使うコマンドが作る。どれもモード 700 になり、無い親ディレクトリも 700 で
 作られる。既にあるディレクトリのモードは、ssh ディレクトリと `keys/` を除いて

@@ -4,7 +4,7 @@ The design of temt: what it builds and how. The reader is Claude only, so it is
 written in English and may record rationale, rejected alternatives, and review
 findings that were declined. The user docs are Japanese and live in docs/:
 [usage.md](../docs/usage.md) (how to use), [conf.md](../docs/conf.md) (the config
-file: format, keys, defaults, what `apply` writes), [apps.md](../docs/apps.md) (how to
+file: format, keys, defaults), [apps.md](../docs/apps.md) (how to
 write an app), and [apps/](../docs/apps/) (the bundled apps). design/ refers to them
 instead of repeating them. [glossary.md](glossary.md) maps the English terms here to
 the Japanese terms there.
@@ -16,8 +16,9 @@ Where this and the code disagree, decide which is right before changing either.
 temt builds the cycle of preparing a service, launching its instance, logging in
 with ssh, installing apps (`deploy`), turning the instance into an AMI (`bake`),
 terminating it, and cleaning up. An existing stopped instance can be imported as a
-service (`ami import`). Once the bundled app `idle-shutdown` is deployed and
-baked, an unused instance terminates itself
+service (`service import`). The same config file applied in another region makes a
+clone of the service there ([config.md](config.md#clones)). Once the bundled app
+`idle-shutdown` is deployed and baked, an unused instance terminates itself
 ([apps/idle-shutdown.md](apps/idle-shutdown.md)).
 
 ## Files
@@ -28,13 +29,13 @@ baked, an unused instance terminates itself
 | [glossary.md](glossary.md) | English and Japanese terms |
 | [naming.md](naming.md) | Service names, resource names, tags, `--svc` |
 | [local-files.md](local-files.md) | Repository layout, files in the user's home, location environment variables |
-| [config.md](config.md) | The config file, the defaults file, profile, region, account |
-| [resources.md](resources.md) | The AWS resources of a service and how `apply` and `destroy` treat them |
+| [config.md](config.md) | The config file, the defaults file, profile, region, clones, account |
+| [resources.md](resources.md) | The AWS resources of a service, the instance role shared by regions, and how `apply` and `destroy` treat them |
 | [cli.md](cli.md) | Command grammar, the command table, behavior common to all commands, list tables |
-| [commands/service.md](commands/service.md) | `apply`, `diff`, `destroy`, `service list` |
+| [commands/service.md](commands/service.md) | `apply`, `diff`, `destroy`, `service import`, `service list` |
 | [commands/instance.md](commands/instance.md) | `start`, `stop`, `terminate`, `reboot`, `status`, `instance list` |
 | [commands/template.md](commands/template.md) | `template show` |
-| [commands/ami.md](commands/ami.md) | `bake`, `ami import`, `ami list`, `ami prune`, `ami delete` |
+| [commands/ami.md](commands/ami.md) | `bake`, `ami list`, `ami prune`, `ami delete` |
 | [commands/role.md](commands/role.md) | `role import`, `role delete` |
 | [commands/sg.md](commands/sg.md) | `sg list`, `sg add`, `sg remove`, `sg diff`, `sg show` |
 | [commands/app.md](commands/app.md) | The deploy record, `app` commands, `deploy`, app options, `app remove`, bundled apps |
@@ -60,7 +61,10 @@ baked, an unused instance terminates itself
 - AWS APIs are written by their aws-cli subcommand names (`describe-instances`);
   in boto3 they are the methods of the same name (`describe_instances`).
 - Keys of the config file are written without their table (`InstanceType`).
-- Messages that temt prints are quoted verbatim in English.
+- design/ describes behavior: what temt does, its rules, rationale, and rejected
+  alternatives. The wording of messages (errors, warnings, prompts) and implementation
+  details (function names, how the code does something, call order) are left to the code
+  and its comments.
 
 ## Premises
 

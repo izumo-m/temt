@@ -2,7 +2,7 @@
 
 `template show --svc <svc>`
 
-Shows the details of the launch template
+Shows the details of the launch template of the region
 ([topics/launch-template.md](../topics/launch-template.md)). It only displays; it writes
 nothing to the config file or AWS. It shows:
 
@@ -12,10 +12,11 @@ nothing to the config file or AWS. It shows:
   `SubnetId` (of the `NetworkInterfaces` element with `DeviceIndex = 0`) is shown with
   the VPC that the subnet belongs to.
 - The AMI that the template's `ImageId` points to: name, creation date, state, and
-  root volume size. If there is no EBS root volume, the size is shown as
-  `(no EBS root volume)`. If the AMI is not found, say so. In addition, show the name
-  and ID of the latest AMI with `temt:service=<svc>`, marked so it is recognizable when
-  it is newer than the template's.
+  root volume size. If there is no EBS root volume, the size is shown as such. If the
+  AMI is not found, say so. In addition, show the name and ID of the service's newest
+  AMI, found as `apply` finds it for a new template (by its exact name, newest by
+  creation time; [Selecting](../topics/ami.md#selecting)), marked when it is newer than
+  the template's.
 - The list of versions, one per line: number, default mark, creation time, `ImageId`,
   `InstanceType`, `SubnetId` (of the `DeviceIndex = 0` element).
 

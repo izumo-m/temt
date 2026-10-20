@@ -7,7 +7,7 @@ Bundled app that sets the instance's time zone to Asia/Tokyo. Usage:
 `install` runs `timedatectl set-timezone Asia/Tokyo`, which makes `/etc/localtime` a
 link to `/usr/share/zoneinfo/Asia/Tokyo`. Then it restarts `cron.service` and
 `rsyslog.service` if they are active (they keep the time zone they started with), and
-prints `timezone-tokyo: <time zone>, now <local time with zone name>`. It places no
+reports the time zone and the local time. It places no
 files. Baking keeps `/etc/localtime` in the AMI, so instances launched from it start in
 Japan time.
 

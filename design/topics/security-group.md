@@ -13,11 +13,10 @@ not left out because of `SecurityGroupIds`, `SecurityGroups`, or `NetworkInterfa
 [launch-template.md](launch-template.md#what-temt-adds)), or when a `Groups` names it
 (`<name>` or `${temt:name}`;
 [launch-template.md](launch-template.md#extensions-to-awss-form)). Whether to create it
-is decided by the name alone, as for the instance profile
-([resources.md](../resources.md#instance-profile-and-instance-role)). Its ingress rules
+is decided by the name alone. Its ingress rules
 are reconciled whenever it is among the template's security groups after resolving, an
 ID written by the user included. A template that
-lists only other security groups (as `ami import` writes: the source's, by the IDs AWS
+lists only other security groups (as `service import` writes: the source's, by the IDs AWS
 returned, so they point at the same ones) gets none, and temt does not touch those
 security groups. To use temt's as well, the user adds `${temt:name}` to `Groups` and
 runs `apply`; ENI security group limits and temt's egress rule then apply, and a limit
@@ -25,23 +24,24 @@ exceeded is left to AWS's error.
 
 Ingress rules (`[[security-group.ingress]]`, the defaults file's included) while no
 security group of the template is temt's make `apply` stop, telling the user to add
-`${temt:name}` to `Groups` (as `[role]` does with an instance profile temt does not
-manage). `apply` resolves IDs, so temt's written by ID counts. Rejected: copying the
-source's security groups on `ami import` (rules of other security groups that refer to
+`${temt:name}` to `Groups`. This includes the defaults file's rules for an imported
+service. `apply` resolves IDs, so temt's written by ID counts. Rejected: copying the
+source's security groups on `service import` (rules of other security groups that refer to
 the source's, such as RDS, would stop matching); a variable
 `${temt:security-group-id}` (names in `Groups` make `${temt:name}` enough).
 
 ## Reconciling
 
 - Created in the VPC of the `SubnetId` of the `NetworkInterfaces` element with
-  `DeviceIndex = 0`, with description `Managed by temt` and two tags, `Name` and
-  `temt:service`.
+  `DeviceIndex = 0` (as written, or as temt looks it up in that region when it is not
+  written; [launch-template.md](launch-template.md)), with description `Managed by
+  temt` and two tags, `Name` and `temt:service`.
 - If it exists, missing tags are added and tags with a different value are corrected
   (`create-tags` overwrites the value of the same key). Other tags are not touched.
 - A security group of the same name in another VPC is not an error and is left as it is
   (a group name is unique only within a VPC, so it is a different security group).
-- Reported as `security group <name>: created (<group ID>)` or
-  `security group <name>: updated (<group ID>)`; unchanged is not reported.
+- Creating it or fixing its tags is reported with the group ID; unchanged is not
+  reported.
 
 ## Ingress rules
 
@@ -76,11 +76,8 @@ the following runs in this order:
 
 Because rules are added before removed, the rules in the definition keep passing
 traffic throughout. With no differences nothing is done. Each added, re-described, and
-removed rule is reported on one line:
-
-- `security group <name>: added <port> <source> <description>`
-- `security group <name>: updated the description of <port> <source>: <before> -> <after>`
-- `security group <name>: removed <port> <source> <description>`
+removed rule is reported on one line, with its port, source, and description (for a
+re-described rule, the description before and after).
 
 While adding, the group temporarily holds the rules to be removed as well, so replacing
 many rules near the per-security-group ingress rule quota (60 by default) stops at the
@@ -101,8 +98,7 @@ Internet; through a VPN it is the VPN's exit address.
 
 - Each host has DNS records of its own address family only, so the query always goes
   over that family and returns a global IP address of that family.
-- The response body (`GET`, `User-Agent: temt`, at most 100 bytes read) is parsed as an
-  IP address; a different family counts as not found. An address with a zone ID, and
+- The response is read as an IP address; a different family counts as not found. An address with a zone ID, and
   loopback, unspecified, link-local, and multicast addresses, also count as not found.
 - Connect and read each wait at most 5 seconds. Name resolution has no deadline, so one
   query as a whole is not guaranteed to finish in 5 seconds.
@@ -111,14 +107,13 @@ Internet; through a VPN it is the VPN's exit address.
   is one LAN, the same scope as allowing every device behind an IPv4 NAT by one address.
 - Whether the subnet has an IPv6 CIDR is not checked, to avoid calling AWS. An IPv6 rule
   has no effect unless the instance has an IPv6 address, but it does no harm.
-- Only the families found are used. A found family is reported as
-  `egress IPv<n> address: <address> (<url>); using <cidr>`; a family not found is
-  reported on one line with the reason (`no IPv<n> egress address: ...`). If neither is
-  found, temt exits with `could not find the egress IP address; give the CIDR`.
+- Only the families found are used. A found family is reported with the address, where
+  it came from, and the CIDR used; a family not found is reported on one line with the
+  reason. If neither is found, temt exits asking for the CIDR.
 
 ## Changing the VPC
 
-When `SubnetId` is changed to a subnet in another VPC, `apply` prepares the security
+When `SubnetId` (written, or looked up) changes to a subnet in another VPC, `apply` prepares the security
 group in the new VPC and the launch template points to it (when temt fills `Groups` or
 `Groups` names it). A running instance keeps
 running with the old security group; from the next `start` it launches in the new VPC.
@@ -132,8 +127,7 @@ their network interfaces have left the group (checked on real AWS: the first del
 succeeded), so it does not wait again. If deletion still fails with
 `DependencyViolation` (an interface not yet detached, or something else referring to the
 group, such as another security group's rule; AWS's text does not tell them apart), it
-stops with `cannot delete the security group <group ID>: <AWS error>; if its instances
-were just terminated, run destroy again; otherwise remove what uses it and run destroy
-again`. Each is reported as `security group <name> (<group ID>): deleted` (or `absent`
-if it vanished, `InvalidGroup.NotFound`); with none found,
-`security group <name>: absent`.
+stops with AWS's error, saying to run `destroy` again if the instances were just
+terminated, and otherwise after removing what uses the group. Each is reported as
+deleted, or as absent if it vanished meanwhile; with none found, the security group is
+reported as absent.
