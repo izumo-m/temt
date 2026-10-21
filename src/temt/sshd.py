@@ -106,7 +106,7 @@ def script(ports: Sequence[int]) -> list[str]:
         'Port is set in $(portfiles)"',
         "fi",
         # 6. 読み直させる。ソケット起動（Ubuntu 24.04）では、daemon-reload が
-        # sshd_config.d の Port を ssh.socket の待ち受けに写すので、先に必ず行う。
+        # sshd_config.d の Port を ssh.socket の待ち受けに反映するので、先に必ず行う。
         # いまつながっている接続は切れない
         "systemctl daemon-reload",
         "if systemctl is-enabled --quiet ssh.socket; then",

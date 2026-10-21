@@ -111,7 +111,7 @@ def new_image(ec2: EC2Client, ssm: SSMClient, service: Service, region: str) -> 
 
     サービスの最新の AMI（aws.newest_image）を選び、それが pending（コピーの途中など）なら
     止める。1 つも無ければ Ubuntu 24.04 の公開 AMI を選び、そのリージョンにサービスの AMI が
-    無いことを添える。AMI を写し忘れたクローンが、確認の前に気づけるようにする。
+    無いことを添える。AMI をコピーし忘れたクローンが、確認の前に気づけるようにする。
     """
     newest = aws.newest_image(ec2, service.svc)
     if newest is not None:
@@ -172,7 +172,7 @@ def points_at_temt(data: Mapping[str, Any], service: Service) -> bool:
 
 
 def _substituted(service: Service, values: Conf) -> dict[str, Any]:
-    """[launch-template] の写しの、変数を置き換えたもの。"""
+    """[launch-template] のコピーの、変数を置き換えたもの。"""
     try:
         return policy.substitute(copy.deepcopy(values.launch_template), policy.variables(service))
     except ValueError as error:

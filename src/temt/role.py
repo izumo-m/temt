@@ -1,6 +1,6 @@
 """role import と role delete の本体。design/commands/role.md。
 
-role import は、指したインスタンスロールの写しを temt の管理（<名前>）に移すよう、設定
+role import は、指したインスタンスロールのコピーを temt の管理（<名前>）に移すよう、設定
 ファイルの [role] と IamInstanceProfile を書き換える。AWS には何もせず、diff で確かめて
 apply で反映する。role delete は、temt のインスタンスロールとインスタンスプロファイル
 <名前> を消す。
@@ -145,7 +145,7 @@ def _rewritten(text: str, path: Path, inline: Mapping[str, Any], managed: list[s
 
 
 def import_role(service: Service, role: str, *, yes: bool) -> None:
-    """インスタンスロール role の写しを、temt の管理に移すよう設定ファイルを書き換える。
+    """インスタンスロール role のコピーを、temt の管理に移すよう設定ファイルを書き換える。
 
     AWS には何もしない。[role] を丸ごと置き換え、IamInstanceProfile を ${temt:name} に
     する。書き終えたら、元のインスタンスロールの ARN を名指ししているリソースポリシーを

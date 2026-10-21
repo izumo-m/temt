@@ -1704,7 +1704,7 @@ def test_an_inline_table_is_read_as_it_is(
 def test_a_new_service_reads_the_scaffold_over_the_common_file(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """雛形は共通ファイルの上に重ねて読む。共通ファイルの値は雛形に写さない。"""
+    """雛形は共通ファイルの上に重ねて読む。共通ファイルの値は雛形にコピーしない。"""
     write_defaults('AwsProfile = ""\n[launch-template]\nInstanceType = "t3.small"\n')
     made_from_scratch(aws_stubs, template_data(InstanceType="t3.small"))
 

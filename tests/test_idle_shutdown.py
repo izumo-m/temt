@@ -1211,7 +1211,7 @@ def test_loading_the_command_writes_no_bytecode(
 ) -> None:
     """アプリのディレクトリは丸ごと送るので、テストが本体を読み込んでも __pycache__ を作らない。
 
-    作業ツリーの __pycache__ の有無に左右されないよう、写したディレクトリで確かめる。
+    作業ツリーの __pycache__ の有無に左右されないよう、コピーしたディレクトリで確かめる。
     """
     copied = tmp_path / "idle-shutdown"
     copied.mkdir()

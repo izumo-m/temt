@@ -1,6 +1,6 @@
 """temt と一緒に配るアプリ swapfile のテスト。
 
-install と uninstall はインスタンスの上で root で動くので、アプリを一時ディレクトリに写し、
+install と uninstall はインスタンスの上で root で動くので、アプリを一時ディレクトリにコピーし、
 common.sh の /swapfile、/etc/fstab、/proc/meminfo をその中に差し替える。swapon、swapoff、
 mkswap、fallocate、df、systemctl、chown は、呼ばれた引数を書き留めるものに差し替える。swapon は
 使っている swap を状態のファイルに覚えて、--show に答える。

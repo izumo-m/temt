@@ -976,7 +976,7 @@ def test_mark_removed_turns_the_record_into_the_baked_version() -> None:
 
 
 def test_mark_removed_keeps_baked_options_it_cannot_read() -> None:
-    """読めない baked_options は、書かれていたままの値を options にも写す。"""
+    """読めない baked_options は、書かれていたままの値を options にもコピーする。"""
     record = app.Record(
         fields=dict(BASE),
         options={"limit": "4h"},
@@ -1259,7 +1259,7 @@ def test_record_value_keeps_the_order_and_writes_japanese_as_it_is() -> None:
 def test_mark_baked_bakes_the_options_too(
     aws_stubs: Stubs, ssm: SSMClient, configured: Service
 ) -> None:
-    """焼いた版のオプションを baked_options に写す。付け替えるだけの記録では変えない。"""
+    """焼いた版のオプションを baked_options にコピーする。付け替えるだけの記録では変えない。"""
     fresh = json.loads(a_full_record("2", instance=INSTANCE, baked_version="1", baked_image=IMAGE))
     fresh |= {"options": {"port": "9999"}, "baked_options": {"port": "8000"}}
     kept = json.loads(a_full_record("2", baked_version="2", baked_image=IMAGE))
@@ -1314,7 +1314,7 @@ def test_mark_baked_keeps_options_it_cannot_read(
 ) -> None:
     """読めないオプションは、書かれていたままの値で書き戻し、失わない。
 
-    焼いた版にする記録では、読めない options も書かれたまま baked_options に写す。次の
+    焼いた版にする記録では、読めない options も書かれたまま baked_options にコピーする。次の
     deploy はそれを引き継げずに止まるので、--reset を促す。baked_options だけが読めない
     ときは、焼いた版にすれば options で置き換わり、付け替えるだけなら書かれたまま残る。
     """

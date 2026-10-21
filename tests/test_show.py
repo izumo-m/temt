@@ -230,7 +230,8 @@ def test_it_shows_the_default_version(
 def test_it_shows_the_content_in_the_form_of_the_config_file(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """中身は、そのまま設定ファイルに写せる TOML で出す。読み戻せば、テンプレートの中身になる。
+    """中身は、そのまま設定ファイルにコピーできる TOML で出す。読み戻せば、テンプレートの
+    中身になる。
 
     UserData は base64 のまま、ほかの値も型を保って出す。
     """

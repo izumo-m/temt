@@ -175,7 +175,7 @@ WANTED: dict[str, Any] = {
 
 
 def wanted(**changes: Any) -> dict[str, Any]:
-    """WANTED の写し。changes で最上位の項目を足すか替える。"""
+    """WANTED のコピー。changes で最上位の項目を足すか替える。"""
     return {**copy.deepcopy(WANTED), **changes}
 
 

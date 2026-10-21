@@ -209,7 +209,7 @@ DESCRIPTION_CHARS = "a-z, A-Z, 0-9, spaces and ._-:/()#,@[]+=&;{}!$*"
 DESCRIPTION_RE = re.compile(r"[a-zA-Z0-9 ._\-:/()#,@\[\]+=&;{}!$*]*")
 
 # 雛形の IamInstanceProfile。temt のインスタンスロールを付ける。変数で書くので、ファイルを
-# 別の <svc> に写しても、写した先のサービスのものを指す
+# 別の <svc> にコピーしても、コピーした先のサービスのものを指す
 SCAFFOLD_PROFILE = """
 [launch-template]
 IamInstanceProfile.Name = "${temt:name}"

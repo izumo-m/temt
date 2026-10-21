@@ -1086,7 +1086,7 @@ class TemplateDiff:
     def changes(self) -> list[Change]:
         """diff に出す形にする。違う項目を 1 つ 1 行で出す。
 
-        作るときは項目に開かず、選んだ AMI だけを出す。AMI を写し忘れたクローンが、確認の
+        作るときは項目に開かず、選んだ AMI だけを出す。AMI をコピーし忘れたクローンが、確認の
         前に気づけるようにする。
         """
         notes = {ltbuild.IMAGE_ID: self.note} if self.note else {}

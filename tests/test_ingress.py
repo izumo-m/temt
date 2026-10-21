@@ -384,7 +384,7 @@ def test_add_does_not_rewrite_the_description_of_a_common_rule(service: Service)
 
 
 def test_add_writes_only_the_rule_of_the_service(service: Service) -> None:
-    """共通ファイルの規則は、サービスの設定ファイルに写さない。"""
+    """共通ファイルの規則は、サービスの設定ファイルにコピーしない。"""
     write_defaults(OFFICE)
     write(service, "")
     ingress.add(service, "tcp", (22, 22), "203.0.113.10/32", "home")

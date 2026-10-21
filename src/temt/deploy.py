@@ -418,7 +418,7 @@ def _new_record(
 def _check_size(app_id: str, record: Record) -> None:
     """手順 2。記録が、いまも焼いたあとも、SSM パラメータに収まることを確かめる。
 
-    焼くと、オプションが baked_options にも写って大きくなる。収まらなければ、何も変えずに
+    焼くと、オプションが baked_options にもコピーされて大きくなる。収まらなければ、何も変えずに
     止める。
     """
     baked = app.Record(

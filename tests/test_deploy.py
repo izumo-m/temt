@@ -1195,7 +1195,7 @@ def test_remove_again_rewrites_a_record_already_removed_from_the_instance(
 def test_remove_deletes_a_record_too_large_to_keep(
     aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """焼いたオプションを options にも写すと SSM に収まらなければ、警告して消す。"""
+    """焼いたオプションを options にもコピーすると SSM に収まらなければ、警告して消す。"""
     ready(aws_stubs)
     large = {"port": "x" * 2100}
     before = {**BAKED_RECORD, "options": {}, "baked_options": large}
@@ -1875,7 +1875,7 @@ def test_deploy_after_remove_keeps_the_options_only_when_the_removal_was_lost(
 def test_deploy_after_remove_ignores_options_it_cannot_read(
     aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
 ) -> None:
-    """外したときに写した読めないオプションでも、このインスタンスなら引き継がないので止めない。"""
+    """外したときにコピーした読めないオプションでも、このインスタンスなら引き継がないので止めない。"""
     ready(aws_stubs)
     before = {
         "name": "Jupyter Lab",
@@ -2068,7 +2068,7 @@ def test_deploy_refuses_an_app_with_the_option_file(
 @pytest.mark.parametrize(
     ("greeting", "message"),
     [
-        # 1 文字 3 バイト。焼くと baked_options にも写るので、4096 バイトを超える
+        # 1 文字 3 バイト。焼くと baked_options にもコピーされるので、4096 バイトを超える
         ("あ" * 700, r"would be 4\d\d\d bytes after bake, over the 4096 bytes that SSM allows"),
         ("a" * 4096, r"would be \d+ bytes, over the 4096 bytes that SSM allows"),
     ],
@@ -2186,7 +2186,7 @@ def test_deploy_with_bake_records_the_options_as_baked(
     ssh: Ssh,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """deploy が記録に書いたオプションを、続けて焼く bake が baked_options に写す。"""
+    """deploy が記録に書いたオプションを、続けて焼く bake が baked_options にコピーする。"""
     baked_image = "ami-00000000000000001"
     monkeypatch.setattr(bake, "check", lambda ec2, service, values, one, command: None)
     monkeypatch.setattr(
@@ -2259,7 +2259,7 @@ def _after_bake(record: app.Record) -> int:
 def test_check_size_takes_a_record_of_just_4096_bytes() -> None:
     """焼いたあとの記録がちょうど 4096 バイトなら通し、超えれば止める。
 
-    焼くとオプションが baked_options にも写るので、値が 1 文字増えると 2 バイト増える。
+    焼くとオプションが baked_options にもコピーされるので、値が 1 文字増えると 2 バイト増える。
     ちょうどにするため、足りない 1 バイトはアプリ名で埋める。
     """
     left = app.RECORD_MAX - _after_bake(_sized(""))

@@ -1,6 +1,6 @@
 """service import の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（importing.run か cli.main）を通し、手順の順序、写す設定の直し方、書いた
+端から端まで（importing.run か cli.main）を通し、手順の順序、コピーする設定の直し方、書いた
 設定ファイルの中身とそれが読めること、止まったときに何も書かないことを確かめる。
 Stubber は積んだ順にしか応答しないので、応答を積む順が手順の順序を表す。
 """
@@ -160,7 +160,7 @@ DATA: dict[str, Any] = {
     "Operator": {"Managed": False, "HiddenByDefault": False},
 }
 
-# DATA から写す [launch-template]。design の What is copied の表のとおりに直したもの
+# DATA からコピーする [launch-template]。design の What is copied の表のとおりに直したもの
 COPIED: dict[str, Any] = {
     "ImageId": IMAGE_NAME,
     "InstanceType": "t3.small",
@@ -375,7 +375,7 @@ def test_it_imports_a_stopped_instance(
 ) -> None:
     """AMI を作り、available になってから、同じインスタンスを起動する設定ファイルを書く。
 
-    確認の前に、作る AMI、写す設定、起動のたびに変わるアドレス、AMI に入れない EBS を
+    確認の前に、作る AMI、コピーする設定、起動のたびに変わるアドレス、AMI に入れない EBS を
     見せる。元のインスタンスには何もしない。
     """
     identified(aws_stubs)
@@ -431,7 +431,7 @@ def test_the_config_file_it_writes_is_read_as_it_is(aws_stubs: Stubs, service: S
 
 def test_copied_fixes_the_items_as_the_design_says(aws_stubs: Stubs, ec2: EC2Client) -> None:
     """読み出したときにだけある項目、元の値で起動できない項目、同じインスタンスにならない
-    項目を直し、ほかはそのまま写す。
+    項目を直し、ほかはそのままコピーする。
 
     アドレスは数にし、ENI はどれも終了とともに消し、AssociatePublicIpAddress は ENI ごとの
     属性から読む。
@@ -558,7 +558,7 @@ def test_it_copies_the_cpu_credits_as_they_are(
     written: dict[str, str] | None,
     expected: dict[str, str] | None,
 ) -> None:
-    """読めた CreditSpecification はそのまま写す。T 系でなければ（t1 も）補わない。"""
+    """読めた CreditSpecification はそのままコピーする。T 系でなければ（t1 も）補わない。"""
     data = {**without(DATA, "CreditSpecification"), "InstanceType": instance_type}
     if written is not None:
         data["CreditSpecification"] = written
@@ -600,9 +600,9 @@ def test_it_leaves_out_the_instance_profile_the_source_does_not_have(
 def test_it_removes_the_tags_aws_reserves_and_reports_them(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """aws: で始まるキーは書けないので写さず、写さなかったことをキーごとに知らせる。
+    """aws: で始まるキーは書けないのでコピーせず、コピーしなかったことをキーごとに知らせる。
 
-    タグが 1 つも残らない TagSpecifications の要素は、写しても何も付けないので書かない。
+    タグが 1 つも残らない TagSpecifications の要素は、コピーしても何も付けないので書かない。
     """
     data = copy.deepcopy(DATA)
     data["TagSpecifications"] = [

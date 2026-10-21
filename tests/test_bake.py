@@ -757,7 +757,7 @@ def test_it_names_a_tag_by_its_whole_key(aws_stubs: Stubs, configured: Service) 
     """タグの位置は Tags[Key=<キー>] で、temt:service のように : を含むキーも切らずに書く。
 
     設定ファイルに足したタグがまだ無く、テンプレートの temt:service が別のサービスを
-    指している（他のサービスのテンプレートを写したときなど）。
+    指している（他のサービスのテンプレートをコピーしたときなど）。
     """
     with configured.conf_path.open("a", encoding="utf-8") as file:
         _ = file.write(

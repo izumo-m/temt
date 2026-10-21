@@ -337,14 +337,14 @@ def mark_baked(ssm: SSMClient, service: Service, one: Instance, image_id: str) -
 def mark_fresh(record: Record, image_id: str) -> None:
     """最後に入れた版を AMI image_id に焼いたものとして、記録を書き換える。
 
-    版とオプションを焼いた版とオプションに写し、instance を消す。deploy が、焼いたあとの
+    版とオプションを焼いた版とオプションにコピーし、instance を消す。deploy が、焼いたあとの
     記録の大きさを見積もるのにも使う。
     """
     fields = record.fields
     fields["baked_version"] = fields.get("version", "")
     fields["baked_image"] = image_id
     _ = fields.pop("instance", None)
-    # 読めない options は、書かれていたままの値を写す
+    # 読めない options は、書かれていたままの値をコピーする
     _ = record.unread.pop(BAKED_OPTIONS, None)
     if record.options is None:
         record.baked_options = None
@@ -367,7 +367,7 @@ def mark_removed(record: Record, instance_id: str) -> None:
     _ = fields.pop("instance", None)
     _ = fields.pop("deployed", None)
     fields["removed"] = instance_id
-    # 読めない baked_options は、書かれていたままの値を写す
+    # 読めない baked_options は、書かれていたままの値をコピーする
     _ = record.unread.pop(OPTIONS, None)
     if record.baked_options is None:
         record.options = None

@@ -409,7 +409,7 @@ def _without_read_only(value: Any, path: tuple[str, ...]) -> Any:
 def render(data: Mapping[str, Any], notes: Mapping[str, str] | None = None) -> list[str]:
     """中身を、設定ファイルの [launch-template] と同じ TOML の行にする。template show が使う。
 
-    そのまま設定ファイルに写せる形にする。タグの並び（Tags）と IamInstanceProfile は
+    そのまま設定ファイルにコピーできる形にする。タグの並び（Tags）と IamInstanceProfile は
     インラインにする。notes は値（サブネットの ID など）から、
     その値の行の後ろに添えるコメントへの対応。
     """

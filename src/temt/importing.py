@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 STOPPED = "stopped"
 # 見つからないインスタンス ID を指したときの誤りの名前
 NO_SUCH_INSTANCE = "InvalidInstanceID.NotFound"
-# 写さない項目。design の What is copied
+# コピーしない項目。design の What is copied
 DROPPED = (
     "BlockDeviceMappings",
     "InstanceMarketOptions",
@@ -110,9 +110,9 @@ def _interfaces(ec2: EC2Client, item: Mapping[str, Any]) -> dict[int, str]:
 
 
 def _interface(ec2: EC2Client, one: dict[str, Any], ids: Mapping[int, str]) -> dict[str, Any]:
-    """ネットワークインターフェースの要素 1 つを、写せる形にする。
+    """ネットワークインターフェースの要素 1 つを、コピーできる形にする。
 
-    アドレスは値を写さず数にし（元のインスタンスが持ち続けるので、写すと start が
+    アドレスは値をコピーせず数にし（元のインスタンスが持ち続けるので、コピーすると start が
     断られる）、AssociatePublicIpAddress は ENI の属性から読み、DeleteOnTermination は
     true にする。
     """
@@ -141,7 +141,7 @@ def _interface(ec2: EC2Client, one: dict[str, Any], ids: Mapping[int, str]) -> d
 def copied(
     ec2: EC2Client, item: Mapping[str, Any], data: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
-    """get-launch-template-data の中身を、[launch-template] に写せる形に直す。
+    """get-launch-template-data の中身を、[launch-template] にコピーできる形に直す。
 
     消した aws: のタグのキーも返す。ImageId は呼ぶ側が、作る AMI の名前にする。
     """
@@ -254,7 +254,7 @@ def _confirm(
     *,
     yes: bool,
 ) -> None:
-    """手順 3。取り込むインスタンス、作る AMI、写す設定、変わるものを挙げて確認する。"""
+    """手順 3。取り込むインスタンス、作る AMI、コピーする設定、変わるものを挙げて確認する。"""
     tag = aws.tag(item, "Name")
     lines = [
         f"instance: {instance_id}" + (f" (Name={printable(tag)})" if tag else ""),

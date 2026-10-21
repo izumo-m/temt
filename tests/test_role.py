@@ -269,7 +269,7 @@ def test_import_rewrites_role_and_the_instance_profile(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """インラインポリシーは Statement ごとに [[role.<ポリシー名>]] に、管理ポリシーは
-    ARN のまま ManagedPolicyArns に写し、IamInstanceProfile を temt のものにする。
+    ARN のまま ManagedPolicyArns にコピーし、IamInstanceProfile を temt のものにする。
 
     名前は規則に合わせて小文字にし、使えない文字をハイフンにする。AWS には何も書かない。
     """
@@ -594,7 +594,7 @@ def test_import_refuses_a_role_of_another_account(
     aws_stubs: Stubs, imported: Service, answer: Terminal
 ) -> None:
     """ARN のアカウントが資格情報のものと違えば、読まずに止める。同じ名前の別のロールを
-    写さないためである。"""
+    コピーしないためである。"""
     aws_stubs.sts.add_response(
         "get_caller_identity",
         {"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/x", "UserId": "x"},
