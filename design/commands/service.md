@@ -130,6 +130,8 @@ If it stops during the update phase, whatever was already written stays.
 The config file `apply` writes when none exists, after the question above. It holds:
 
 - A comment at the top on how to edit it.
+- `AwsProfile`, when the profile was chosen by `--profile` or the environment
+  ([config.md](../config.md#profile)).
 - `IamInstanceProfile.Name = "${temt:name}"` in `[launch-template]`, so the instance
   gets temt's role. Written by name with the variable so that a copy for another
   `<svc>` attaches that service's role
@@ -164,7 +166,7 @@ prints the changes detected so far and then exits with the same error. It prints
 
 | Step | Kind | Name | Printed |
 | --- | --- | --- | --- |
-| 2 | `conf` | Key position (`launch-template.IamInstanceProfile.Name`, `role.ec2`) | Only from `apply` for a new service: the values the scaffold writes |
+| 2 | `conf` | Key position (`AwsProfile`, `launch-template.IamInstanceProfile.Name`, `role.ec2`) | Only from `apply` for a new service: the values the scaffold writes |
 | 3 | `dir` | The ssh directory, `keys/`, and their missing parents | Creating; setting the mode to 700 |
 | 3 | `command` | The service command | Writing |
 | 5 | `role` | `<name>` | Creating; tags to add, the region's tag included |
@@ -359,8 +361,9 @@ The import does not deploy `idle-shutdown`; the user deploys it afterwards, as f
 service.
 
 The source's region is the region of the run, given with `--region` and the like
-([config.md](../config.md#region)); the profile likewise. Neither is written to the
-config file.
+([config.md](../config.md#region)); the profile likewise. The region is not written to
+the config file; the profile is, as for the scaffold of `apply`
+([config.md](../config.md#profile)).
 
 1. If the config file exists, exit doing nothing: an import goes only into a service
    without one. Find the instance by ID. If it is not `stopped`, exit telling the user
@@ -429,9 +432,9 @@ instance silently. When the source's value cannot be read, AWS's default (the va
 launched without the item) is written, not temt's. `InstanceInitiatedShutdownBehavior`
 is the exception.
 
-At the top level, the config file gets only `WaitForSsm = false`, when the source is
-not registered with SSM ([instance.md](instance.md#start)). `AwsRegion` and
-`AwsProfile` are not written, as by `apply`.
+At the top level, the config file gets only `AwsProfile` as above, and
+`WaitForSsm = false` when the source is not registered with SSM
+([instance.md](instance.md#start)). `AwsRegion` is not written, as by `apply`.
 
 Making a template copied this way was checked on real AWS; launching from it was not
 (the requester: the earlier checks on real AWS are enough). `CpuOptions` and the like

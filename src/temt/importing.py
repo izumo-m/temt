@@ -231,11 +231,13 @@ def _registered(ssm: SSMClient, instance_id: str) -> bool:
     return bool(found.get("InstanceInformationList"))
 
 
-def _text(data: Mapping[str, Any], *, registered: bool) -> str:
-    """書く設定ファイルの中身。最上位には、SSM に登録されていないときの WaitForSsm だけを
-    書く。
+def _text(data: Mapping[str, Any], *, registered: bool, profile: str | None) -> str:
+    """書く設定ファイルの中身。最上位には、--profile か環境変数で選んだプロファイル profile と、
+    SSM に登録されていないときの WaitForSsm だけを書く。
     """
     document = tomlkit.parse(HEADER)
+    if profile:
+        document["AwsProfile"] = profile
     if not registered:
         document["WaitForSsm"] = False
     text = tomlkit.dumps(document)
@@ -297,6 +299,11 @@ def run(service: Service, instance_id: str, *, yes: bool) -> None:
             f"{printable(tilde(service.conf_path))} exists; service import makes a new service only"
         )
     values = conf.load(service, missing_ok=True)
+    # 書く AwsProfile で取り込む。明示しないと、boto3 は環境変数の鍵をプロファイルより先に
+    # 使うので、あとのコマンドと別のアカウントで AMI を作ることがある
+    profile = aws.written_profile()
+    if profile:
+        values.AwsProfile = profile
     session = aws.session(values)
     ec2 = session.client("ec2")
     ssm = session.client("ssm")
@@ -321,7 +328,7 @@ def run(service: Service, instance_id: str, *, yes: bool) -> None:
             msg.warn(
                 f"the tag {printable(key)} is not copied; AWS reserves keys starting with aws:"
             )
-        text = _text(data, registered=registered)
+        text = _text(data, registered=registered, profile=profile)
         # 手順 3
         _confirm(session, service, instance_id, item, name, text, raw, yes=yes)
         # 手順 4

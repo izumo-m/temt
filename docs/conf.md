@@ -92,8 +92,13 @@ Description = "home"
 
 **`AwsProfile`。** `<svc>.toml` に書けば、そのサービスはいつもその AWS のプロファイルを
 使う。違う値の `--profile` を付けると、引数の誤りになる。書かなければ、コマンドの
-たびに上の順で決める。`--profile` はその実行のあいだだけ効き、`apply` も
-`service import` もこの項目を書かない。
+たびに上の順で決める。
+
+`apply` の雛形と `service import` が設定ファイルを新しく書くときは、`--profile` か
+環境変数で AWS のプロファイルを選んでいれば、それをこの項目に書く。あとのコマンドは、
+`--profile` や環境変数が無くても同じアカウントを使う。共通ファイルの `AwsProfile` で
+決まるときは書かない。すでにある設定ファイルには書かず、`--profile` はその実行の
+あいだだけ効く。
 
 環境変数 `AWS_PROFILE` は、`--profile` も `AwsProfile` も無いときに使われる。
 `AWS_DEFAULT_PROFILE` と両方に別の値を入れると、temt は `AWS_DEFAULT_PROFILE` を使う。
@@ -327,8 +332,8 @@ Ubuntu の AMI（とそこから焼いた AMI）では、起動するとイン�
 
 #### 別のアカウントやリージョンで使うとき
 
-ファイルにアカウントは書かないので、別のアカウントの AWS のプロファイルを `--profile` に
-付けて `apply` を実行すれば、そのアカウントにサービスを新しく作る。`AwsRegion` を
+`AwsProfile` を書いていなければ、別のアカウントの AWS のプロファイルを `--profile` に
+付けて `apply` を実行すると、そのアカウントにサービスを新しく作る。`AwsRegion` を
 書いていなければ、別のリージョンで `apply` すると、そのリージョンにクローンができる。
 
 どちらの場合も、アカウントやリージョンの中のリソースを指す項目（`SubnetId`、ID で書いた
@@ -568,6 +573,8 @@ Resource = "arn:aws:s3:::my-bucket/*"
 作る。書くのは次のものだけで、ほかの項目は既定で埋まる。
 
 - 先頭の説明のコメント。
+- `--profile` か環境変数で選んだ AWS のプロファイルの [`AwsProfile`](#最上位)。
+  共通ファイルの `AwsProfile` で決まるときは書かない。
 - temt のインスタンスロールを付ける `IamInstanceProfile.Name = "${temt:name}"`。
 - [`ec2`](#role) の既定。
 - 受信規則とポリシーの例。コメントにしてある。

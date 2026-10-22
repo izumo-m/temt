@@ -7,7 +7,8 @@ AMI を、ami delete が引数の AMI を引くのに使う。サービスの最
 apply が起動テンプレートを作るときと、show と destroy が見せるときに使う。Session を
 作るのもここで、--svc を付けたコマンドには設定ファイルから、無いコマンドには
 --profile と --region から作る（env_session）。後者が知らせるアカウントも STS から読み、
-environment がそれを 1 行で知らせる。AWS が返した時刻や deploy の記録の時刻を表示の
+environment がそれを 1 行で知らせる。新しく書く設定ファイルの AwsProfile を決める
+written_profile もここに置く。AWS が返した時刻や deploy の記録の時刻を表示の
 形にする when と cell_time、応答からタグの値を引く tag もここに置く。
 
 botocore の例外は、AMI が無いことを表す誤りのほかは、ここでは捕まえない。cli.run が
@@ -90,6 +91,21 @@ def profile(values: Conf) -> str | None:
     資格情報は AWS の既定の規則で決まる。aws-cli の環境は proxy が boto3 に揃える。
     """
     return conf.OPTION_PROFILE or values.AwsProfile
+
+
+def written_profile() -> str | None:
+    """apply の雛形と service import が新しく書く設定ファイルの AwsProfile。
+
+    --profile か、プロファイルの環境変数で選んだプロファイルを書き、作ったサービスの
+    あとのコマンドが、環境変数が無くても同じアカウントを使うようにする。共通ファイルの
+    AwsProfile で決まるときは書かない（None）。書かなくても効くからである。環境変数は
+    boto3 が読む順に見る。
+    """
+    if conf.OPTION_PROFILE:
+        return conf.OPTION_PROFILE
+    if conf.common_values().get("AwsProfile"):
+        return None
+    return next((os.environ[name] for name in PROFILE_ENV if os.environ.get(name)), None)
 
 
 def session(values: Conf) -> boto3.Session:

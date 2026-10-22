@@ -1654,10 +1654,20 @@ def test_the_scaffold_has_the_documented_layout(service: Service) -> None:
     assert values.role.policies == {conf.EC2: conf.ec2_default()}
 
 
+def test_the_scaffold_writes_the_aws_profile_first(service: Service) -> None:
+    """AwsProfile は最上位の項目なので、先頭の説明のすぐ後、テーブルより前に書く。"""
+    text = conf.scaffold(profile=True, ec2=True, aws_profile='my "work"')
+    assert text.startswith(f'{conf.HEADER}\nAwsProfile = "my \\"work\\""\n\n[launch-template]\n')
+    assert conf.parse_text(text, service.conf_path).AwsProfile == 'my "work"'
+
+
 @pytest.mark.parametrize(("profile", "ec2"), [(False, True), (False, False)])
 def test_the_scaffold_leaves_out_what_is_not_asked(profile: bool, ec2: bool) -> None:
-    """IamInstanceProfile と [[role.ec2]] は、書かないこともできる。例のコメントは残す。"""
+    """AwsProfile、IamInstanceProfile、[[role.ec2]] は、書かないこともできる。例のコメントは
+    残す。
+    """
     text = conf.scaffold(profile=profile, ec2=ec2)
+    assert "AwsProfile" not in text
     assert "IamInstanceProfile" not in text
     assert ("[[role.ec2]]" in text) is ec2
     assert text.startswith(conf.HEADER)

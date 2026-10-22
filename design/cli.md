@@ -120,8 +120,9 @@ operations can be typed in this form.
 
 ### Profile and region
 
-- `--profile <profile>` uses that profile for this run only
-  ([config.md](config.md#profile)). No command writes it to the config file. With
+- `--profile <profile>` uses that profile for this run only, except that a config file
+  written by `apply` or `service import` records it
+  ([config.md](config.md#profile)). With
   `--svc`, a `--profile` that differs from `AwsProfile` written in the service's config
   file is a usage error, as for the region. It is a usage error for the commands that
   do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`, and `app list`
