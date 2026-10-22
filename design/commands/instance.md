@@ -56,9 +56,8 @@ Observed on real AWS when `start` launches right after `apply` created the role 
 instance profile:
 
 1. EC2 does not know the new instance profile name yet: `run-instances` is refused for
-   a few seconds. `apply` may already have shown this as a launch template warning,
-   when it created the template or a version
-   ([topics/launch-template.md](../topics/launch-template.md#versions)).
+   a few seconds. `apply` does not warn about it when it creates the template or a
+   version in that time ([topics/launch-template.md](../topics/launch-template.md#versions)).
 2. After the role and instance profile are deleted and an `apply` recreates them under
    the same name (`destroy` in the last region that used them, or an `apply` after
    `[role]` was removed, followed by an `apply` with `[role]` again), EC2 may still

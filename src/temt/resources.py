@@ -81,7 +81,6 @@ VERSIONS_PER_CALL = 200
 # update は起動テンプレートより先にインスタンスプロファイルを揃えるので、この誤りは
 # IAM の反映待ちであり、待てば消える
 PROFILE_NOT_READY = "InvalidIamInstanceProfile.NotFound"
-NOT_READY_NOTE = "IAM has not propagated it to EC2 yet; the instance profile exists"
 
 # ロールを引き受けられるのは EC2 だけとする
 TRUST_POLICY = json.dumps(
@@ -854,16 +853,16 @@ def _warnings(result: Mapping[str, Any], name: str, *, profile_aligned: bool) ->
     AWS は作るときに中身を最後まで検査せず、問題があれば Warning で返す。捨てると
     次の start まで分からないので、そのまま見せる。profile_aligned（apply の update が
     直前にインスタンスプロファイルを揃えた）なら、プロファイルが無いという警告は、
-    揃えたものが見えていないだけなので、そう添える。bake はプロファイルを確かめない
-    ので添えない。手で消されていれば、待っても直らないからである。
+    揃えたものが EC2 にまだ届いていないだけで待てば消えるので、見せない。すぐ start
+    して断られれば、start がそう言う。bake はプロファイルを確かめないので見せる。
+    手で消されていれば、待っても直らないからである。
     """
     warning: Mapping[str, Any] = result.get("Warning") or {}
     for error in warning.get("Errors") or []:
         code = error.get("Code")
-        note = f" ({NOT_READY_NOTE})" if profile_aligned and code == PROFILE_NOT_READY else ""
-        msg.warn(
-            f"launch template {name}: {code}: {table.printable(str(error.get('Message')))}{note}"
-        )
+        if profile_aligned and code == PROFILE_NOT_READY:
+            continue
+        msg.warn(f"launch template {name}: {code}: {table.printable(str(error.get('Message')))}")
 
 
 def _version(number: int | None, name: str) -> int:
