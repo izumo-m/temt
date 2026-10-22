@@ -1,0 +1,7 @@
+[Unit]
+Description=Power off this instance when nobody has used it for a while
+Documentation=file:/usr/local/bin/idle-shutdown
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/idle-shutdown

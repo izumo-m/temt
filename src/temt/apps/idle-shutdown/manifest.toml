@@ -1,0 +1,8 @@
+name = "idle-shutdown"
+version = "2"
+description = "Power off the instance when nobody has used it for a while"
+
+[options.limit]
+default = "1h"
+description = "power off after this long without use: 90m, 4h, 1d, 3600 (seconds), up to 365d, or off"
+pattern = '[1-9][0-9]*[smhd]?|off'

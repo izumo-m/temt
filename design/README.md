@@ -1,0 +1,72 @@
+# temt design
+
+The design of temt: what it builds and how. The reader is Claude only, so it is
+written in English and may record rationale, rejected alternatives, and review
+findings that were declined. The user docs are Japanese and live in docs/:
+[usage.md](../docs/usage.md) (how to use), [conf.md](../docs/conf.md) (the config
+file: format, keys, defaults), [apps.md](../docs/apps.md) (how to
+write an app), and [apps/](../docs/apps/) (the bundled apps). design/ refers to them
+instead of repeating them. [glossary.md](glossary.md) maps the English terms here to
+the Japanese terms there.
+
+Design is discussed in chat until it settles; only settled decisions are written
+here. Rationale is written briefly, where the steps alone do not show the intent.
+Where this and the code disagree, decide which is right before changing either.
+
+temt builds the cycle of preparing a service, launching its instance, logging in
+with ssh, installing apps (`deploy`), turning the instance into an AMI (`bake`),
+terminating it, and cleaning up. An existing stopped instance can be imported as a
+service (`service import`). The same config file applied in another region makes a
+clone of the service there ([config.md](config.md#clones)). Once the bundled app
+`idle-shutdown` is deployed and baked, an unused instance terminates itself
+([apps/idle-shutdown.md](apps/idle-shutdown.md)).
+
+## Files
+
+| File | Contents |
+| --- | --- |
+| [principles.md](principles.md) | Assumptions and what to prefer when options diverge |
+| [glossary.md](glossary.md) | English and Japanese terms |
+| [naming.md](naming.md) | Service names, resource names, tags, `--svc` |
+| [local-files.md](local-files.md) | Repository layout, files in the user's home, location environment variables |
+| [config.md](config.md) | The config file, the defaults file, profile, region, clones, account |
+| [resources.md](resources.md) | The AWS resources of a service, the instance role shared by regions, and how `apply` and `destroy` treat them |
+| [cli.md](cli.md) | Command grammar, the command table, behavior common to all commands, list tables |
+| [commands/service.md](commands/service.md) | `apply`, `diff`, `destroy`, `service import`, `service list` |
+| [commands/instance.md](commands/instance.md) | `start`, `stop`, `terminate`, `reboot`, `status`, `instance list` |
+| [commands/template.md](commands/template.md) | `template show` |
+| [commands/ami.md](commands/ami.md) | `bake`, `ami list`, `ami prune`, `ami delete` |
+| [commands/role.md](commands/role.md) | `role import`, `role delete` |
+| [commands/sg.md](commands/sg.md) | `sg list`, `sg add`, `sg remove`, `sg diff`, `sg show` |
+| [commands/app.md](commands/app.md) | The deploy record, `app` commands, `deploy`, app options, `app remove`, bundled apps |
+| [commands/ssh.md](commands/ssh.md) | `proxy` and the login routes (`TEMT_LOGIN`), `set-port` |
+| [topics/ami.md](topics/ami.md) | Creating, selecting, and naming AMIs |
+| [topics/instance.md](topics/instance.md) | Finding instances, intermediate states, terminating, waiting, locks |
+| [topics/login-key.md](topics/login-key.md) | The login key that `proxy` sends with EC2 Instance Connect |
+| [topics/launch-template.md](topics/launch-template.md) | Launch template contents and versions |
+| [topics/security-group.md](topics/security-group.md) | Security group, ingress rules, global IP address |
+| [topics/ssh.md](topics/ssh.md) | known_hosts, the ssh config, the `Include` in `~/.ssh/config` |
+| [topics/sshd-ports.md](topics/sshd-ports.md) | sshd listening ports and the script `set-port` runs |
+| [apps/idle-shutdown.md](apps/idle-shutdown.md) | Bundled app `idle-shutdown`: in-use checks, limit, reporting, login message |
+| [apps/swapfile.md](apps/swapfile.md) | Bundled app `swapfile` |
+| [apps/timezone-tokyo.md](apps/timezone-tokyo.md) | Bundled app `timezone-tokyo` |
+
+## Conventions
+
+- `<svc>` is the service name and `<name>` is `temt-<svc>` ([naming.md](naming.md)).
+- Commands that have a short form are written by the short form (`apply`, not
+  `service apply`), and `--svc` is omitted.
+- The conf directory and the ssh directory are written at their default locations
+  (`~/.config/temt`, `~/.ssh/temt`).
+- AWS APIs are written by their aws-cli subcommand names (`describe-instances`);
+  in boto3 they are the methods of the same name (`describe_instances`).
+- Keys of the config file are written without their table (`InstanceType`).
+- design/ describes behavior: what temt does, its rules, rationale, and rejected
+  alternatives. The wording of messages (errors, warnings, prompts) and implementation
+  details (function names, how the code does something, call order) are left to the code
+  and its comments.
+
+## Premises
+
+- Rare races from concurrent runs or from AWS's eventual consistency are acceptable
+  when `status` shows the result and running the command again converges.

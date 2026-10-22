@@ -1,0 +1,8 @@
+name = "swapfile"
+version = "1"
+description = "Add the swap file /swapfile and use it at every boot"
+
+[options.size]
+default = "1g"
+description = "the size of /swapfile: 512m, 1g, 4g (MiB or GiB)"
+pattern = '[1-9][0-9]*[mg]'

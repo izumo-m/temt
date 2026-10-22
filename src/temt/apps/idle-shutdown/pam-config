@@ -1,0 +1,7 @@
+Name: idle-shutdown: mark the instance as in use when a login session opens or closes
+Default: yes
+Priority: 0
+Session-Interactive-Only: yes
+Session-Type: Additional
+Session:
+	optional			pam_exec.so quiet /usr/local/bin/idle-shutdown touch pam

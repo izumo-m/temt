@@ -1,0 +1,119 @@
+# Repository and local files
+
+## Repository layout
+
+```
+src/temt/        Python package of the command temt
+src/temt/apps/   bundled apps
+tests/           tests of temt (pytest)
+design/          the design (this directory; English, for Claude)
+docs/            user docs: usage.md, conf.md, apps.md, apps/
+README.md        overview and installation
+CONTRIBUTING.md  rules and steps for developing temt
+SECURITY.md      how to report a vulnerability
+CLAUDE.md        instructions for Claude Code; points to design/ and CONTRIBUTING.md
+LICENSE          MIT license
+pyproject.toml   package and dependency definition; uv reads it
+uv.lock          pinned dependencies of the development environment (uv run)
+mise.toml        versions of python and uv; tasks install, check, check-py314
+```
+
+`mise run install` runs `uv tool install --python /usr/bin/python3 .`. Running it again
+after editing the sources installs the edited code (verified; a review claimed uv would
+reuse a cached build, which it did not), so CONTRIBUTING.md just says to run it again.
+
+## Files in the user's home
+
+```
+~/.local/bin/
+    <name>                      service command; apply writes it if absent
+~/.config/temt/                 conf directory; mode 700 when temt creates it
+    <svc>.toml                  config file of the service; apply writes the scaffold if
+                                absent
+    defaults.toml               defaults file: values common to every service; placed by
+                                the user, never written by temt
+    apps/<app ID>/              app that deploy looks up first by app ID; placed by the user
+~/.ssh/temt/                    ssh directory; mode 700
+    config                      ssh config; apply adds and updates Host blocks;
+                                included from ~/.ssh/config
+    keys/                       keys; mode 700
+    keys/temt                   default login key made by apply; mode 600
+    keys/temt.pub               its public key, which proxy sends
+    known_hosts.d/<name>/       per-instance known_hosts, current, .lock
+    .config.lock                lock held while the ssh config is rewritten
+```
+
+At the top of `~/.ssh/config` sit two lines: a marker comment and an `Include` of the
+ssh directory's `config`. `apply` adds them if absent
+([topics/ssh.md](topics/ssh.md#the-include-in-sshconfig)).
+
+`deploy` looks up an app given by app ID first in `apps/<app ID>/` of the conf
+directory, then among the bundled apps (`apps/<app ID>/` of the package). Nothing is
+placed in the user's home for the bundled apps, so reinstalling or upgrading temt
+needs no step to bring them in line.
+
+## Service command
+
+The service command is this 3-line shell script. It finds `temt` through `PATH`, so a
+change in how or which version of `temt` is installed needs no rewrite.
+
+```sh
+#!/bin/sh
+# Written by temt apply for the service <svc>.
+exec temt --svc <svc> "$@"
+```
+
+## What destroy leaves
+
+`destroy` deletes, of the local files, only the known_hosts files of the instances it
+terminated, as `terminate` does ([topics/ssh.md](topics/ssh.md#known_hosts)). The known_hosts
+directory, the service command, the config file, and the Host block stay and are listed
+as left for the next `apply`; a clone in another region may still use them. The lock
+stays per service; nothing is done for clones operated at the same time, where the
+later command stops on the lock.
+
+## Location environment variables
+
+The conf directory and the ssh directory can each be moved by an environment variable.
+
+| Variable | Location | Default |
+| --- | --- | --- |
+| `TEMT_CONF_DIR` | conf directory | `~/.config/temt` |
+| `TEMT_SSH_DIR` | ssh directory | `~/.ssh/temt` |
+
+Who reads them:
+
+- Every command with `--svc`: both. `TEMT_SSH_DIR` is read where
+  the ssh directory is used (the default login key, locks, the ssh config), so a
+  command that uses none of them does not notice a wrong value.
+- `service list`: only `TEMT_CONF_DIR`, which locates the config files.
+- `instance list`, `ami list`, `ami prune`, and `ami delete` without `--svc`:
+  `TEMT_CONF_DIR`, which locates the defaults file
+  ([config.md](config.md#commands-without---svc)). `ami prune` also reads
+  `TEMT_SSH_DIR`, which locates the locks; a wrong value is an error before the
+  confirmation.
+- `app list` without `--svc`: only `TEMT_CONF_DIR`, which locates the apps.
+
+Values are absolute paths; the rules for values are in
+[docs/conf.md](../docs/conf.md#場所を変える環境変数). A command that reads a variable
+reads it on every run; the value is never stored. `ProxyCommand` passes both
+locations to `proxy` even when they are the defaults
+([topics/ssh.md](topics/ssh.md)).
+
+`TEMT_CONF_DIR` selects where service definitions are read. Once changed, `temt`
+commands from the next run on read the config files there. The ssh directory is one
+across conf directories, so ssh reaches a service applied from any of them. In
+exchange, the same `<svc>` cannot have config files in two locations (`apply` step 1,
+[commands/service.md](commands/service.md#apply);
+[topics/ssh.md](topics/ssh.md#services-across-conf-directories)).
+
+`TEMT_SSH_DIR` moves the ssh config, keys, and known_hosts. It cannot point at
+`~/.ssh` itself. `UserKnownHostsFile`, `Include`, and an `IdentityFile` that `apply`
+adds to a block without one follow the value at the time of that `apply`. An
+`IdentityFile` already in a block is never rewritten, so after moving the ssh config
+by hand, its line still names the previous location until the user deletes it (the
+next `apply` then writes the default key of the new location). The `Include`
+in `~/.ssh/config` is a single line, so after changing the variable and running
+`apply`, ssh no longer reaches the Hosts in the previous ssh directory; `apply` warns
+and lists them. temt does not move what remains in the previous location, and
+`destroy` cleans up only the location the variable points to at that time.

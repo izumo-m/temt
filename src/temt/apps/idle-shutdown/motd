@@ -1,0 +1,8 @@
+#!/bin/sh
+# ログインのメッセージに idle-shutdown の状態を出す。install が
+# /etc/update-motd.d/60-idle-shutdown として置き、pam_motd がログインのたびに root で
+# 実行する。警告も字下げして一緒に出す
+[ -x /usr/local/bin/idle-shutdown ] || exit 0
+echo
+echo "idle-shutdown (sudo idle-shutdown limit 4h to change):"
+/usr/local/bin/idle-shutdown status --login 2>&1 | sed 's/^/  /'

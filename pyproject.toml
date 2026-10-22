@@ -1,0 +1,66 @@
+[project]
+name = "temt"
+version = "1.0.0"
+description = "使い捨ての EC2 インスタンスにサービスを載せるツール"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Masanao Izumo" }]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.43.98",
+    "tomlkit>=0.15.1",
+]
+
+[project.urls]
+Repository = "https://github.com/izumo-m/temt"
+Issues = "https://github.com/izumo-m/temt/issues"
+Changelog = "https://github.com/izumo-m/temt/releases"
+
+[project.scripts]
+temt = "temt.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+# strict は厳しすぎるので pyright の既定 standard を土台にし、
+# 誤りを見つける規則を少しだけ足す。注釈を求めるのは関数の引数だけ
+typeCheckingMode = "standard"
+# warning だけでは終了コードが 0 になり、commit 前の確認をすり抜ける
+failOnWarnings = true
+reportMissingParameterType = "error"
+reportMatchNotExhaustive = "error"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnnecessaryIsInstance = "warning"
+reportUnnecessaryComparison = "warning"
+reportDeprecated = "warning"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# T20: print は標準出力に書く。ProxyCommand では標準出力が ssh の通信路なので禁止する
+# PTH: パス操作は pathlib に揃える
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "T20", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+# temt と一緒に配るアプリはインスタンスの上で動くコマンドで、結果を標準出力に書く
+"src/temt/apps/**" = ["T20"]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+    "types-boto3[accessanalyzer,ec2,ec2-instance-connect,iam,ssm,sts]>=1.43.98",
+]
