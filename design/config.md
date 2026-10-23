@@ -137,7 +137,7 @@ source instance in the region decided by this order.
 
 Applying the same config file in another region makes a clone of the service there
 ([principles.md](principles.md#assumptions)). Each region has its own launch template,
-security group, instance, and SSM parameters (app values and deploy records); the
+security group, instance, and SSM parameters (app values); the
 instance role and instance profile `<name>` are one pair shared by every region
 ([resources.md](resources.md#instance-profile-and-instance-role)). AMIs are not copied
 by temt: the user copies them by hand under the same name
@@ -182,8 +182,8 @@ none, since AWS answers `default` even when nothing was chosen, and then the
 credentials may come from key environment variables and the like.
 
 The commands that do not call AWS use neither a profile nor a region
-([cli.md](cli.md#grammar)). `app list` without `--svc` reads only `apps/` in the conf
-directory and the bundled apps.
+([cli.md](cli.md#grammar)). `app list`, with or without `--svc`, reads only `apps/` in
+the conf directory and the bundled apps, and no config file.
 
 ## Account
 

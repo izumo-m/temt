@@ -23,13 +23,14 @@ from conftest import (
     WHERE,
     Stubs,
     an_instance,
+    apps_archive,
     deadline,
     identified,
     reservations,
     taken,
 )
 
-from temt import app, bake, conf, deploy, home, lock, proc, proxy
+from temt import bake, conf, deploy, home, lock, proc, proxy, remote
 from temt.instances import Instance
 from temt.manifest import Manifest, read_manifest
 from temt.msg import TemtError, UsageError
@@ -49,8 +50,11 @@ SEARCH = {
         },
     ]
 }
-RECORD = f"/{NAME}/jupyter/deploy"
 STATUS = f"/{NAME}/jupyter/status"
+# インスタンスの上の deploy の記録の場所
+RECORD = f"{INSTANCE}:/opt/temt/apps/jupyter/temt-deploy.json"
+# deploy が書く記録の、オプションを除く項目
+WRITTEN = {"user": "root", "deployed": "2026-09-27T03:04:05Z", "instance": INSTANCE}
 # 記録に書く時刻
 DEPLOYED = time.struct_time((2026, 9, 27, 3, 4, 5, 6, 270, 0))
 MANIFEST = 'name = "Jupyter Lab"\nversion = "1.2"\ndescription = "notebooks"\n'
@@ -76,10 +80,11 @@ def make_app(where: Path, *, uninstall: bool = True) -> Path:
 
 @dataclass
 class Ssh:
-    """proc.stream と proc.read の代わり。呼ばれたコマンドを控え、決めた結果を返す。
+    """proc.stream、proc.read、proc.capture の代わり。呼ばれたコマンドを控え、決めた結果を返す。
 
     proc.read はつながった先のインスタンス ID を読むときに使い、reached を返す。
-    reached が None なら、つながらなかったものとする。
+    reached が None なら、つながらなかったものとする。proc.capture はインスタンスの上の
+    アプリを読むときに使い、apps を返す。
     """
 
     codes: list[int] = field(default_factory=list)
@@ -90,6 +95,11 @@ class Ssh:
     users: tuple[str, ...] = ("ubuntu",)
     # 呼ばれたときの環境。呼ばれた順に並ぶ
     envs: list[Mapping[str, str] | None] = field(default_factory=list)
+    # インスタンスの上のアプリ（apps_archive）と、読み取りの終了コード
+    apps: dict[str, dict[str, str | bytes]] = field(default_factory=dict)
+    read_code: int = 0
+    # 読み取りのコマンドライン
+    reads: list[list[str]] = field(default_factory=list)
 
     def stream(
         self, argv: list[str], data: bytes | None = None, *, env: Mapping[str, str] | None = None
@@ -108,15 +118,67 @@ class Ssh:
         # ログインシェルが何かを書いても、ID だけを取り出す
         return 0, f"Welcome\n{self.reached}\n"
 
+    def capture(
+        self, argv: list[str], *, env: Mapping[str, str] | None = None
+    ) -> tuple[int, bytes]:
+        self.reads.append(argv)
+        self.envs.append(env)
+        if self.reached is None:
+            return 255, b""
+        if self.read_code:
+            return self.read_code, b""
+        return 0, apps_archive(self.apps)
+
 
 @pytest.fixture
 def ssh(monkeypatch: pytest.MonkeyPatch) -> Ssh:
     fake = Ssh()
     monkeypatch.setattr(proc, "stream", fake.stream)
     monkeypatch.setattr(proc, "read", fake.read)
+    monkeypatch.setattr(proc, "capture", fake.capture)
     monkeypatch.setattr(proc, "require", lambda command: command)
     monkeypatch.setattr(deploy, "gmtime", lambda: DEPLOYED)
     return fake
+
+
+def installed(
+    ssh: Ssh, record: dict[str, Any] | str | None = None, manifest: str = MANIFEST
+) -> None:
+    """インスタンスに前のアプリを置く。record は記録で、文字列ならそのまま書き、None なら
+    記録が無い（前の temt が入れた）。
+    """
+    files: dict[str, str | bytes] = {"manifest.toml": manifest}
+    if record is not None:
+        if not isinstance(record, str):
+            record = json.dumps(record, ensure_ascii=False)
+        files["temt-deploy.json"] = record
+    ssh.apps["jupyter"] = files
+
+
+def sent(ssh: Ssh, name: str) -> tarfile.TarInfo | None:
+    """送った tar.gz のすぐ下のファイル name の項目。無ければ None。"""
+    (_, data), *_ = ssh.calls
+    assert data is not None
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        try:
+            return tar.getmember(f"./{name}")
+        except KeyError:
+            return None
+
+
+def sent_text(ssh: Ssh, name: str) -> str:
+    """送った tar.gz のすぐ下のファイル name の中身。"""
+    (_, data), *_ = ssh.calls
+    assert data is not None
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        found = tar.extractfile(f"./{name}")
+        assert found is not None
+        return found.read().decode()
+
+
+def sent_record(ssh: Ssh) -> dict[str, Any]:
+    """送った deploy の記録。"""
+    return json.loads(sent_text(ssh, "temt-deploy.json"))
 
 
 def ready(stubs: Stubs, state: str = "running") -> None:
@@ -127,68 +189,6 @@ def ready(stubs: Stubs, state: str = "running") -> None:
         TEMPLATES,
     )
     stubs.ec2.add_response("describe_instances", reservations(an_instance(INSTANCE, state)), SEARCH)
-
-
-def has_record(stubs: Stubs, user: str | None = "root") -> None:
-    """app remove が読む記録。user が None なら、user の無い記録とする。"""
-    value = {"name": "Jupyter Lab", "version": "1.2"} | ({"user": user} if user else {})
-    stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(value)}},
-        {"Name": RECORD},
-    )
-
-
-def no_record(stubs: Stubs) -> None:
-    """手順 2。前の記録を読むが、無い。"""
-    stubs.ssm.add_client_error(
-        "get_parameter",
-        service_error_code="ParameterNotFound",
-        http_status_code=400,
-        expected_params={"Name": RECORD},
-    )
-
-
-def read_record(stubs: Stubs, before: dict[str, Any] | str) -> None:
-    """手順 2。前の記録を読む。文字列なら、そのまま記録の値とする。"""
-    value = before if isinstance(before, str) else json.dumps(before)
-    stubs.ssm.add_response(
-        "get_parameter", {"Parameter": {"Name": RECORD, "Value": value}}, {"Name": RECORD}
-    )
-
-
-def recorded(
-    stubs: Stubs,
-    version: int = 1,
-    user: str = "root",
-    before: dict[str, Any] | str | None = None,
-    kept: dict[str, Any] | None = None,
-) -> None:
-    """手順 2 で前の記録を読み、手順 4 で記録を書く。
-
-    before は前の記録で、None なら無い。kept は、instance の後ろに書く項目で、オプションと、
-    前の記録から引き継ぐ項目である。
-    """
-    if before is None:
-        no_record(stubs)
-    else:
-        read_record(stubs, before)
-    value = json.dumps(
-        {
-            "name": "Jupyter Lab",
-            "version": "1.2",
-            "user": user,
-            "deployed": "2026-09-27T03:04:05Z",
-            "instance": INSTANCE,
-            **(kept or {}),
-        },
-        ensure_ascii=False,
-    )
-    stubs.ssm.add_response(
-        "put_parameter",
-        {"Version": version},
-        {"Name": RECORD, "Value": value, "Type": "String", "Overwrite": True},
-    )
 
 
 # --- アプリの在り処 ---
@@ -458,8 +458,8 @@ def test_scripts_pass_on_the_exit_code(
     directory = make_app(home_dir / "jupyter")
     for script in ("install", "uninstall"):
         (directory / script).write_text(f"exit {code}\n", encoding="utf-8")
-    assert over_ssh(deploy._remote(deploy.INSTALL_SCRIPT, str(directory), user), shell) == code
-    assert over_ssh(deploy._remote(deploy.UNINSTALL_SCRIPT, str(directory), user), shell) == code
+    assert over_ssh(remote.remote(deploy.INSTALL_SCRIPT, str(directory), user), shell) == code
+    assert over_ssh(remote.remote(deploy.UNINSTALL_SCRIPT, str(directory), user), shell) == code
     assert directory.exists() == (code != 0)
 
 
@@ -480,7 +480,6 @@ def test_deploy_sends_installs_and_records(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     ready(aws_stubs)
-    recorded(aws_stubs)
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -497,12 +496,19 @@ def test_deploy_sends_installs_and_records(
     assert install == ["ssh", "-T", NAME, install[3]]
     assert install[3].startswith("sudo -n bash -c ")
     assert install[3].endswith(" temt /opt/temt/apps/jupyter root")
+    # 前の記録はインスタンスから、そのアプリだけを読む
+    (read,) = ssh.reads
+    assert read[3].endswith(" temt /opt/temt/apps jupyter")
+    # 記録はディレクトリと一緒に、root の持ち物として送る
+    assert sent_record(ssh) == WRITTEN
+    info = sent(ssh, "temt-deploy.json")
+    assert info is not None
+    assert (info.mode, info.uid, info.gid, info.uname) == (0o644, 0, 0, "root")
     assert told(capsys.readouterr().out) == [
         "using jupyter from ~/.config/temt/apps/jupyter",
         f"checking that 'ssh {NAME}' reaches {INSTANCE}",
         f"sending jupyter to {INSTANCE}",
         f"running install of jupyter as root on {INSTANCE}",
-        f"parameter {RECORD}: created",
         f"deployed jupyter 1.2 to {INSTANCE}; run 'temt bake --svc dev-main' to keep it in the "
         "next instance",
     ]
@@ -522,10 +528,10 @@ def test_deploy_and_remove_pass_the_region_and_the_profile_to_proxy(
     monkeypatch.setenv("TEMT_LOGIN", "direct")
     monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "stale")
     ready(aws_stubs)
-    recorded(aws_stubs)
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
     aws_stubs.done()
-    assert len(ssh.envs) == 3
+    # つながる先を確かめる、前の記録を読む、送る、install を実行する
+    assert len(ssh.envs) == 4
     for env in ssh.envs:
         assert env is not None
         assert env[proxy.PASSED_REGION_ENV] == REGION
@@ -536,45 +542,28 @@ def test_deploy_and_remove_pass_the_region_and_the_profile_to_proxy(
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     monkeypatch.setattr(conf, "OPTION_REGION", "us-west-2")
     ready(aws_stubs)
-    has_record(aws_stubs)
+    installed(ssh, {"user": "root"})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
     aws_stubs.done()
-    assert ssh.envs
+    assert len(ssh.envs) == 4
     for env in ssh.envs:
         assert env is not None
         assert env[proxy.PASSED_REGION_ENV] == "us-west-2"
         assert env[proxy.PASSED_PROFILE_ENV] == "work"
 
 
-def test_deploy_keeps_the_baked_version_of_the_record(
+def test_deploy_writes_the_record_of_this_instance(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
-    """入れ直しても、AMI に焼いた版は残っているので、前の記録の焼いた版を引き継ぐ。
-
-    前の記録の instance は、入れたインスタンスに書き換える。
-    """
+    """AMI から来たアプリを入れ直すと、記録の instance はこのインスタンスになる。"""
     ready(aws_stubs)
-    before = {
-        "name": "Jupyter Lab",
-        "version": "1.1",
-        "user": "root",
-        "deployed": "2026-09-01T00:00:00Z",
-        "instance": "i-0fedcba9876543210",
-        "baked_version": "1.0",
-        "baked_image": "ami-0123456789abcdef0",
-    }
-    recorded(
-        aws_stubs,
-        version=2,
-        before=before,
-        kept={"baked_version": "1.0", "baked_image": "ami-0123456789abcdef0"},
-    )
+    installed(ssh, {"user": "root", "deployed": "2026-09-01T00:00:00Z", "instance": OTHER})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
     aws_stubs.done()
+    assert sent_record(ssh) == WRITTEN
 
 
 @pytest.mark.parametrize(
@@ -637,7 +626,6 @@ def test_deploy_does_not_count_an_instance_that_is_shutting_down(
         reservations(an_instance(OTHER, "shutting-down"), an_instance(INSTANCE, "running")),
         SEARCH,
     )
-    no_record(aws_stubs)
     ssh.codes = [255]
 
     with pytest.raises(TemtError, match=f"cannot send jupyter to {INSTANCE} "):
@@ -650,7 +638,6 @@ def test_deploy_stops_when_it_cannot_send(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    no_record(aws_stubs)
     ssh.codes = [255]
 
     with pytest.raises(
@@ -664,11 +651,10 @@ def test_deploy_stops_when_it_cannot_send(
     assert len(ssh.calls) == 1
 
 
-def test_deploy_does_not_record_when_install_fails(
+def test_deploy_leaves_the_new_files_when_install_fails(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    no_record(aws_stubs)
     ssh.codes = [0, 3]
 
     with pytest.raises(
@@ -692,7 +678,7 @@ class Baking:
     ) -> None:
         self.made.append("check")
 
-    def make(self, ec2: Any, ssm: Any, service: Service, one: Instance) -> None:
+    def make(self, ec2: Any, service: Service, one: Instance) -> None:
         self.made.append(f"make {one.id}")
 
 
@@ -718,7 +704,6 @@ def test_deploy_with_bake_asks_first_and_bakes_last(
         "temt.msg.confirm", lambda question, *, yes: asked.append(f"{question()} {yes}")
     )
     ready(aws_stubs)
-    recorded(aws_stubs)
     identified(aws_stubs)
 
     deploy.run(configured, "jupyter", user=None, baking=True, yes=True)
@@ -738,7 +723,6 @@ def test_deploy_with_bake_does_not_bake_when_install_fails(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh, baking: Baking
 ) -> None:
     ready(aws_stubs)
-    no_record(aws_stubs)
     ssh.codes = [0, 1]
 
     with pytest.raises(TemtError, match="install of jupyter failed"):
@@ -774,13 +758,13 @@ def test_deploy_runs_install_as_the_user(
         )
     ssh.users = ("ubuntu", "app")
     ready(aws_stubs)
-    recorded(aws_stubs, user=user)
 
     deploy.run(configured, "jupyter", user=option, baking=False, yes=False)
 
     aws_stubs.done()
     (_, _), (install, _) = ssh.calls
     assert install[3].endswith(f" temt /opt/temt/apps/jupyter {user}")
+    assert sent_record(ssh)["user"] == user
     # root でなければ、そのユーザーがいることを先に確かめる
     checked = [argv[3] for argv in ssh.asked if argv[3].startswith("id ")]
     assert checked == ([] if user == "root" else [f"id -u -- {user}"])
@@ -796,7 +780,6 @@ def test_deploy_tells_when_ssh_fails_while_checking_the_user(
 
     monkeypatch.setattr(proc, "read", failing)
     ready(aws_stubs)
-    no_record(aws_stubs)
     with pytest.raises(TemtError, match=f"^cannot reach {INSTANCE} with 'ssh {NAME}'; nothing"):
         deploy.run(configured, "jupyter", user="ubuntu", baking=False, yes=False)
     aws_stubs.done()
@@ -807,49 +790,32 @@ def test_deploy_stops_before_sending_when_the_user_is_not_there(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    no_record(aws_stubs)
     with pytest.raises(TemtError, match=f"^no user nobody2 on {INSTANCE} \\(exit 1\\); nothing"):
         deploy.run(configured, "jupyter", user="nobody2", baking=False, yes=False)
     aws_stubs.done()
     assert ssh.calls == []
 
 
-@pytest.mark.parametrize(
-    ("removed", "given"),
-    [(None, "root"), (INSTANCE, "root"), (None, None)],
-    ids=["deployed", "removed but in the ami", "manifest"],
-)
+@pytest.mark.parametrize("given", ["root", None], ids=["option", "manifest"])
 def test_deploy_refuses_another_user_while_a_record_is_left(
-    aws_stubs: Stubs,
-    configured: Service,
-    jupyter: Path,
-    ssh: Ssh,
-    removed: str | None,
-    given: str | None,
+    aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh, given: str | None
 ) -> None:
-    """記録が残っている間は、記録の user と違うユーザーで入れ直さない。
+    """インスタンスに記録が残っている間は、記録の user と違うユーザーで入れ直さない。
 
-    焼いていない版を失って AMI の版に戻ったとき、app remove が別のユーザーで uninstall を
-    実行しないようにする。manifest.toml の user を変えた版も同じ。
+    新しいユーザーの uninstall は、前のユーザーの install がしたことを片づけない。
+    manifest.toml の user を変えた版も同じ。
     """
     if given is None:
         (jupyter / "manifest.toml").write_text(MANIFEST + 'user = "nobody"\n', encoding="utf-8")
     ready(aws_stubs)
-    value = {"name": "Jupyter Lab", "version": "1.2", "user": "ubuntu"}
-    if removed is not None:
-        value["removed"] = removed
-    aws_stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(value)}},
-        {"Name": RECORD},
-    )
+    installed(ssh, {"user": "ubuntu", "instance": OTHER})
     shown = given or "nobody"
     with pytest.raises(TemtError) as caught:
         deploy.run(configured, "jupyter", user=given, baking=False, yes=False)
     aws_stubs.done()
     assert str(caught.value) == (
         f"jupyter was deployed as ubuntu ({RECORD}), not {shown}; deploy it as ubuntu, or "
-        "remove it first to change the user (and bake, if it is in the AMI); nothing was changed"
+        "remove it first to change the user; nothing was changed"
     )
     assert ssh.calls == []
 
@@ -864,13 +830,12 @@ def test_read_manifest_checks_the_user(home_dir: Path) -> None:
 # --- app remove の流れ ---
 
 
-def test_remove_uninstalls_and_deletes_the_record(
+def test_remove_uninstalls_and_deletes_the_directory(
     aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ready(aws_stubs)
-    has_record(aws_stubs, None)
+    installed(ssh, {"instance": INSTANCE})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
 
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -881,15 +846,15 @@ def test_remove_uninstalls_and_deletes_the_record(
     assert uninstall[3].endswith(" temt /opt/temt/apps/jupyter root")
     captured = capsys.readouterr()
     assert captured.err == (
-        f"temt: warning: no user in the deploy record {RECORD}; running uninstall as root; "
-        "give the user with --user if install ran as another user\n"
+        f"temt: warning: no user in the deploy record {RECORD}; running uninstall of jupyter as "
+        "root; give the user with --user if install ran as another user\n"
     )
+    # 記録はディレクトリと一緒に消えるので、SSM では状態だけを消す
     assert told(captured.out) == [
         f"checking that 'ssh {NAME}' reaches {INSTANCE}",
         f"running uninstall of jupyter as root on {INSTANCE}",
         f"/opt/temt/apps/jupyter on {INSTANCE}: deleted",
         f"parameter {STATUS}: deleted",
-        f"parameter {RECORD}: deleted",
         f"removed jupyter from {INSTANCE}; run 'temt bake --svc dev-main' to remove it from the "
         "next instance too",
     ]
@@ -909,9 +874,8 @@ def test_remove_runs_uninstall_as_the_user(
     """--user が、記録にある install を実行したユーザーに勝つ。"""
     ssh.users = ("ubuntu", "app")
     ready(aws_stubs)
-    has_record(aws_stubs, recorded_user)
+    installed(ssh, {"user": recorded_user})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
 
     deploy.remove(configured, "jupyter", user=option, baking=False, yes=False)
 
@@ -925,7 +889,7 @@ def test_remove_stops_on_a_bad_user_in_the_record(
     aws_stubs: Stubs, configured: Service, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    has_record(aws_stubs, "x\x1b[2J; rm -rf /")
+    installed(ssh, {"user": "x\x1b[2J; rm -rf /"})
     with pytest.raises(TemtError) as caught:
         deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
     # 記録の値は端末に出さない
@@ -936,47 +900,39 @@ def test_remove_stops_on_a_bad_user_in_the_record(
     assert len(ssh.calls) == 1
 
 
-def test_remove_ignores_the_user_in_the_record_when_the_app_is_not_there(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh
+@pytest.mark.parametrize(("manifest_user", "user"), [(None, "root"), ("ubuntu", "ubuntu")])
+def test_remove_without_a_record_runs_uninstall_as_the_user_of_the_manifest(
+    aws_stubs: Stubs,
+    configured: Service,
+    ssh: Ssh,
+    capsys: pytest.CaptureFixture[str],
+    manifest_user: str | None,
+    user: str,
 ) -> None:
-    """ディレクトリが無ければ uninstall を実行しないので、記録の user は見ない。"""
+    """前の temt が入れたアプリには記録が無い。インスタンスの manifest.toml の user、それも
+    無ければ root で実行し、そのことを警告する。
+    """
+    manifest = MANIFEST + (f'user = "{manifest_user}"\n' if manifest_user else "")
+    installed(ssh, manifest=manifest)
     ready(aws_stubs)
-    has_record(aws_stubs, "Bad User")
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
-    ssh.codes = [deploy.ABSENT_CODE]
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-    aws_stubs.done()
-    assert [argv[3] for argv in ssh.asked if argv[3].startswith("id ")] == []
-
-
-def test_remove_runs_uninstall_as_root_without_a_record(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """install のあと記録を書けなかったときなど。root で実行し、そのことを警告する。"""
-    ready(aws_stubs)
-    aws_stubs.ssm.add_client_error(
-        "get_parameter", service_error_code="ParameterNotFound", http_status_code=400
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
     aws_stubs.done()
     (_, _), (uninstall, _) = ssh.calls
-    assert uninstall[3].endswith(" temt /opt/temt/apps/jupyter root")
-    assert f"no deploy record {RECORD}; running uninstall as root" in capsys.readouterr().err
+    assert uninstall[3].endswith(f" temt /opt/temt/apps/jupyter {user}")
+    assert capsys.readouterr().err == (
+        f"temt: warning: no deploy record {RECORD}; running uninstall of jupyter as {user}; "
+        "give the user with --user if install ran as another user\n"
+    )
 
 
 def test_remove_warns_once_about_an_unreadable_record(
     aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """記録は 1 度だけ読むので、読めない記録の警告も 1 度だけ出す。"""
+    installed(ssh, "not json")
     ready(aws_stubs)
-    aws_stubs.ssm.add_response(
-        "get_parameter", {"Parameter": {"Name": RECORD, "Value": "not json"}}, {"Name": RECORD}
-    )
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
     aws_stubs.done()
     (_, _), (uninstall, _) = ssh.calls
@@ -984,12 +940,12 @@ def test_remove_warns_once_about_an_unreadable_record(
     assert capsys.readouterr().err.count(f"cannot read the deploy record {RECORD}") == 1
 
 
-def test_remove_leaves_the_record_when_the_status_cannot_be_deleted(
+def test_remove_tells_how_to_delete_the_status_it_cannot_delete(
     aws_stubs: Stubs, configured: Service, ssh: Ssh
 ) -> None:
-    """状態を先に消すので、失敗しても記録が残り、やり直しで続きから進める。"""
+    """アプリは外れているので、残った状態は app unset で消すよう伝える。"""
     ready(aws_stubs)
-    has_record(aws_stubs)
+    installed(ssh, {"user": "root"})
     aws_stubs.ssm.add_client_error(
         "delete_parameter",
         service_error_code="AccessDeniedException",
@@ -997,10 +953,11 @@ def test_remove_leaves_the_record_when_the_status_cannot_be_deleted(
         expected_params={"Name": STATUS},
     )
     with pytest.raises(
-        TemtError, match=f"jupyter is off {INSTANCE} but its parameters are left; remove again$"
+        TemtError,
+        match=f"; jupyter is off {INSTANCE} but {STATUS} is left; delete it with "
+        "'temt app unset --svc dev-main jupyter status'$",
     ):
         deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-    # 記録の削除は積んでいないので、消そうとしていれば Stubber が失敗する
     aws_stubs.done()
 
 
@@ -1009,9 +966,8 @@ def test_remove_with_a_user_does_not_read_the_user_in_the_record(
 ) -> None:
     ssh.users = ("app",)
     ready(aws_stubs)
-    has_record(aws_stubs, None)
+    installed(ssh, {"instance": INSTANCE})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user="app", baking=False, yes=False)
     aws_stubs.done()
     (_, _), (uninstall, _) = ssh.calls
@@ -1024,7 +980,7 @@ def test_remove_stops_when_the_recorded_user_is_not_there(
 ) -> None:
     ssh.users = ()
     ready(aws_stubs)
-    has_record(aws_stubs, "ubuntu")
+    installed(ssh, {"user": "ubuntu"})
     with pytest.raises(TemtError, match=f"^no user ubuntu on {INSTANCE} \\(exit 1\\); nothing"):
         deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
     aws_stubs.done()
@@ -1042,9 +998,8 @@ def test_remove_with_bake_tells_the_user_in_the_question(
     monkeypatch.setattr("temt.msg.confirm", lambda question, *, yes: asked.append(question()))
     ready(aws_stubs)
     identified(aws_stubs)
-    has_record(aws_stubs, "ubuntu")
+    installed(ssh, {"user": "ubuntu"})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
     deploy.remove(configured, "jupyter", user=None, baking=True, yes=True)
     aws_stubs.done()
     assert asked == [
@@ -1052,182 +1007,17 @@ def test_remove_with_bake_tells_the_user_in_the_question(
     ]
 
 
-def test_remove_deletes_the_record_when_the_app_is_not_there(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
-) -> None:
-    ready(aws_stubs)
-    # 打ち間違いかどうかを確かめる。記録はある
-    aws_stubs.ssm.add_response(
-        "get_parameter", {"Parameter": {"Name": RECORD, "Value": "{}"}}, {"Name": RECORD}
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
-    ssh.codes = [deploy.ABSENT_CODE]
-
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-    captured = capsys.readouterr()
-    assert captured.err == (
-        f"temt: warning: /opt/temt/apps/jupyter is not on {INSTANCE}; updating only the record\n"
-    )
-    assert f"parameter {RECORD}: deleted" in told(captured.out)
-
-
-def template_image(stubs: Stubs, image: str) -> None:
-    """app remove が読む、起動テンプレートの既定バージョンの AMI。"""
-    stubs.ec2.add_response(
-        "describe_launch_template_versions",
-        {
-            "LaunchTemplateVersions": [
-                {
-                    "VersionNumber": 1,
-                    "DefaultVersion": True,
-                    "LaunchTemplateData": {"ImageId": image},
-                }
-            ]
-        },
-        {"LaunchTemplateName": TEMPLATE},
-    )
-
-
-BAKED_RECORD = {
-    "name": "Jupyter Lab",
-    "version": "1.3",
-    "user": "root",
-    "deployed": "2026-09-27T03:04:05Z",
-    "instance": INSTANCE,
-    "options": {"port": "9999"},
-    "baked_version": "1.2",
-    "baked_image": "ami-0123456789abcdef0",
-    "baked_options": {"port": "8080"},
-}
-
-
-def test_remove_keeps_the_record_of_an_app_in_the_ami(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """起動テンプレートの AMI に焼いてあれば、外したインスタンスを書いて記録を残す。
-
-    最後に入れた版とオプションは、AMI に焼いた版とオプションにする。
-    """
-    ready(aws_stubs)
-    aws_stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(BAKED_RECORD)}},
-        {"Name": RECORD},
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    template_image(aws_stubs, "ami-0123456789abcdef0")
-    kept = {
-        "name": "Jupyter Lab",
-        "version": "1.2",
-        "user": "root",
-        "removed": INSTANCE,
-        "options": {"port": "8080"},
-        "baked_version": "1.2",
-        "baked_image": "ami-0123456789abcdef0",
-        "baked_options": {"port": "8080"},
-    }
-    aws_stubs.ssm.add_response(
-        "put_parameter",
-        {"Version": 3},
-        {"Name": RECORD, "Value": json.dumps(kept), "Type": "String", "Overwrite": True},
-    )
-
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-    assert f"parameter {RECORD}: updated" in told(capsys.readouterr().out)
-
-
-def test_remove_deletes_the_record_of_an_app_in_another_ami(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh
-) -> None:
-    """焼いた AMI が起動テンプレートの AMI でなければ、次のインスタンスには入らない。"""
-    ready(aws_stubs)
-    aws_stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(BAKED_RECORD)}},
-        {"Name": RECORD},
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    template_image(aws_stubs, "ami-0fedcba9876543210")
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
-
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-
-
-def test_remove_again_rewrites_a_record_already_removed_from_the_instance(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh
-) -> None:
-    """記録を書けずにやり直したときなど。ディレクトリが無くても打ち間違いとはせず、書き直す。"""
-    ready(aws_stubs)
-    kept = {
-        "name": "Jupyter Lab",
-        "version": "1.2",
-        "user": "root",
-        "removed": INSTANCE,
-        "baked_version": "1.2",
-        "baked_image": "ami-0123456789abcdef0",
-    }
-    aws_stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(kept)}},
-        {"Name": RECORD},
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    template_image(aws_stubs, "ami-0123456789abcdef0")
-    aws_stubs.ssm.add_response(
-        "put_parameter",
-        {"Version": 4},
-        {"Name": RECORD, "Value": json.dumps(kept), "Type": "String", "Overwrite": True},
-    )
-    ssh.codes = [deploy.ABSENT_CODE]
-
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-
-
-def test_remove_deletes_a_record_too_large_to_keep(
-    aws_stubs: Stubs, configured: Service, ssh: Ssh, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """焼いたオプションを options にもコピーすると SSM に収まらなければ、警告して消す。"""
-    ready(aws_stubs)
-    large = {"port": "x" * 2100}
-    before = {**BAKED_RECORD, "options": {}, "baked_options": large}
-    aws_stubs.ssm.add_response(
-        "get_parameter",
-        {"Parameter": {"Name": RECORD, "Value": json.dumps(before)}},
-        {"Name": RECORD},
-    )
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    template_image(aws_stubs, "ami-0123456789abcdef0")
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
-
-    deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-    assert any(
-        line.startswith(f"temt: warning: the deploy record {RECORD} would be ")
-        for line in told(capsys.readouterr().err)
-    )
-
-
 def test_remove_leaves_everything_when_uninstall_fails(
     aws_stubs: Stubs, configured: Service, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    has_record(aws_stubs)
+    installed(ssh, {"user": "root"})
     ssh.codes = [0, 2]
 
     with pytest.raises(
         TemtError,
         match=f"uninstall of jupyter or deleting /opt/temt/apps/jupyter failed on {INSTANCE} "
-        "\\(exit 2\\); the record is left; fix it and remove again$",
+        "\\(exit 2\\); fix it and remove again$",
     ):
         deploy.remove(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -1243,9 +1033,8 @@ def test_remove_with_bake_bakes_after_removing(
 ) -> None:
     monkeypatch.setattr("temt.msg.confirm", lambda question, *, yes: None)
     ready(aws_stubs)
-    has_record(aws_stubs)
+    installed(ssh, {"user": "root"})
     aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-    aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
 
     deploy.remove(configured, "jupyter", user=None, baking=True, yes=True)
 
@@ -1378,20 +1167,17 @@ def test_it_holds_the_lock_until_it_has_baked(
         held.append(not taken(configured))
         return stream(argv, data, env=env)
 
-    def making(ec2: Any, ssm: Any, service: Service, one: Instance) -> None:
+    def making(ec2: Any, service: Service, one: Instance) -> None:
         held.append(not taken(configured))
-        make(ec2, ssm, service, one)
+        make(ec2, service, one)
 
     monkeypatch.setattr(proc, "stream", probe)
     monkeypatch.setattr(bake, "make", making)
     monkeypatch.setattr("temt.msg.confirm", lambda question, *, yes: None)
     ready(aws_stubs)
-    if command == "deploy":
-        recorded(aws_stubs)
-    else:
-        has_record(aws_stubs)
+    if command == "remove":
+        installed(ssh, {"user": "root"})
         aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": STATUS})
-        aws_stubs.ssm.add_response("delete_parameter", {}, {"Name": RECORD})
 
     with deadline(5.0):
         _start(command, configured, baking=True)
@@ -1421,10 +1207,8 @@ def test_bake_stops_before_any_change_when_the_template_does_not_match(
 
     monkeypatch.setattr(bake, "check", check)
     ready(aws_stubs)
-    if command == "deploy":
-        no_record(aws_stubs)
-    else:
-        has_record(aws_stubs)
+    if command == "remove":
+        installed(ssh, {"user": "root"})
 
     with pytest.raises(TemtError, match="^the launch template does not match$"):
         _start(command, configured, baking=True)
@@ -1447,54 +1231,32 @@ def test_deploy_with_bake_changes_nothing_when_cancelled(
 
     monkeypatch.setattr("temt.msg.confirm", cancel)
     ready(aws_stubs)
-    no_record(aws_stubs)
 
     with pytest.raises(TemtError, match="cancelled"):
         deploy.run(configured, "jupyter", user=None, baking=True, yes=False)
 
-    # SSM は記録を読んだだけで書かず、ssh はつながった先を確かめただけ
+    # ssh はつながった先を確かめ、前の記録を読んだだけで、何も送らない
     aws_stubs.done()
     assert ssh.calls == []
     assert len(ssh.asked) == 1
-
-
-def test_deploy_reports_a_record_it_could_not_write(
-    aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
-) -> None:
-    ready(aws_stubs)
-    aws_stubs.ssm.add_client_error(
-        "get_parameter",
-        service_error_code="ParameterNotFound",
-        http_status_code=400,
-        expected_params={"Name": RECORD},
-    )
-    aws_stubs.ssm.add_client_error(
-        "put_parameter", service_error_code="AccessDeniedException", http_status_code=400
-    )
-
-    with pytest.raises(
-        TemtError, match=f"jupyter is installed on {INSTANCE} but not recorded; deploy again"
-    ):
-        deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
+    assert len(ssh.reads) == 1
 
 
 @pytest.mark.parametrize("reset", [False, True])
 def test_deploy_stops_when_it_cannot_read_the_record(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh, reset: bool
 ) -> None:
-    """SSM から前の記録が読めなければ、--reset でも、送る前に止める。
+    """インスタンスから前の記録が読めなければ、--reset でも、送る前に止める。
 
-    引き継ぐオプションも、引き継ぐ焼いた版も分からず、書くこともできないだろうからである。
+    記録が無いのか分からないまま入れ替えると、前のユーザーを確かめられないからである。
     """
     ready(aws_stubs)
-    aws_stubs.ssm.add_client_error(
-        "get_parameter", service_error_code="AccessDeniedException", http_status_code=400
-    )
+    ssh.read_code = 2
 
     with pytest.raises(
-        TemtError, match=f"cannot read the deploy record {RECORD}; nothing was changed$"
+        TemtError,
+        match=f"^cannot read the apps in /opt/temt/apps on {INSTANCE} \\(exit 2\\); nothing was "
+        "changed$",
     ):
         deploy.run(configured, "jupyter", user=None, baking=False, yes=False, reset=reset)
 
@@ -1533,15 +1295,40 @@ def test_archive_keeps_only_the_owner_able_to_write(home_dir: Path) -> None:
     assert modes["./files"] == 0o755
 
 
-def test_archive_follows_the_top_link_but_keeps_the_links_inside(home_dir: Path) -> None:
+def test_archive_follows_every_link(home_dir: Path) -> None:
+    """アプリのディレクトリ自身も中のリンクも辿り、その先の中身を普通のファイルとして入れる。"""
     made = make_app(home_dir / "jupyter-2.0")
+    shared = home_dir / "shared"
+    shared.mkdir()
+    (shared / "b.conf").write_text("b\n", encoding="utf-8")
+    (made / "manifest.toml").rename(home_dir / "shared.toml")
+    (made / "manifest.toml").symlink_to(home_dir / "shared.toml")
     (made / "link").symlink_to("files/a.conf")
+    (made / "outside").symlink_to(shared)
     (home_dir / "jupyter").symlink_to(made)
     with tarfile.open(fileobj=io.BytesIO(deploy.archive(home_dir / "jupyter")), mode="r:gz") as tar:
         members = {info.name: info for info in tar.getmembers()}
-    assert members["."].isdir()
-    assert members["./link"].issym()
-    assert members["./link"].linkname == "files/a.conf"
+        assert not any(info.issym() for info in members.values())
+        assert members["."].isdir()
+        assert members["./outside"].isdir()
+        assert members["./outside"].uname == "root"
+        contents = {
+            name: extracted.read()
+            for name in ("./manifest.toml", "./link", "./outside/b.conf")
+            if (extracted := tar.extractfile(members[name])) is not None
+        }
+    assert contents == {
+        "./manifest.toml": MANIFEST.encode(),
+        "./link": b"a\n",
+        "./outside/b.conf": b"b\n",
+    }
+
+
+def test_archive_stops_on_a_broken_link(home_dir: Path) -> None:
+    made = make_app(home_dir / "jupyter")
+    (made / "gone").symlink_to("nowhere")
+    with pytest.raises(OSError):
+        _ = deploy.archive(made)
 
 
 def test_send_script_clears_what_an_earlier_run_left(home_dir: Path) -> None:
@@ -1567,7 +1354,7 @@ def test_remote_commands_pass_through_the_shell(home_dir: Path) -> None:
     root = home_dir / "o'p $x"
     made = make_app(home_dir / "jupyter")
     done = subprocess.run(
-        ["bash", "-c", deploy._remote(deploy.SEND_SCRIPT, str(root), "jupyter")],
+        ["bash", "-c", remote.remote(deploy.SEND_SCRIPT, str(root), "jupyter")],
         input=deploy.archive(made),
         capture_output=True,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
@@ -1594,11 +1381,7 @@ def no_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
             deploy.NO_UNINSTALL_CODE,
             f"jupyter has no uninstall on {INSTANCE}; temt cannot remove it$",
         ),
-        (
-            deploy.ABSENT_CODE,
-            f"no app jupyter for {NAME}: no /opt/temt/apps/jupyter on {INSTANCE}, "
-            f"and no record {RECORD}$",
-        ),
+        (deploy.ABSENT_CODE, f"jupyter is not deployed on {INSTANCE}: no /opt/temt/apps/jupyter$"),
         (255, f"cannot check /opt/temt/apps/jupyter on {INSTANCE} \\(exit 255\\)$"),
     ],
 )
@@ -1611,16 +1394,12 @@ def test_remove_stops_before_asking(
     code: int,
     message: str,
 ) -> None:
-    """uninstall が無いとき、ディレクトリも記録も無い（アプリ ID の打ち間違い）とき、
-    確かめられないときは、確認も焼くこともせず、何も消さずに止める。
+    """uninstall が無いとき、ディレクトリが無いとき、確かめられないときは、確認も焼くことも
+    せず、何も消さずに止める。
 
     読むだけの確かめは、bake の確かめより先に済ませる。
     """
     ready(aws_stubs)
-    if code == deploy.ABSENT_CODE:
-        aws_stubs.ssm.add_client_error(
-            "get_parameter", service_error_code="ParameterNotFound", http_status_code=400
-        )
     ssh.codes = [code]
 
     with pytest.raises(TemtError, match=message):
@@ -1630,31 +1409,6 @@ def test_remove_stops_before_asking(
     assert baking.made == []
     # 確かめただけで、uninstall は実行しない
     assert len(ssh.calls) == 1
-
-
-def test_remove_warns_before_asking_when_the_app_is_not_there(
-    aws_stubs: Stubs,
-    configured: Service,
-    ssh: Ssh,
-    baking: Baking,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    def cancel(question: str, *, yes: bool) -> None:
-        raise TemtError("cancelled")
-
-    monkeypatch.setattr("temt.msg.confirm", cancel)
-    ready(aws_stubs)
-    aws_stubs.ssm.add_response(
-        "get_parameter", {"Parameter": {"Name": RECORD, "Value": "{}"}}, {"Name": RECORD}
-    )
-    ssh.codes = [deploy.ABSENT_CODE]
-
-    with pytest.raises(TemtError, match="cancelled"):
-        deploy.remove(configured, "jupyter", user=None, baking=True, yes=False)
-
-    assert "is not on" in capsys.readouterr().err
-    aws_stubs.done()
 
 
 @pytest.fixture
@@ -1692,7 +1446,7 @@ def test_install_script_runs_in_the_app_directory_as_the_user(
     )
     directory = make_app(home_dir / "jupyter")
     (directory / "install").write_text(f'pwd > "{home_dir}/pwd"\n', encoding="utf-8")
-    assert over_ssh(deploy._remote(deploy.INSTALL_SCRIPT, str(directory), user), shell) == 0
+    assert over_ssh(remote.remote(deploy.INSTALL_SCRIPT, str(directory), user), shell) == 0
     assert (home_dir / "pwd").read_text(encoding="utf-8") == f"{directory}\n"
     logged = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     assert logged == ([] if sudo is None else [f"{sudo} {directory}/install"])
@@ -1706,17 +1460,16 @@ def test_install_check_and_uninstall_commands_pass_through_the_shell(
     check = deploy.CHECK_SCRIPT.format(
         absent=deploy.ABSENT_CODE, no_uninstall=deploy.NO_UNINSTALL_CODE
     )
-    assert over_ssh(deploy._remote(deploy.INSTALL_SCRIPT, str(directory), "root"), shell) == 0
+    assert over_ssh(remote.remote(deploy.INSTALL_SCRIPT, str(directory), "root"), shell) == 0
     assert (directory / "installed").is_file()
-    assert over_ssh(deploy._remote(check, str(directory)), shell) == 0
-    assert over_ssh(deploy._remote(deploy.UNINSTALL_SCRIPT, str(directory), "root"), shell) == 0
+    assert over_ssh(remote.remote(check, str(directory)), shell) == 0
+    assert over_ssh(remote.remote(deploy.UNINSTALL_SCRIPT, str(directory), "root"), shell) == 0
     assert not directory.exists()
-    assert over_ssh(deploy._remote(check, str(directory)), shell) == deploy.ABSENT_CODE
+    assert over_ssh(remote.remote(check, str(directory)), shell) == deploy.ABSENT_CODE
 
 
 # --- オプション ---
 
-IMAGE = "ami-0123456789abcdef0"
 OPTIONS_MANIFEST = (
     MANIFEST
     + """
@@ -1739,27 +1492,6 @@ def jupyter_options(jupyter: Path) -> Path:
     return jupyter
 
 
-def sent_file(ssh: Ssh) -> tarfile.TarInfo | None:
-    """送った tar.gz の temt-options.env。無ければ None。"""
-    (_, data), *_ = ssh.calls
-    assert data is not None
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        try:
-            return tar.getmember("./temt-options.env")
-        except KeyError:
-            return None
-
-
-def sent_options(ssh: Ssh) -> str:
-    """送った tar.gz の temt-options.env の中身。"""
-    (_, data), *_ = ssh.calls
-    assert data is not None
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        found = tar.extractfile("./temt-options.env")
-        assert found is not None
-        return found.read().decode()
-
-
 def test_deploy_passes_the_options_to_install(
     aws_stubs: Stubs,
     configured: Service,
@@ -1769,7 +1501,6 @@ def test_deploy_passes_the_options_to_install(
 ) -> None:
     """宣言したすべてのオプションを既定で埋めて渡し、記録には指定した値だけを書く。"""
     ready(aws_stubs)
-    recorded(aws_stubs, kept={"options": {"greeting": "こんにちは 世界"}})
 
     deploy.run(
         configured,
@@ -1781,14 +1512,15 @@ def test_deploy_passes_the_options_to_install(
     )
 
     aws_stubs.done()
-    assert sent_options(ssh) == (
+    assert sent_text(ssh, "temt-options.env") == (
         "# Written by temt deploy: the options of jupyter 1.2.\n"
         "TEMT_OPTION_PORT=8888\n"
         "TEMT_OPTION_GREETING='こんにちは 世界'\n"
     )
-    info = sent_file(ssh)
+    info = sent(ssh, "temt-options.env")
     assert info is not None
     assert (info.mode, info.uid, info.gid, info.uname) == (0o644, 0, 0, "root")
+    assert sent_record(ssh) == {**WRITTEN, "options": {"greeting": "こんにちは 世界"}}
     lines = told(capsys.readouterr().out)
     assert lines[2:4] == ["option port=8888 (default)", "option greeting='こんにちは 世界' (given)"]
     assert lines[4] == f"sending jupyter to {INSTANCE}"
@@ -1798,12 +1530,11 @@ def test_deploy_sends_no_option_file_for_an_app_without_options(
     aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    recorded(aws_stubs)
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
     aws_stubs.done()
-    assert sent_file(ssh) is None
+    assert sent(ssh, "temt-options.env") is None
 
 
 def test_deploy_keeps_the_options_of_the_last_deploy(
@@ -1813,103 +1544,36 @@ def test_deploy_keeps_the_options_of_the_last_deploy(
     ssh: Ssh,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """前の記録のオプションを引き継ぎ、<名前>= はその名前を既定に戻す。焼いた分も引き継ぐ。"""
+    """インスタンスの記録のオプションを引き継ぎ、<名前>= はその名前を既定に戻す。
+
+    AMI から来たアプリなら、焼いたときのオプションを引き継ぐことになる。
+    """
     ready(aws_stubs)
-    before = {
-        "name": "Jupyter Lab",
-        "version": "1.1",
-        "options": {"port": "9999", "greeting": "やあ"},
-        "baked_version": "1.1",
-        "baked_image": IMAGE,
-        "baked_options": {"port": "8000"},
-    }
-    recorded(
-        aws_stubs,
-        before=before,
-        kept={
-            "options": {"port": "9999"},
-            "baked_version": "1.1",
-            "baked_image": IMAGE,
-            "baked_options": {"port": "8000"},
-        },
+    installed(
+        ssh, {"user": "root", "instance": OTHER, "options": {"port": "9999", "greeting": "やあ"}}
     )
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False, given={"greeting": None})
 
     aws_stubs.done()
-    assert "TEMT_OPTION_PORT=9999\nTEMT_OPTION_GREETING=hello\n" in sent_options(ssh)
+    assert "TEMT_OPTION_PORT=9999\nTEMT_OPTION_GREETING=hello\n" in sent_text(
+        ssh, "temt-options.env"
+    )
     lines = told(capsys.readouterr().out)
     assert lines[2:4] == ["option port=9999 (kept)", "option greeting=hello (default)"]
-
-
-@pytest.mark.parametrize(
-    ("removed", "port", "kept"),
-    [
-        # このインスタンスから外したアプリは、外す前のオプションを引き継がない
-        pytest.param(INSTANCE, "8888", {}, id="removed here"),
-        # 外したインスタンスが終了し、AMI の版がこのインスタンスに戻っている
-        pytest.param(OTHER, "8000", {"options": {"port": "8000"}}, id="removal lost"),
-    ],
-)
-def test_deploy_after_remove_keeps_the_options_only_when_the_removal_was_lost(
-    aws_stubs: Stubs,
-    configured: Service,
-    jupyter_options: Path,
-    ssh: Ssh,
-    removed: str,
-    port: str,
-    kept: dict[str, Any],
-) -> None:
-    """外した記録の removed は書き直すときに落とし、焼いた分は引き継ぐ。"""
-    ready(aws_stubs)
-    baked = {"baked_version": "1.1", "baked_image": IMAGE, "baked_options": {"port": "8000"}}
-    before = {"name": "Jupyter Lab", "version": "1.1", "removed": removed}
-    recorded(
-        aws_stubs, before={**before, "options": {"port": "8000"}, **baked}, kept={**kept, **baked}
-    )
-
-    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-    assert f"TEMT_OPTION_PORT={port}\n" in sent_options(ssh)
-
-
-def test_deploy_after_remove_ignores_options_it_cannot_read(
-    aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
-) -> None:
-    """外したときにコピーした読めないオプションでも、このインスタンスなら引き継がないので止めない。"""
-    ready(aws_stubs)
-    before = {
-        "name": "Jupyter Lab",
-        "version": "1.1",
-        "removed": INSTANCE,
-        "options": ["bad"],
-        "baked_version": "1.1",
-        "baked_image": IMAGE,
-        "baked_options": ["bad"],
-    }
-    recorded(
-        aws_stubs,
-        before=before,
-        kept={"baked_version": "1.1", "baked_image": IMAGE, "baked_options": ["bad"]},
-    )
-
-    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-    assert "TEMT_OPTION_PORT=8888\n" in sent_options(ssh)
+    assert sent_record(ssh) == {**WRITTEN, "options": {"port": "9999"}}
 
 
 def test_deploy_with_reset_keeps_no_option(
     aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    recorded(aws_stubs, before={"name": "Jupyter Lab", "options": {"port": "9999"}})
+    installed(ssh, {"user": "root", "options": {"port": "9999"}})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False, reset=True)
 
     aws_stubs.done()
-    assert "TEMT_OPTION_PORT=8888\n" in sent_options(ssh)
+    assert "TEMT_OPTION_PORT=8888\n" in sent_text(ssh, "temt-options.env")
 
 
 def test_deploy_drops_an_option_the_app_no_longer_declares(
@@ -1920,11 +1584,7 @@ def test_deploy_drops_an_option_the_app_no_longer_declares(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     ready(aws_stubs)
-    recorded(
-        aws_stubs,
-        before={"name": "Jupyter Lab", "options": {"old": "x y", "port": "9999"}},
-        kept={"options": {"port": "9999"}},
-    )
+    installed(ssh, {"user": "root", "options": {"old": "x y", "port": "9999"}})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -1933,13 +1593,14 @@ def test_deploy_drops_an_option_the_app_no_longer_declares(
         "temt: warning: dropping old='x y' of the deploy record; jupyter 1.2 does not declare it"
         in told(capsys.readouterr().err)
     )
+    assert sent_record(ssh)["options"] == {"port": "9999"}
 
 
 def test_deploy_stops_on_a_kept_value_the_app_does_not_accept(
     aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    read_record(aws_stubs, {"name": "Jupyter Lab", "options": {"port": "http"}})
+    installed(ssh, {"user": "root", "options": {"port": "http"}})
 
     with pytest.raises(
         TemtError,
@@ -1956,15 +1617,12 @@ def test_deploy_takes_a_new_value_over_a_kept_one_it_does_not_accept(
     aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
 ) -> None:
     ready(aws_stubs)
-    recorded(
-        aws_stubs,
-        before={"name": "Jupyter Lab", "options": {"port": "http"}},
-        kept={"options": {"port": "80"}},
-    )
+    installed(ssh, {"user": "root", "options": {"port": "http"}})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False, given={"port": "80"})
 
     aws_stubs.done()
+    assert sent_record(ssh)["options"] == {"port": "80"}
 
 
 @pytest.mark.parametrize("reset", [False, True])
@@ -1973,12 +1631,11 @@ def test_deploy_stops_when_it_cannot_read_the_options(
 ) -> None:
     """読めない記録から引き継ぐと黙って既定に戻るので止める。--reset なら引き継がずに進む。"""
     ready(aws_stubs)
+    installed(ssh, {"user": "root", "options": "port=9999"})
     if reset:
-        recorded(aws_stubs, before={"name": "Jupyter Lab", "options": "port=9999"})
         deploy.run(configured, "jupyter", user=None, baking=False, yes=False, reset=True)
         aws_stubs.done()
         return
-    read_record(aws_stubs, {"name": "Jupyter Lab", "options": "port=9999"})
 
     with pytest.raises(
         TemtError,
@@ -1995,7 +1652,7 @@ def test_deploy_of_an_app_without_options_goes_on_with_an_unreadable_record(
 ) -> None:
     """オプションを宣言しないアプリでは、引き継ぐものが無いので止めない。"""
     ready(aws_stubs)
-    recorded(aws_stubs, before="[]")
+    installed(ssh, "[]")
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -2042,7 +1699,6 @@ def test_deploy_needs_an_option_without_a_default(
     )
     if not given:
         ready(aws_stubs)
-        no_record(aws_stubs)
         message = "^jupyter needs the option token; give token=<value>; nothing was changed$"
     else:
         message = "^jupyter: token has no default; give token=<value>$"
@@ -2054,48 +1710,18 @@ def test_deploy_needs_an_option_without_a_default(
     assert ssh.calls == []
 
 
-def test_deploy_refuses_an_app_with_the_option_file(
-    aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh
+@pytest.mark.parametrize("name", ["temt-options.env", "temt-deploy.json"])
+def test_deploy_refuses_an_app_with_a_file_temt_writes(
+    aws_stubs: Stubs, configured: Service, jupyter: Path, ssh: Ssh, name: str
 ) -> None:
-    (jupyter / "temt-options.env").write_text("", encoding="utf-8")
+    (jupyter / name).write_text("", encoding="utf-8")
 
     with pytest.raises(
         TemtError,
-        match=r"^~/\.config/temt/apps/jupyter/temt-options\.env: temt writes this file; "
+        match=rf"^~/\.config/temt/apps/jupyter/{re.escape(name)}: temt writes this file; "
         "rename it$",
     ):
         deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-
-
-@pytest.mark.parametrize(
-    ("greeting", "message"),
-    [
-        # 1 文字 3 バイト。焼くと baked_options にもコピーされるので、4096 バイトを超える
-        ("あ" * 700, r"would be 4\d\d\d bytes after bake, over the 4096 bytes that SSM allows"),
-        ("a" * 4096, r"would be \d+ bytes, over the 4096 bytes that SSM allows"),
-    ],
-)
-def test_deploy_stops_when_the_record_would_be_too_big(
-    aws_stubs: Stubs,
-    configured: Service,
-    jupyter_options: Path,
-    ssh: Ssh,
-    greeting: str,
-    message: str,
-) -> None:
-    ready(aws_stubs)
-    no_record(aws_stubs)
-
-    with pytest.raises(
-        TemtError,
-        match=f"^the deploy record of jupyter {message}; shorten the options; nothing was changed$",
-    ):
-        deploy.run(
-            configured, "jupyter", user=None, baking=False, yes=False, given={"greeting": greeting}
-        )
-
-    aws_stubs.done()
-    assert ssh.calls == []
 
 
 def test_read_manifest_reads_the_options(home_dir: Path) -> None:
@@ -2153,178 +1779,6 @@ def test_read_manifest_rejects_options(home_dir: Path, text: str, message: str) 
         _ = read_manifest(made)
 
 
-def test_deploy_keeps_baked_options_it_cannot_read(
-    aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
-) -> None:
-    """前の記録の baked_options だけが読めなければ、書かれていたままの値で引き継ぐ。"""
-    ready(aws_stubs)
-    before = {
-        "name": "Jupyter Lab",
-        "options": {"port": "9999"},
-        "baked_version": "1.1",
-        "baked_image": IMAGE,
-        "baked_options": ["port=8000"],
-    }
-    recorded(
-        aws_stubs,
-        before=before,
-        kept={
-            "options": {"port": "9999"},
-            "baked_version": "1.1",
-            "baked_image": IMAGE,
-            "baked_options": ["port=8000"],
-        },
-    )
-
-    deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
-
-    aws_stubs.done()
-
-
-def test_deploy_with_bake_records_the_options_as_baked(
-    aws_stubs: Stubs,
-    configured: Service,
-    jupyter_options: Path,
-    ssh: Ssh,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """deploy が記録に書いたオプションを、続けて焼く bake が baked_options にコピーする。"""
-    baked_image = "ami-00000000000000001"
-    monkeypatch.setattr(bake, "check", lambda ec2, service, values, one, command: None)
-    monkeypatch.setattr(
-        bake, "make", lambda ec2, ssm, service, one: app.mark_baked(ssm, service, one, baked_image)
-    )
-    ready(aws_stubs)
-    base = {
-        "name": "Jupyter Lab",
-        "version": "1.2",
-        "user": "root",
-        "deployed": "2026-09-27T03:04:05Z",
-    }
-    deployed = {**base, "instance": INSTANCE, "options": {"greeting": "やあ"}}
-    recorded(aws_stubs, kept={"options": {"greeting": "やあ"}})
-    aws_stubs.ssm.add_response(
-        "get_parameters_by_path",
-        {
-            "Parameters": [
-                {"Name": RECORD, "Value": json.dumps(deployed, ensure_ascii=False), "Version": 1}
-            ]
-        },
-        {"Path": f"/{NAME}", "Recursive": True},
-    )
-    baked = {
-        **base,
-        "options": {"greeting": "やあ"},
-        "baked_version": "1.2",
-        "baked_image": baked_image,
-        "baked_options": {"greeting": "やあ"},
-    }
-    aws_stubs.ssm.add_response(
-        "put_parameter",
-        {"Version": 2},
-        {
-            "Name": RECORD,
-            "Value": json.dumps(baked, ensure_ascii=False),
-            "Type": "String",
-            "Overwrite": True,
-        },
-    )
-
-    deploy.run(configured, "jupyter", user=None, baking=True, yes=True, given={"greeting": "やあ"})
-
-    aws_stubs.done()
-
-
-def _sized(greeting: str, name: str = "Jupyter Lab") -> app.Record:
-    """deploy が書く形の記録。greeting は指定したオプション。"""
-    return app.Record(
-        fields={
-            "name": name,
-            "version": "1.2",
-            "user": "root",
-            "deployed": "2026-09-27T03:04:05Z",
-            "instance": INSTANCE,
-            "baked_version": "1.1",
-            "baked_image": IMAGE,
-        },
-        options={"greeting": greeting},
-    )
-
-
-def _after_bake(record: app.Record) -> int:
-    """焼いたあとの記録の大きさ。"""
-    after = app.Record(fields=dict(record.fields), options=record.options)
-    app.mark_fresh(after, deploy.IMAGE_ID_SAMPLE)
-    return app.record_size(after)
-
-
-def test_check_size_takes_a_record_of_just_4096_bytes() -> None:
-    """焼いたあとの記録がちょうど 4096 バイトなら通し、超えれば止める。
-
-    焼くとオプションが baked_options にもコピーされるので、値が 1 文字増えると 2 バイト増える。
-    ちょうどにするため、足りない 1 バイトはアプリ名で埋める。
-    """
-    left = app.RECORD_MAX - _after_bake(_sized(""))
-    name = "Jupyter Lab" + "s" * (left % 2)
-    greeting = "a" * (left // 2)
-    assert _after_bake(_sized(greeting, name)) == app.RECORD_MAX
-    assert app.record_size(_sized(greeting, name)) < app.RECORD_MAX
-
-    deploy._check_size("jupyter", _sized(greeting, name))
-
-    with pytest.raises(TemtError, match="would be 4098 bytes after bake"):
-        deploy._check_size("jupyter", _sized(greeting + "a", name))
-
-
-def test_deploy_stops_when_the_baked_options_of_the_last_deploy_make_it_too_big(
-    aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
-) -> None:
-    """前に焼いたオプションが大きいと、焼く前の記録のほうが 4096 バイトを超える。"""
-    ready(aws_stubs)
-    read_record(
-        aws_stubs,
-        {
-            "name": "Jupyter Lab",
-            "baked_version": "1.1",
-            "baked_image": IMAGE,
-            "baked_options": {"greeting": "b" * 3000},
-        },
-    )
-
-    with pytest.raises(
-        TemtError,
-        match=r"^the deploy record of jupyter would be \d+ bytes, over the 4096 bytes that SSM "
-        "allows; shorten the options; nothing was changed$",
-    ):
-        deploy.run(
-            configured,
-            "jupyter",
-            user=None,
-            baking=False,
-            yes=False,
-            given={"greeting": "a" * 1100},
-        )
-
-    aws_stubs.done()
-    assert ssh.calls == []
-
-
-def test_deploy_with_reset_keeps_baked_options_it_cannot_read(
-    aws_stubs: Stubs, configured: Service, jupyter_options: Path, ssh: Ssh
-) -> None:
-    """--reset は前の options を引き継がないが、AMI に焼いた分の baked_options は引き継ぐ。"""
-    ready(aws_stubs)
-    recorded(
-        aws_stubs,
-        before={"name": "Jupyter Lab", "options": "x", "baked_options": "y"},
-        kept={"baked_options": "y"},
-    )
-
-    deploy.run(configured, "jupyter", user=None, baking=False, yes=False, reset=True)
-
-    aws_stubs.done()
-
-
 def test_deploy_drops_unreadable_options_of_an_app_without_options(
     aws_stubs: Stubs,
     configured: Service,
@@ -2333,7 +1787,7 @@ def test_deploy_drops_unreadable_options_of_an_app_without_options(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     ready(aws_stubs)
-    recorded(aws_stubs, before={"name": "Jupyter Lab", "options": "x"})
+    installed(ssh, {"user": "root", "options": "x"})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 
@@ -2356,8 +1810,6 @@ def test_deploy_hides_what_disturbs_the_terminal_in_the_version(
         'name = "Jupyter Lab"\nversion = "1.2\\u001b[2J"\n', encoding="utf-8"
     )
     ready(aws_stubs)
-    no_record(aws_stubs)
-    aws_stubs.ssm.add_response("put_parameter", {"Version": 1})
 
     deploy.run(configured, "jupyter", user=None, baking=False, yes=False)
 

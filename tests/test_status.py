@@ -3,17 +3,25 @@
 instance show は端から端まで（status.run か cli.main）を通し、表示の形を確かめる。
 """
 
-import json
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import REGION, Stubs, an_instance, reservations
+from conftest import (
+    REGION,
+    Stubs,
+    a_manifest,
+    a_record,
+    an_instance,
+    commanded,
+    online,
+    reservations,
+)
 
-from temt import app, aws, cli, conf, instances, resources, status
+from temt import aws, cli, conf, instances, resources, status
 from temt.msg import TemtError, UsageError
-from temt.names import Service
+from temt.names import Service, user_apps_dir
 
 NAME = "temt-dev-main"
 TEMPLATE = f"{NAME}-template"
@@ -35,12 +43,7 @@ SEARCH = {
 APPLIED = f"template:   {TEMPLATE}"
 # アプリの状態が 1 つも無いときの最後の行
 NO_STATUS = "app status: none"
-# deploy の記録が 1 つも無いときの、焼いていないアプリの行
-NO_APPS = "apps:       none"
 PATH = f"/{NAME}"
-# 起動テンプレートが指す AMI と、ほかの AMI
-IMAGE = "ami-0123456789abcdef0"
-OTHER_IMAGE = "ami-0fedcba9876543210"
 
 
 def applied(stubs: Stubs) -> None:
@@ -63,31 +66,6 @@ def agents(stubs: Stubs, ids: list[str], pings: dict[str, str]) -> None:
             ]
         },
         {"Filters": [{"Key": "InstanceIds", "Values": ids}]},
-    )
-
-
-def apps(stubs: Stubs, *parameters: dict[str, Any]) -> None:
-    """焼いたかどうかを決めるのに読む、起動テンプレートの AMI と deploy の記録。
-
-    テンプレートがあるときだけ読む。
-    """
-    stubs.ec2.add_response(
-        "describe_launch_template_versions",
-        {
-            "LaunchTemplateVersions": [
-                {
-                    "VersionNumber": 1,
-                    "DefaultVersion": True,
-                    "LaunchTemplateData": {"ImageId": IMAGE},
-                }
-            ]
-        },
-        {"LaunchTemplateName": TEMPLATE},
-    )
-    stubs.ssm.add_response(
-        "get_parameters_by_path",
-        {"Parameters": list(parameters)},
-        {"Path": PATH, "Recursive": True},
     )
 
 
@@ -124,7 +102,6 @@ def test_it_shows_a_running_instance(
         SEARCH,
     )
     agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
@@ -136,7 +113,6 @@ def test_it_shows_a_running_instance(
         f"instance:   {INSTANCE} (running)\n"
         f"ipv4:       {ADDRESS}\n"
         "ssm-agent:  Online\n"
-        f"{NO_APPS}\n"
         f"{NO_STATUS}\n"
     )
     # ロックは取らないので、known_hosts のディレクトリも作らない
@@ -149,11 +125,10 @@ def test_it_shows_nothing_running(
     applied(aws_stubs)
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
     # 1 台も無ければ、エージェントは尋ねない。アプリの状態は見る
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
-    assert capsys.readouterr().out == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"
+    assert capsys.readouterr().out == f"{APPLIED}\ninstance:   none\n{NO_STATUS}\n"
 
 
 def test_it_shows_every_instance(
@@ -173,7 +148,6 @@ def test_it_shows_every_instance(
     )
     # 応答の順は ID の順になる。OTHER は一度も登録していない
     agents(aws_stubs, [INSTANCE, OTHER], {INSTANCE: "ConnectionLost"})
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
@@ -186,7 +160,6 @@ def test_it_shows_every_instance(
         f"instance:   {OTHER} (stopping)",
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
-        NO_APPS,
         NO_STATUS,
     ]
     assert err.splitlines() == [
@@ -206,7 +179,6 @@ def test_it_does_not_count_an_instance_that_is_shutting_down(
         SEARCH,
     )
     agents(aws_stubs, [INSTANCE, OTHER], {INSTANCE: "Online"})
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
@@ -230,7 +202,6 @@ def test_it_takes_an_answer_with_missing_items(
         {"InstanceInformationList": [{"InstanceId": INSTANCE}, {"PingStatus": "Online"}]},
         {"Filters": [{"Key": "InstanceIds", "Values": [INSTANCE, OTHER]}]},
     )
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
@@ -243,7 +214,6 @@ def test_it_takes_an_answer_with_missing_items(
         f"instance:   {OTHER} (pending)",
         "ipv4:       (none)",
         "ssm-agent:  (not registered)",
-        NO_APPS,
         NO_STATUS,
     ]
     assert err.splitlines() == [
@@ -264,13 +234,11 @@ def test_it_takes_an_answer_without_the_list(
         {},
         {"Filters": [{"Key": "InstanceIds", "Values": [INSTANCE]}]},
     )
-    apps(aws_stubs)
     statuses(aws_stubs)
     status.run(configured)
     aws_stubs.done()
     assert capsys.readouterr().out.splitlines()[3:] == [
         "ssm-agent:  (not registered)",
-        NO_APPS,
         NO_STATUS,
     ]
 
@@ -333,7 +301,6 @@ def test_main_runs_it(
     before = configured.conf_path.read_text(encoding="utf-8")
     applied(aws_stubs)
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    apps(aws_stubs)
     statuses(aws_stubs)
     assert cli.main(["temt", "--profile", "work", "status", "--svc", "dev-main"]) == 0
     aws_stubs.done()
@@ -342,7 +309,7 @@ def test_main_runs_it(
     assert aws_stubs.passed[0].AwsProfile == "work"
     assert configured.conf_path.read_text(encoding="utf-8") == before
     out, err = capsys.readouterr()
-    assert out == f"{APPLIED}\ninstance:   none\n{NO_APPS}\n{NO_STATUS}\n"
+    assert out == f"{APPLIED}\ninstance:   none\n{NO_STATUS}\n"
     assert err == ""
 
 
@@ -360,7 +327,6 @@ def test_it_shows_the_app_statuses(
     running["LaunchTime"] = datetime.now(UTC) - timedelta(hours=1)
     aws_stubs.ec2.add_response("describe_instances", reservations(running), SEARCH)
     agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
-    apps(aws_stubs)
     statuses(
         aws_stubs,
         a_status("myapp", "3 job(s)\tqueued", timedelta(minutes=12)),
@@ -373,7 +339,6 @@ def test_it_shows_the_app_statuses(
     status.run(configured)
     aws_stubs.done()
     assert capsys.readouterr().out.splitlines()[4:] == [
-        NO_APPS,
         "app status:",
         "  idle-shutdown  power off in 42m  [just now]",
         "  myapp          3 job(s)?queued  [12m ago]",
@@ -386,7 +351,6 @@ def test_it_goes_through_every_page_of_statuses(
 ) -> None:
     applied(aws_stubs)
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
-    apps(aws_stubs)
     aws_stubs.ssm.add_response(
         "get_parameters_by_path",
         {"Parameters": [a_status("b", "two", timedelta(hours=3))], "NextToken": "t"},
@@ -401,7 +365,6 @@ def test_it_goes_through_every_page_of_statuses(
     aws_stubs.done()
     # 動いているインスタンスが無いので、どれも stale
     assert capsys.readouterr().out.splitlines()[2:] == [
-        NO_APPS,
         "app status:",
         "  a  one  [1m ago, stale]",
         "  b  two  [3h ago, stale]",
@@ -417,7 +380,6 @@ def test_it_marks_the_statuses_of_a_stopped_instance_stale(
     stopped["LaunchTime"] = datetime.now(UTC) - timedelta(hours=1)
     aws_stubs.ec2.add_response("describe_instances", reservations(stopped), SEARCH)
     agents(aws_stubs, [INSTANCE], {INSTANCE: "ConnectionLost"})
-    apps(aws_stubs)
     statuses(
         aws_stubs,
         a_status("idle-shutdown", "in use: 1 ssh session(s) (limit 1h)", timedelta(minutes=10)),
@@ -430,73 +392,139 @@ def test_it_marks_the_statuses_of_a_stopped_instance_stale(
     ]
 
 
-def a_record(app_id: str, **fields: str) -> dict[str, Any]:
-    """deploy の記録のパラメータ 1 つ。fields に instance、baked_version、baked_image を渡す。"""
-    value = {"name": app_id, "version": "1", **fields}
-    return {"Name": f"{PATH}/{app_id}/deploy", "Type": "String", "Value": json.dumps(value)}
+def local_app(app_id: str, version: str) -> None:
+    """アプリ ID で使える手元のアプリを置く。"""
+    path = user_apps_dir() / app_id
+    path.mkdir(parents=True)
+    (path / "manifest.toml").write_text(a_manifest(version), encoding="utf-8")
 
 
-def test_it_shows_the_apps_that_are_not_baked(
+def test_apps_shows_the_apps_on_the_running_instance(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """焼いていないアプリを、unbaked、lost の順に、アプリ ID の順で挙げる。"""
+    """--apps を付ければ、Run Command で読み、入っているアプリをアプリ ID の順に表で出す。
+
+    BAKED は、記録の instance がほかのインスタンスなら yes、このインスタンスなら no、
+    記録が無ければ -。手元のアプリの版が違えば、VERSION に * を付ける。
+    """
+    local_app("jupyter", "1.3")
+    local_app("emacs", "2")
     applied(aws_stubs)
     aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "stopped")), SEARCH
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
     )
-    agents(aws_stubs, [INSTANCE], {INSTANCE: "ConnectionLost"})
-    apps(
+    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
+    commanded(
         aws_stubs,
-        a_record("emacs", baked_version="1", baked_image=IMAGE),
-        a_record("mise", instance=INSTANCE),
-        a_record("cloudflared", instance=INSTANCE),
-        a_record("timezone-tokyo", instance=OTHER),
-        a_record("moved", baked_version="1", baked_image=OTHER_IMAGE),
+        INSTANCE,
+        {
+            "jupyter": {"manifest.toml": a_manifest("1.2"), "temt-deploy.json": a_record(INSTANCE)},
+            "emacs": {"manifest.toml": a_manifest("2"), "temt-deploy.json": a_record(OTHER)},
+            "old": {"manifest.toml": a_manifest("1")},
+        },
     )
     statuses(aws_stubs)
-    status.run(configured)
+    status.run(configured, apps=True)
     aws_stubs.done()
-    assert capsys.readouterr().out.splitlines()[-2] == (
-        "apps:       unbaked cloudflared, mise; lost moved, timezone-tokyo"
-    )
-
-
-ALL_IN = app.Place(image_id=IMAGE, alive=frozenset({INSTANCE}))
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert out.splitlines()[3:] == [
+        "ssm-agent:  Online",
+        "apps:",
+        "  ID       VERSION  BAKED  DEPLOYED",
+        "  emacs    2        yes    2026-09-27 12:04:05",
+        "  jupyter  1.2*     no     2026-09-27 12:04:05",
+        "  old      1        -      -",
+        NO_STATUS,
+    ]
 
 
 @pytest.mark.parametrize(
-    ("records", "shown"),
+    ("state", "ping", "why"),
     [
-        pytest.param(
-            [("a", {"baked_version": "1", "baked_image": IMAGE})], "all baked", id="all baked"
-        ),
-        pytest.param(
-            [("a", {"baked_version": "1", "baked_image": IMAGE}), ("b", {"instance": INSTANCE})],
-            "unbaked b",
-            id="unbaked",
-        ),
-        pytest.param([("a", {"instance": OTHER})], "lost a", id="lost"),
-        pytest.param(
-            [
-                ("a", {"removed": INSTANCE, "baked_version": "1", "baked_image": IMAGE}),
-                ("b", {"instance": OTHER}),
-                ("c", {"instance": INSTANCE}),
-            ],
-            "unbaked c; lost b; removed a (still in the AMI; bake to drop it)",
-            id="removed",
-        ),
-        pytest.param([], "none", id="no record"),
-        # 焼いたかどうか分からない記録は数えない
-        pytest.param([("a", {"version": "1"})], "none", id="unknown"),
-        pytest.param(
-            [("a", {"version": "1"}), ("b", {"baked_version": "1", "baked_image": IMAGE})],
-            "all baked",
-            id="unknown and baked",
-        ),
+        ("stopped", "ConnectionLost", f"{INSTANCE} is stopped"),
+        ("running", "ConnectionLost", f"the SSM agent on {INSTANCE} is not online"),
     ],
 )
-def test_apps_line(records: list[tuple[str, dict[str, str]]], shown: str) -> None:
-    assert status.apps_line(records, ALL_IN) == shown
+def test_apps_tells_why_it_does_not_read(
+    aws_stubs: Stubs,
+    configured: Service,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    ping: str,
+    why: str,
+) -> None:
+    """running のインスタンスが無いか、SSM エージェントが Online でなければ、読まずに理由を出す。"""
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, state)), SEARCH
+    )
+    agents(aws_stubs, [INSTANCE], {INSTANCE: ping})
+    if state == "running":
+        online(aws_stubs, INSTANCE, ping)
+    statuses(aws_stubs)
+    status.run(configured, apps=True)
+    aws_stubs.done()
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        f"apps:       (not read; {why})",
+        NO_STATUS,
+    ]
+
+
+def test_apps_goes_on_when_the_command_fails(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """読めなければ、警告して、ほかの表示を続ける。"""
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
+    )
+    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
+    commanded(aws_stubs, INSTANCE, {}, status="Failed", error="tar: \x1b[2J broken\nmore")
+    statuses(aws_stubs)
+    status.run(configured, apps=True)
+    aws_stubs.done()
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-2:] == [f"apps:       (not read; cannot read {INSTANCE})", NO_STATUS]
+    assert err == f"temt: warning: cannot read the apps on {INSTANCE}: Failed: tar: ?[2J broken\n"
+
+
+def test_apps_goes_on_when_aws_refuses_the_command(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """権限が無いなどの AWS の誤りでも、警告して、app status の表示を続ける。"""
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
+    )
+    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
+    online(aws_stubs, INSTANCE)
+    aws_stubs.ssm.add_client_error(
+        "send_command", service_error_code="AccessDeniedException", http_status_code=400
+    )
+    statuses(aws_stubs)
+    status.run(configured, apps=True)
+    aws_stubs.done()
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-2:] == [f"apps:       (not read; cannot read {INSTANCE})", NO_STATUS]
+    assert err.startswith(f"temt: warning: cannot read the apps on {INSTANCE}: ")
+    assert "AccessDenied" in err
+
+
+def test_apps_without_any_app(
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """アプリを置くディレクトリが無ければ、出力は空で、アプリは無い。"""
+    applied(aws_stubs)
+    aws_stubs.ec2.add_response(
+        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
+    )
+    agents(aws_stubs, [INSTANCE], {INSTANCE: "Online"})
+    commanded(aws_stubs, INSTANCE, {})
+    statuses(aws_stubs)
+    status.run(configured, apps=True)
+    aws_stubs.done()
+    assert capsys.readouterr().out.splitlines()[-2:] == ["apps:       none", NO_STATUS]
 
 
 NOW = datetime(2026, 9, 29, 6, 0, 0, tzinfo=UTC)

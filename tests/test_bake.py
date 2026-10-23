@@ -1,11 +1,10 @@
 """bake の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（bake.run か cli.main）を通し、手順の順序と、失敗したときにテンプレートと
-記録がどう残るかを確かめる。設定ファイルには、どの場合も書かない。Stubber は積んだ順に
+端から端まで（bake.run か cli.main）を通し、手順の順序と、失敗したときにテンプレートが
+どう残るかを確かめる。設定ファイルには、どの場合も書かない。Stubber は積んだ順に
 しか応答しないので、応答を積む順が手順の順序を表す。
 """
 
-import json
 import re
 import sys
 import time
@@ -28,7 +27,7 @@ from conftest import (
 from types_boto3_ec2.client import EC2Client
 from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef
 
-from temt import app, bake, cli, conf, home, lock, resources, wait
+from temt import bake, cli, conf, home, lock, resources, wait
 from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path
 
@@ -317,49 +316,6 @@ def image_state(stubs: Stubs, state: str, **more: Any) -> None:
     )
 
 
-def read_records(stubs: Stubs, *parameters: dict[str, Any]) -> None:
-    """手順 8。焼いたことを書くために、AMI が available になってから deploy の記録を読む。"""
-    stubs.ssm.add_response(
-        "get_parameters_by_path",
-        {"Parameters": list(parameters)},
-        {"Path": f"/{NAME}", "Recursive": True},
-    )
-
-
-def written_record(stubs: Stubs, app_id: str, record: dict[str, str]) -> None:
-    """記録を 1 つ書く。"""
-    stubs.ssm.add_response(
-        "put_parameter",
-        {"Version": 2},
-        {
-            "Name": f"/{NAME}/{app_id}/deploy",
-            "Value": json.dumps(record),
-            "Type": "String",
-            "Overwrite": True,
-        },
-    )
-
-
-# deploy の記録の項目のうち、焼いても変わらないもの
-RECORD = {"name": "J", "version": "2", "user": "root", "deployed": "2026-09-26T03:00:00Z"}
-# このインスタンスに入れて、まだ焼いていない記録
-UNBAKED = {**RECORD, "instance": INSTANCE}
-
-
-@pytest.fixture
-def unmarked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """記録に触れないことを確かめる。mark_baked を呼べばテストが落ちる。
-
-    Stubber の積んでいない呼び出しの誤りは、記録が読めないときの警告に紛れるので、
-    mark_baked そのものを差し替える。
-    """
-
-    def touched(*args: Any) -> None:
-        pytest.fail("mark_baked was called")
-
-    monkeypatch.setattr(app, "mark_baked", touched)
-
-
 def terminated(stubs: Stubs) -> None:
     """手順 9。終了し、terminated になるのを見る。"""
     stubs.ec2.add_response(
@@ -406,7 +362,6 @@ def test_it_bakes_a_running_instance(
     image_state(aws_stubs, "pending")
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=False)
@@ -446,7 +401,6 @@ def test_it_bakes_a_stopped_instance_without_stopping_it(
     created(aws_stubs)
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=True)
@@ -498,7 +452,6 @@ def test_it_leaves_the_other_volumes_out_of_the_ami(
     )
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response(
         "modify_instance_attribute",
         {},
@@ -532,7 +485,6 @@ def test_it_does_not_write_the_config_file(
     created(aws_stubs)
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=False)
@@ -1222,14 +1174,13 @@ def test_create_takes_the_name_and_the_mappings(
 
 
 def test_it_changes_nothing_when_the_image_fails(
-    aws_stubs: Stubs, configured: Service, unmarked: None, capsys: pytest.CaptureFixture[str]
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """作れなかったら、何も向けずに今の状態を知らせ、AWS の理由でエラーにする。
 
-    設定ファイル、テンプレート、記録は元のままで、インスタンスは停止したまま残る。
+    設定ファイルとテンプレートは元のままで、インスタンスは停止したまま残る。
     テンプレートへの書き込みは積んでいないので、書けば Stubber が失敗する。
     """
-    _ = unmarked
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
@@ -1243,8 +1194,7 @@ def test_it_changes_nothing_when_the_image_fails(
     assert untouched(configured)
     # 続くエラーに添えるので、標準エラー出力に出す
     assert capsys.readouterr().err == (
-        f"bake has not changed the launch template {TEMPLATE} or the deploy records; "
-        f"{INSTANCE} is left stopped\n"
+        f"bake has not changed the launch template {TEMPLATE}; {INSTANCE} is left stopped\n"
     )
 
 
@@ -1260,7 +1210,6 @@ def test_it_waits_while_the_new_image_is_not_visible_yet(
     aws_stubs.ec2.add_response("describe_images", {"Images": []}, THE_IMAGE)
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=True)
@@ -1274,11 +1223,9 @@ def test_it_gives_up_on_an_image_it_never_sees(
     aws_stubs: Stubs,
     configured: Service,
     clock: Clock,
-    unmarked: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """作った AMI が見えないまま 5 分たてば、消えたものとして、作れなかったときと同じく終わる。"""
-    _ = unmarked
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
@@ -1296,11 +1243,10 @@ def test_it_gives_up_on_an_image_it_never_sees(
 
 
 def test_an_aws_error_while_waiting_tells_what_is_left(
-    aws_stubs: Stubs, configured: Service, unmarked: None, capsys: pytest.CaptureFixture[str]
+    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """待つあいだに AWS の誤り（資格情報の期限切れなど）が出たら、今の状態を知らせて
     その誤りをそのまま上げる。何も向けず、インスタンスも終了しない。"""
-    _ = unmarked
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
@@ -1315,17 +1261,16 @@ def test_an_aws_error_while_waiting_tells_what_is_left(
     aws_stubs.done()
     assert untouched(configured)
     assert capsys.readouterr().err == (
-        f"bake has not changed the launch template {TEMPLATE} or the deploy records; "
+        f"bake has not changed the launch template {TEMPLATE}; "
         f"{INSTANCE} is left stopped\n"
         f"the AMI {NEW} is not available yet\n"
     )
 
 
 def test_it_gives_up_on_an_image_that_is_deregistered_while_it_waits(
-    aws_stubs: Stubs, configured: Service, unmarked: None
+    aws_stubs: Stubs, configured: Service
 ) -> None:
     """いったん pending で見えた AMI が登録解除されたら、待ち続けずに作れなかったとする。"""
-    _ = unmarked
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
@@ -1351,7 +1296,6 @@ def test_it_waits_as_long_as_the_image_is_pending(
         image_state(aws_stubs, "pending")
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=True)
@@ -1362,10 +1306,9 @@ def test_it_waits_as_long_as_the_image_is_pending(
 
 
 def test_an_interrupted_wait_changes_nothing(
-    aws_stubs: Stubs, configured: Service, unmarked: None, monkeypatch: pytest.MonkeyPatch
+    aws_stubs: Stubs, configured: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """待つあいだに止めれば、設定ファイル、テンプレート、記録は元のまま。"""
-    _ = unmarked
+    """待つあいだに止めれば、設定ファイルとテンプレートは元のまま。"""
 
     def interrupt(seconds: float) -> None:
         raise KeyboardInterrupt
@@ -1480,7 +1423,6 @@ def test_it_holds_the_lock_while_it_waits(
     image_state(aws_stubs, "pending")
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     with deadline(5.0):
@@ -1555,7 +1497,6 @@ def test_it_does_not_make_a_config_file_that_went_away(
     created(aws_stubs)
     image_state(aws_stubs, "available")
     pointed(aws_stubs)
-    read_records(aws_stubs)
     terminated(aws_stubs)
     create = bake.create
 
@@ -1609,7 +1550,7 @@ def test_a_written_image_id_stops_it_before_anything(
 def test_it_goes_on_when_the_old_versions_cannot_be_deleted(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """古いバージョンを消せなくても、警告して記録を向け、インスタンスの終了へ進む。"""
+    """古いバージョンを消せなくても、警告してインスタンスの終了へ進む。"""
     found(aws_stubs, an_instance(INSTANCE, "stopped"))
     checked(aws_stubs)
     created(aws_stubs)
@@ -1620,7 +1561,6 @@ def test_it_goes_on_when_the_old_versions_cannot_be_deleted(
         "UnauthorizedOperation",
         expected_params={"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
     )
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=True)
@@ -1641,7 +1581,6 @@ def test_it_deletes_every_old_version(aws_stubs: Stubs, configured: Service) -> 
     created(aws_stubs)
     image_state(aws_stubs, "available")
     pointed(aws_stubs, 1, 2)
-    read_records(aws_stubs)
     terminated(aws_stubs)
 
     bake.run(configured, yes=True)
@@ -1672,68 +1611,3 @@ def test_it_stops_when_the_image_of_the_template_is_lost(
 
     aws_stubs.done()
     assert str(caught.value) == LOST_IMAGE.format(why)
-
-
-def test_it_records_the_apps_of_the_instance_as_baked(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """AMI が available になったら、テンプレートに続けて記録を新しい AMI に向ける。
-
-    インスタンスに入れてまだ焼いていない記録には、焼いた版と AMI を書く。
-    """
-    found(aws_stubs, {**an_instance(INSTANCE, "stopped"), "ImageId": OLD})
-    checked(aws_stubs)
-    created(aws_stubs)
-    image_state(aws_stubs, "available")
-    pointed(aws_stubs)
-    kept = {**RECORD, "baked_version": "1", "baked_image": OLD}
-    read_records(
-        aws_stubs,
-        {"Name": f"/{NAME}/jupyter/deploy", "Type": "String", "Value": json.dumps(UNBAKED)},
-        # 起動元の AMI に焼いてあったものは、新しい AMI にも引き継がれる
-        {"Name": f"/{NAME}/mise/deploy", "Type": "String", "Value": json.dumps(kept)},
-        # ほかの AMI に焼いたものには触れない
-        {
-            "Name": f"/{NAME}/old/deploy",
-            "Type": "String",
-            "Value": json.dumps({**RECORD, "baked_version": "1", "baked_image": "ami-0aaa"}),
-        },
-    )
-    written_record(aws_stubs, "jupyter", {**RECORD, "baked_version": "2", "baked_image": NEW})
-    written_record(aws_stubs, "mise", {**kept, "baked_image": NEW})
-    terminated(aws_stubs)
-
-    bake.run(configured, yes=True)
-
-    aws_stubs.done()
-    lines = told(capsys.readouterr().out)
-    # 焼いたと知らせるのは、このインスタンスに入れたものだけ
-    assert f"recorded jupyter as baked in {NEW}" in lines
-
-
-def test_it_goes_on_when_the_records_cannot_be_read(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """記録が読めなくても焼くことは止めず、警告してインスタンスの終了へ進む。"""
-    found(aws_stubs, an_instance(INSTANCE, "stopped"))
-    checked(aws_stubs)
-    created(aws_stubs)
-    image_state(aws_stubs, "available")
-    pointed(aws_stubs)
-    aws_stubs.ssm.add_client_error(
-        "get_parameters_by_path",
-        service_error_code="AccessDeniedException",
-        http_status_code=400,
-        expected_params={"Path": f"/{NAME}", "Recursive": True},
-    )
-    terminated(aws_stubs)
-
-    bake.run(configured, yes=True)
-
-    aws_stubs.done()
-    captured = capsys.readouterr()
-    warnings = captured.err.splitlines()
-    assert len(warnings) == 1
-    assert warnings[0].startswith("temt: warning: cannot read the deploy records: ")
-    assert warnings[0].endswith("; app list may show the apps as lost")
-    assert told(captured.out)[-1] == f"baked {IMAGE_NAME} ({NEW}); the next start boots from it"

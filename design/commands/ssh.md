@@ -27,8 +27,8 @@ There is one Host block per service ([topics/ssh.md](../topics/ssh.md)), so ssh,
 `start` and the others, reaches the instance of the region decided at that time. To be
 connected to two regions at once, the user sets up two services.
 
-When temt itself runs ssh (`deploy` and `app remove`; `set-port` uses Run Command
-instead), it passes the region and profile that command decided to `proxy` in the
+When temt itself runs ssh (`deploy` and `app remove`; `set-port`, `app show`, and
+`status --apps` use Run Command instead), it passes the region and profile that command decided to `proxy` in the
 environment variables `TEMT_PROXY_REGION` and `TEMT_PROXY_PROFILE`, and `proxy` takes
 them at the rank of `--region` and `--profile`, so both look at the same instance. They
 are internal to temt and not in docs/. `AWS_REGION` is not used for this: it ranks

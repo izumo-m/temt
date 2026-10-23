@@ -83,7 +83,7 @@ The conf directory and the ssh directory can each be moved by an environment var
 
 Who reads them:
 
-- Every command with `--svc`: both. `TEMT_SSH_DIR` is read where
+- Every command with `--svc` other than `app list`: both. `TEMT_SSH_DIR` is read where
   the ssh directory is used (the default login key, locks, the ssh config), so a
   command that uses none of them does not notice a wrong value.
 - `service list`: only `TEMT_CONF_DIR`, which locates the config files.
@@ -92,7 +92,7 @@ Who reads them:
   ([config.md](config.md#commands-without---svc)). `ami prune` also reads
   `TEMT_SSH_DIR`, which locates the locks; a wrong value is an error before the
   confirmation.
-- `app list` without `--svc`: only `TEMT_CONF_DIR`, which locates the apps.
+- `app list`, with or without `--svc`: only `TEMT_CONF_DIR`, which locates the apps.
 
 Values are absolute paths; the rules for values are in
 [docs/conf.md](../docs/conf.md#場所を変える環境変数). A command that reads a variable

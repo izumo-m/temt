@@ -12,7 +12,7 @@ idempotent.
 ## install
 
 Before changing anything, check the following and fail if one does not hold. A failure
-here changes nothing, so the deploy record stays as it was.
+here changes nothing on the instance besides the files `deploy` sent.
 
 1. Convert `size` to bytes. More than 9 digits is refused, since bash integers would
    overflow.

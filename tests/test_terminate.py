@@ -4,7 +4,6 @@
 """
 
 import fcntl
-import json
 import re
 import sys
 from pathlib import Path
@@ -81,15 +80,6 @@ def terminating(instance_id: str) -> dict[str, Any]:
     }
 
 
-def read_records(stubs: Stubs, *parameters: dict[str, Any]) -> None:
-    """手順 3 の確認の前に読む deploy の記録。parameters が無ければ 1 つも無い。"""
-    stubs.ssm.add_response(
-        "get_parameters_by_path",
-        {"Parameters": list(parameters)},
-        {"Path": f"/{NAME}", "Recursive": True},
-    )
-
-
 def known_hosts(service: Service, *instance_ids: str, current: str = "") -> list[Path]:
     """インスタンスごとの known_hosts と、current のリンクを用意する。"""
     directory = home.prepare_known_hosts(service)
@@ -116,7 +106,6 @@ def test_it_terminates_the_instance_and_waits(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     # 手順 4
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     # 手順 5
@@ -160,7 +149,6 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
 
     assert cli.main(["temt", "terminate", "--svc", "dev-main"]) == 1
 
@@ -187,7 +175,6 @@ def test_it_cancels_at_the_end_of_input(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
 
     assert cli.main(["temt", "terminate", "--svc", "dev-main"]) == 1
 
@@ -204,7 +191,6 @@ def test_it_needs_yes_when_stdin_is_not_a_terminal(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
 
     with pytest.raises(TemtError, match="stdin is not a terminal; pass --yes"):
         terminate.run(configured, is_async=False, yes=False)
@@ -224,7 +210,6 @@ def test_yes_skips_the_question(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
@@ -264,7 +249,6 @@ def test_it_terminates_every_instance_when_there_are_two(
         reservations(an_instance(OTHER, "stopped"), an_instance(INSTANCE, "running")),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response("terminate_instances", terminating(OTHER), {"InstanceIds": [OTHER]})
     aws_stubs.ec2.add_response(
@@ -322,7 +306,6 @@ def test_it_makes_the_root_volume_go_with_the_instance(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(with_volumes(root_kept=True)), SEARCH
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("modify_instance_attribute", {}, ROOT_GOES)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
@@ -348,7 +331,6 @@ def test_it_leaves_the_other_volumes_alone(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(with_volumes(root_kept=False)), SEARCH
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
@@ -367,7 +349,6 @@ def test_it_goes_on_when_the_root_volume_cannot_be_fixed(
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(with_volumes(root_kept=True)), SEARCH
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_client_error(
         "modify_instance_attribute",
         service_error_code="UnauthorizedOperation",
@@ -399,7 +380,6 @@ def test_it_keeps_the_known_hosts_when_the_request_fails(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_client_error(
         "terminate_instances",
         service_error_code="UnauthorizedOperation",
@@ -425,7 +405,6 @@ def test_async_returns_before_the_wait(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
 
     assert cli.main(["temt", "terminate", "--svc", "dev-main", "--async", "--yes"]) == 0
@@ -445,7 +424,6 @@ def test_it_keeps_current_when_it_points_at_another_instance(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "terminated")), BY_ID
@@ -469,7 +447,6 @@ def test_it_gives_up_when_the_instance_does_not_go_away(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     for _ in range(6):
         aws_stubs.ec2.add_response(
@@ -523,7 +500,6 @@ def test_it_holds_the_lock_while_it_waits(
         reservations(an_instance(INSTANCE, "running", address=ADDRESS)),
         SEARCH,
     )
-    read_records(aws_stubs)
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
     aws_stubs.ec2.add_response(
         "describe_instances", reservations(an_instance(INSTANCE, "shutting-down")), BY_ID
@@ -541,111 +517,7 @@ def test_it_holds_the_lock_while_it_waits(
     assert taken(configured)
 
 
-def a_record(app_id: str, instance: str) -> dict[str, Any]:
-    """instance に入れてまだ焼いていない、deploy の記録のパラメータ 1 つ。"""
-    value = {"name": app_id, "version": "1", "instance": instance}
-    return {"Name": f"/{NAME}/{app_id}/deploy", "Type": "String", "Value": json.dumps(value)}
-
-
-def a_removed_record(app_id: str, instance: str, image: str) -> dict[str, Any]:
-    """AMI image に焼いてあり、instance から焼かずに外した、deploy の記録のパラメータ。"""
-    value = {"name": app_id, "version": "1", "removed": instance, "baked_image": image}
-    return {"Name": f"/{NAME}/{app_id}/deploy", "Type": "String", "Value": json.dumps(value)}
-
-
 TEMPLATE_IMAGE = "ami-0123456789abcdef0"
-
-
-def test_it_warns_about_the_apps_removed_without_baking(
-    aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """終了するインスタンスから焼かずに外したアプリが、テンプレートの AMI にあれば警告する。"""
-    identified(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    read_records(
-        aws_stubs,
-        a_record("mise", INSTANCE),
-        a_removed_record("swapfile", INSTANCE, TEMPLATE_IMAGE),
-        # apply で別の AMI に替えたので、戻らない
-        a_removed_record("moved", INSTANCE, "ami-0fedcba9876543210"),
-        # ほかのインスタンスから外したもの
-        a_removed_record("other", OTHER, TEMPLATE_IMAGE),
-    )
-    aws_stubs.ec2.add_response(
-        "describe_launch_template_versions",
-        {
-            "LaunchTemplateVersions": [
-                {
-                    "VersionNumber": 1,
-                    "DefaultVersion": True,
-                    "LaunchTemplateData": {"ImageId": TEMPLATE_IMAGE},
-                }
-            ]
-        },
-        {"LaunchTemplateName": f"{NAME}-template"},
-    )
-    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
-
-    terminate.run(configured, is_async=True, yes=False)
-
-    aws_stubs.done()
-    assert capsys.readouterr().err.startswith(
-        "temt: warning: unbaked apps will be lost: mise\n"
-        "temt: warning: apps removed without baking come back from the AMI: swapfile\n"
-        f"{PROMPT}"
-    )
-
-
-def test_it_warns_about_the_apps_that_are_not_baked(
-    aws_stubs: Stubs, configured: Service, answer: Terminal, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """終了するインスタンスに入れてまだ焼いていないアプリを、確認の前に警告する。"""
-    identified(aws_stubs)
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    read_records(
-        aws_stubs,
-        a_record("timezone-tokyo", INSTANCE),
-        # もう無いインスタンスに入れたものは、終了しても変わらないので挙げない
-        a_record("lost", OTHER),
-        a_record("mise", INSTANCE),
-    )
-    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
-
-    terminate.run(configured, is_async=True, yes=False)
-
-    aws_stubs.done()
-    err = capsys.readouterr().err
-    assert err.startswith(
-        f"temt: warning: unbaked apps will be lost: mise, timezone-tokyo\n{PROMPT}"
-    )
-
-
-def test_it_terminates_even_when_the_records_cannot_be_read(
-    aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """記録が読めなくても、警告して終了する。"""
-    aws_stubs.ec2.add_response(
-        "describe_instances", reservations(an_instance(INSTANCE, "running")), SEARCH
-    )
-    aws_stubs.ssm.add_client_error(
-        "get_parameters_by_path",
-        service_error_code="AccessDeniedException",
-        http_status_code=400,
-        expected_params={"Path": f"/{NAME}", "Recursive": True},
-    )
-    aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
-
-    terminate.run(configured, is_async=True, yes=True)
-
-    aws_stubs.done()
-    out, err = capsys.readouterr()
-    assert len(err.splitlines()) == 1
-    assert err.startswith("temt: warning: cannot read the deploy records: ")
-    assert told(out) == [f"terminating {INSTANCE}"]
 
 
 def test_it_terminates_only_the_instance_it_is_given(
@@ -655,7 +527,7 @@ def test_it_terminates_only_the_instance_it_is_given(
     answer: Terminal,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ID を指せば、確認、known_hosts、焼いていないアプリ、待ち合わせもそれだけに行う。"""
+    """ID を指せば、確認、known_hosts、待ち合わせもそれだけに行う。"""
     identified(aws_stubs)
     files = known_hosts(configured, INSTANCE, OTHER, current=INSTANCE)
     aws_stubs.ec2.add_response(
@@ -663,7 +535,6 @@ def test_it_terminates_only_the_instance_it_is_given(
         reservations(an_instance(OTHER, "stopped"), an_instance(INSTANCE, "running")),
         SEARCH,
     )
-    read_records(aws_stubs, a_record("mise", INSTANCE), a_record("jupyter", OTHER))
     aws_stubs.ec2.add_response("terminate_instances", terminating(OTHER), {"InstanceIds": [OTHER]})
     aws_stubs.ec2.add_response(
         "describe_instances",
@@ -680,7 +551,7 @@ def test_it_terminates_only_the_instance_it_is_given(
     assert configured.known_hosts_current.is_symlink()
     prompt = f"terminate {OTHER} (stopped) {WHERE}? [y/N] "
     out, err = capsys.readouterr()
-    assert err == f"temt: warning: unbaked apps will be lost: jupyter\n{prompt}"
+    assert err == prompt
     assert told(out) == [f"terminating {OTHER}", f"{OTHER} is terminated"]
 
 

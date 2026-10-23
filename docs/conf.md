@@ -1,9 +1,9 @@
 # temt の設定ファイル
 
-`~/.config/temt/<svc>.toml`。サービスの定義で、`--svc <svc>` を付けたすべての
-コマンドが読む。`--svc` を付けない `service list` は、すべての `<svc>.toml` を
+`~/.config/temt/<svc>.toml`。サービスの定義で、`app list` を除く、`--svc <svc>` を
+付けたすべてのコマンドが読む。`--svc` を付けない `service list` は、すべての `<svc>.toml` を
 読んで並べる。`--svc` を付けない `instance list`、`ami list`、`ami prune`、
-`ami delete`、`app list` は読まない。`apply` はこの
+`ami delete` と、`app list` は読まない。`apply` はこの
 ファイルを正として、AWS リソースと手元の環境を揃える。ssh の経路は手元のネットワークで
 変わるので、このファイルではなく環境変数で与える（[設定ファイルに
 書かないもの](#設定ファイルに書かないもの)）。場所は環境変数 `TEMT_CONF_DIR` で
@@ -85,9 +85,9 @@ Description = "home"
 
 | 項目 | 読むコマンド | 既定 |
 | --- | --- | --- |
-| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
-| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
-| `Defaults` | `--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
+| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
+| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
+| `Defaults` | `app list` を除く、`--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
 | `WaitForSsm` | `start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
 
 **`AwsProfile`。** `<svc>.toml` に書けば、そのサービスはいつもその AWS のプロファイルを
@@ -489,8 +489,8 @@ Resource = [
 ]
 ```
 
-- 1 つ目は SSM エージェントの権限。Session Manager 経由の ssh と、`reboot` と
-  `set-port` が使う Run Command に要る最小のものである。`ec2messages` は要らない。SSM エージェント 3.3.40.0 からは `ssmmessages`
+- 1 つ目は SSM エージェントの権限。Session Manager 経由の ssh と、`reboot`、`set-port`、
+  `app show`、`status --apps` が使う Run Command に要る最小のものである。`ec2messages` は要らない。SSM エージェント 3.3.40.0 からは `ssmmessages`
   を使い、Ubuntu の snap のエージェントは自動で更新される。起動直後の 1 分ほどは、
   エージェントが `ec2messages:GetMessages` も試して拒否され、エージェントのログに
   残るが、動きには関わらない。

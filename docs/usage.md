@@ -103,7 +103,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 コマンド `temt-<svc>` で書く。サービスはコマンドラインオプション `--svc <svc>` で選ぶ。
 下の表で `--svc <svc>` と書いたコマンドは `--svc` が要り、
 `[--svc <svc>]` と書いたコマンドは省ける。省けば、すべてのサービスのものを扱う。
-ただし `app list` は、省けばアプリ ID で指せるアプリだけを表示する。
+ただし `app list` は、付けても省いても、アプリ ID で指せる手元のアプリを表示する。
 
 | コマンド | 短縮形 | すること |
 | --- | --- | --- |
@@ -116,7 +116,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 | `temt instance stop --svc <svc> [--async] [--yes]` | `stop` | インスタンスを終了せずに止める |
 | `temt instance terminate --svc <svc> [<インスタンスID>...] [--async] [--yes]` | `terminate` | インスタンスを終了する。ID を指せば、それだけを終了する |
 | `temt instance reboot --svc <svc> [--async] [--yes]` | `reboot` | インスタンスを終了せずに再起動する |
-| `temt instance show --svc <svc>` | `status` | インスタンスの状態を見る |
+| `temt instance show --svc <svc> [--apps]` | `status` | インスタンスの状態を見る。`--apps` で、入っているアプリも |
 | `temt instance list [--svc <svc>] [--format <列>]` | | インスタンスの一覧を見る |
 | `temt ami bake --svc <svc> [--yes]` | `bake` | インスタンスを AMI にする |
 | `temt ami list [--svc <svc>] [--format <列>]` | | AMI の一覧を見る |
@@ -130,7 +130,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 | `temt sg remove --svc <svc> <ポート> [<CIDR>]` | | 設定ファイルから受信規則を消す |
 | `temt sg diff --svc <svc>` | | 次の `apply` が受信規則をどう変えるかを見る |
 | `temt sg show --svc <svc>` | | セキュリティグループを見る |
-| `temt app list [--svc <svc>] [--format <列>]` | | 入っているアプリと、入れられるアプリの一覧を見る。`--svc` を省けば、入れられるアプリだけ |
+| `temt app list [--svc <svc>] [--format <列>]` | | 入れられるアプリの一覧を見る |
 | `temt app show --svc <svc> <アプリID>` | | アプリの記録、オプション、キーの一覧を見る |
 | `temt app get --svc <svc> <アプリID> <キー>` | | アプリの値を 1 つ読む |
 | `temt app set --svc <svc> <アプリID> <キー>=<値>` | | アプリの値を 1 つ書く |
@@ -172,8 +172,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 
 AWS のプロファイルを選ぶ `--profile <プロファイル>` と、リージョンを選ぶ
 `--region <リージョン>` は、AWS を呼ぶどのコマンドにも付けられる。AWS に問い合わせない
-`service list`、`sg list`、`sg add`、`sg remove` と、`--svc` を付けない `app list` は、
-どちらも付けられない。
+`service list`、`sg list`、`sg add`、`sg remove`、`app list` は、どちらも付けられない。
 
 `--svc` を付けたコマンドのリージョンは、設定ファイルの `AwsRegion`、`--region`、
 共通ファイルの `AwsRegion`、`AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの
@@ -328,10 +327,9 @@ AMI か、無ければ Ubuntu 24.04 から始まる。
 
 クローンでは、次のことに気をつける。
 
-- アプリの記録と値（[アプリの値](#アプリの値)）はリージョンごとにある。`deploy` と
-  `app remove` はそのまま使える。焼いたアプリは
-  AMI に入っていて動くが、コピーした先の `app list` と `app show` には出ない。コピーした先で
-  `deploy` し直せば出る。`app set` した値は、コピーした先でも `app set` し直す。
+- アプリの値（[アプリの値](#アプリの値)）はリージョンごとにあるので、`app set` した値は、
+  コピーした先でも `app set` し直す。焼いたアプリは、記録と一緒に AMI に入っているので、
+  コピーした先でもそのまま動き、`status --apps` と `app show` に出る。
 - コマンドは、そのときのリージョンのクローンを扱う。`AWS_REGION` などの環境変数で
   切り替えるなら、設定ファイルにも共通ファイルにも `AwsRegion` を書かない。どちらかに
   書いてあれば、環境変数では切り替わらない。
@@ -573,15 +571,20 @@ IAM の反映が追いつかずに、`start` が止まったり、SSM エージ�
 ### 状態を見る
 
     temt-<svc> status
+    temt-<svc> status --apps
 
 サービスの今の状態を表示する。`status` は `instance show` の短縮形で、
-`temt-<svc> instance show` と書いても同じである。
+`temt-<svc> instance show` と書いても同じである。`--apps` を付けると、インスタンスに
+入っているアプリも表示する。
 
     template:   temt-<svc>-template
     instance:   i-0123456789abcdef0 (running)
     ipv4:       203.0.113.10
     ssm-agent:  Online
-    apps:       unbaked timezone-tokyo
+    apps:
+      ID              VERSION  BAKED  DEPLOYED
+      idle-shutdown   2        yes    2026-10-20 12:00:00
+      timezone-tokyo  1*       no     2026-10-23 14:10:00
     app status:
       idle-shutdown  power off in 42m (at 2026-09-29 06:12:03 UTC; idle 18m since pam, limit 1h)  [3m ago]
 
@@ -595,15 +598,17 @@ IAM の反映が追いつかずに、`start` が止まったり、SSM エージ�
 - `ssm-agent` は、そのインスタンスの SSM エージェントの状態。`Online` なら
   Session Manager 経由でログインできる。起動してからエージェントが応答するまでは
   `(not registered)` で、`start` はこれが `Online` になるまで待つ。
-- `apps` は、入れたり外したりして、まだ焼いていないアプリ。`unbaked` はインスタンスに
-  だけあり、焼く前にインスタンスが終了すると消える。`lost` は、焼く前にインスタンスが
-  終了して消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` する。
-  `removed` は、`app remove` でインスタンスからは外したが、AMI には残っているもので、
-  焼けば消える（`removed swapfile (still in the AMI; bake to drop it)`）。どれも
-  無ければ `all baked`、焼いたアプリも無ければ（焼いたかどうかを記録していない
-  記録は数えない）`none`。決め方は `app list` の `STATE`
-  （[アプリを入れる](#アプリを入れる)）と同じである。起動テンプレートが無ければ
-  出ない。
+- `apps` は、`--apps` を付けたときだけ出る、インスタンスに入っているアプリ。動いている
+  インスタンスから SSM の Run Command で読むので、数秒かかり、手元の資格情報に `reboot`
+  と同じ権限が要る。ログインとは数えないので、`idle-shutdown` の自動終了は延びない。インスタンスが動いていないか、SSM エージェントが
+  `Online` でなければ、読まずに理由を表示する（`(not read; i-0123456789abcdef0 is stopped)`）。
+  - `VERSION` は入っている版。後ろに `*` があれば、アプリ ID で指したときに使われる
+    手元のアプリの版がそれと違う。もう一度 `deploy` して焼けば更新になる。
+  - `BAKED` は焼いてあるか。`yes` は AMI から来たもの、`no` はこのインスタンスに入れて
+    まだ焼いていないもので、焼く前にインスタンスが終了すると消える（`idle-shutdown` の
+    自動終了も含む）。同じ版を入れ直しても、焼くまでは `no` になる。前の版の temt で
+    入れたアプリは、`deploy` し直すまで `-` になる。
+  - `DEPLOYED` は入れた時刻。
 - `app status` は、アプリが自分で知らせている状態（[アプリの値](#アプリの値)）。
   アプリごとに 1 行で、値と、最後に書かれてからの経過時間を表示する。インスタンスが
   終了した後も最後の値が残るので、`instance` が `none` でも出る。今動いている
@@ -706,10 +711,9 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 対象のインスタンスの ID と状態を表示して `[y/N]` で確認を求める。`y` と答えると、
 インスタンスをルートボリュームごと終了し、known_hosts のファイルを消す。次に `start` すると、起動テンプレートの AMI から新しい
 インスタンスが立ち上がる。残したいものがあれば、終了する代わりに `bake` で AMI に
-する（[AMI にする](#ami-にする)）。入れてまだ焼いていないアプリがあれば、終了すると
-消えることを確認の前に警告する（`unbaked apps will be lost: timezone-tokyo`）。外して
-まだ焼いていないアプリがあれば、次のインスタンスに AMI から戻ることを警告する
-（`apps removed without baking come back from the AMI: swapfile`）。
+する（[AMI にする](#ami-にする)）。入れてまだ焼いていないアプリは、終了すると消える。
+どんな状態のインスタンスでも終了できるよう、`terminate` はインスタンスの中を見ないので、
+そのことを警告しない。先に `status --apps` で確かめる。
 
 `--yes` を付けると確認しない。標準入力が端末でないときは `--yes` が要る。
 
@@ -720,7 +724,7 @@ SSM エージェントが応答していない（`status` の `ssm-agent` が `O
 [インスタンスが 2 台になったとき](#インスタンスが-2-台になったとき)）。
 
 インスタンス ID を指すと、そのインスタンスだけを終了する。確認、known_hosts の
-片づけ、焼いていないアプリの警告、完了の待ち合わせも、指したものだけに行う。指した
+片づけ、完了の待ち合わせも、指したものだけに行う。指した
 ID がそのサービスのインスタンスに無ければ、見つかったものを表示し、何もせずに終わる。
 
     temt-<svc> terminate i-0fedcba9876543210
@@ -804,8 +808,8 @@ EBS は縮められない。大きくして焼いた AMI は、そのあと `Ebs
 3. AMI が使える状態（`available`）になるまで待つ。ディスクの大きさによって、数分から
    それ以上かかる。締め切りは無い。
 4. そのリージョンの起動テンプレートの `ImageId` を新しい AMI に替える。設定ファイルには
-   触らない。`deploy` の記録も新しい AMI に向け、入れてまだ焼いていなかったアプリを焼いたと記録する（`app list` の
-   `STATE` が `baked` になる）。
+   触らない。入れたアプリは、`deploy` の記録と一緒に AMI に入るので、次のインスタンス
+   では `status --apps` の `BAKED` が `yes` になる。
 5. インスタンスを `terminate` と同じように終了し、終了が完了するまで待つ。
 
 `--yes` を付けると確認しない。標準入力が端末でないときは `--yes` が要る。`bake` は
@@ -824,7 +828,7 @@ EBS は縮められない。大きくして焼いた AMI は、そのあと `Ebs
 そちらは変わらない。新しい AMI を使うなら、そちらで `apply --image-id` を実行する。
 古い AMI は消えずに残る。消すには `ami prune` か `ami delete` を使う（次の節）。
 
-AMI が作れなかったときは、AWS が返した理由を表示して終わる。起動テンプレート、`deploy` の記録は何も変わっていない。インスタンスは止まったまま残る
+AMI が作れなかったときは、AWS が返した理由を表示して終わる。起動テンプレートは変わっていない。インスタンスは止まったまま残る
 ので、`start` で再開して使い続けられる。同じサービスを同じ分のうちに 2 回焼くと、AMI の名前が重なって失敗する。1 分おいてやり直す。
 
 途中で止まったとき（Ctrl-C、締め切り、AWS のエラー）は、どこまで進んだかで
@@ -836,13 +840,9 @@ AMI が作れなかったときは、AWS が返した理由を表示して終わ
   止まったまま残る。作った AMI の ID と名前が表示されている。`ami list` で AMI が
   `available` になったのを確かめたら、もう一度 `bake` を実行する。AMI がもう 1 つ
   できるが、余分な方は `ami prune` が消す。または、その名前を `--image-id` に付けて
-  `apply` を実行し、`terminate` を実行する。こちらは、入れたアプリを焼いたと記録
-  しないので、`app list` で `lost` と出る。`deploy` し直して焼けば揃う。`failed` に
-  なっていれば、作れなかったときと同じである。
-- 起動テンプレートを替えた後: もう一度 `bake` を実行する（`deploy` の記録も揃い、
-  余分な AMI は `ami prune` が消す）か、`terminate` を実行する（`app list` で `lost` と
-  出る。`deploy` し直して焼けば揃う）。
-- インスタンスの終了: `terminate` を実行する。
+  `apply` を実行し、`terminate` を実行する。`failed` になっていれば、作れなかったときと
+  同じである。
+- 起動テンプレートを替えた後: `terminate` を実行する。入れたアプリは AMI に入っている。
 
 起動テンプレートが新しい AMI を指す前に止まったときは、どのテンプレートからも
 指されていないので、`ami prune` を打つと新しい AMI は消える。その AMI を使うなら、
@@ -1103,44 +1103,29 @@ Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 アプリ ID で指すと、`~/.config/temt/apps/<アプリID>/` を探し、無ければ temt と
 一緒に配るアプリを使う。同じアプリ ID で置けば、temt と一緒に配るアプリの代わりに
 自分のものが使われる。
-入れたアプリは、インスタンスの `/opt/temt/apps/<アプリID>/` に置かれ、記録が
-`app list` に出る。途中で失敗しても巻き戻さないので、直してもう一度 `deploy` する。
+入れたアプリは、インスタンスの `/opt/temt/apps/<アプリID>/` に、`deploy` の記録
+`temt-deploy.json`（入れた時刻、入れた先のインスタンス、ユーザー、与えたオプション）と
+一緒に置かれる。焼けば、記録ごと AMI に入る。入っているアプリは `status --apps` で
+見られる（[状態を見る](#状態を見る)）。途中で失敗しても巻き戻さないので、直してもう一度
+`deploy` する。
 
-    ID               BAKED   PATH
-    emacs            2       ~/.config/temt/apps/emacs
-    idle-shutdown    2       ~/.local/share/uv/tools/temt/lib/python3.14/site-packages/temt/apps/idle-shutdown
-    jupyter          -       ~/.config/temt/apps/jupyter
-    mise             2*      ~/.config/temt/apps/mise
-    swapfile         -       ~/.local/share/uv/tools/temt/lib/python3.14/site-packages/temt/apps/swapfile
+`app list` は、アプリ ID で指せる手元のアプリを表示する。AWS には問い合わせない。
 
-- `BAKED` は起動テンプレートの AMI に焼いてある版（次の `start` で入っている版）である。
-  後ろに `*` があれば、アプリ ID で指したときに使われるものの版がそれと違う。もう一度
-  `deploy` して焼けば更新になる。
-- `PATH` は、アプリ ID で指したときに使われるもののディレクトリで、temt と一緒に配る
-  アプリは temt の中を指す。アプリ ID で指せるアプリは、入れていなくても表示する。
-- `--format` で、`NAME`、`VERSION`（最後に入れた版。`removed` では AMI に残っている版）、
-  `DEPLOYED`（`removed` では `-`）、`STATE`、`LOCAL`（アプリ ID で指したときに使われる
-  ものの版）も表示できる。
-- `STATE` は、最後に入れた版を焼いたかどうか。`baked` は AMI に入っている。
-  `unbaked` は、いまのインスタンスにだけあり、焼く前にインスタンスが終了すると
-  消える（`idle-shutdown` の自動終了も含む）。`lost` は、焼く前にインスタンスが
-  終了して消えたか、`apply` で別の AMI に替えたもので、もう一度 `deploy` して
-  焼く。`removed` は、いまのインスタンスからは外したが、AMI には残っている。焼けば
-  記録ごと消える。焼く前にインスタンスが終了すると、次のインスタンスには AMI から
-  戻るので、`baked` に戻る。`-` は入れていないか、焼いたかどうかを記録していない。
-  同じ版を入れ直しても、焼くまでは `unbaked` になる。
+    ID               NAME             LOCAL   PATH
+    emacs            Emacs            2       ~/.config/temt/apps/emacs
+    idle-shutdown    idle-shutdown    2       ~/.local/share/uv/tools/temt/lib/python3.14/site-packages/temt/apps/idle-shutdown
+    jupyter          Jupyter Lab      1.2     ~/.config/temt/apps/jupyter
 
-`--svc` を付けない `temt app list` は、アプリ ID で指せるアプリだけを表示する。
-`LOCAL` は
-`manifest.toml` の版、`PATH` はアプリのディレクトリで、temt と一緒に配るアプリは
-temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明）も表示できる。
+- `LOCAL` は `manifest.toml` の版である。
+- `PATH` はアプリのディレクトリで、temt と一緒に配るアプリは temt の中を指す。
+- `--format` で `DESCRIPTION`（`manifest.toml` の説明）も表示できる。
 
     temt app list --format id,local,description
 
 `install` は、アプリの `manifest.toml` の `user` が指すユーザーで実行され、書いて
 いなければ root で実行される。`--user` を付ければ、`manifest.toml` の `user` より
-優先して、そのユーザーで実行する。入れたあとにユーザーを変えるには、いったん外してから入れ直す
-（AMI に焼いてあれば、外したあと焼く）。
+優先して、そのユーザーで実行する。入れたあとにユーザーを変えるには、いったん外してから
+入れ直す。
 
     temt-<svc> deploy ./jupyter --user ubuntu
 
@@ -1153,8 +1138,8 @@ temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明�
     temt-<svc> deploy ./hello port=8080 motd=on
 
 `deploy` は、使う値を 1 つ 1 行で、出どころとともに表示する。`given` はコマンドラインで
-与えた値、`kept` は前の `deploy` で与えて記録に残った値、`default` はアプリの既定で
-ある。
+与えた値、`kept` は前の `deploy` で与えて、インスタンスの記録に残った値、`default` は
+アプリの既定である。
 
     10:20:15 option port=8080 (given)
     10:20:15 option motd=off (default)
@@ -1162,46 +1147,40 @@ temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明�
 与えた値は記録に残り、次の `deploy` は、与えなかったオプションにその値を引き継ぐ。
 版を上げるときも、値を与え直さなくてよい。`<名前>=` と値を空にすれば、その
 オプションを既定に戻す。`--reset` を付ければ、前の値を何も引き継がず、与えたもの
-だけを使う。`app remove` で外したインスタンスに入れ直すときは、既定から始まる。
+だけを使う。AMI から来たアプリは、焼いたときの値を引き継ぐ。`app remove` で外して
+から入れ直すときは、既定から始まる。
 
     temt-<svc> deploy hello              # 前の port=8080 のまま入れ直す
     temt-<svc> deploy hello port=        # port を既定に戻す
     temt-<svc> deploy hello --reset      # どのオプションも既定に戻す
 
-`install` が失敗すると記録は書かれないので、記録の値は前のままである。やり直す
-ときは、同じオプションを付け直す。記録の中身が壊れていて前の値が読めないときは、
+`install` が失敗しても、記録は新しいファイルと一緒に置かれるので、やり直すときに
+同じオプションを付け直さなくてよい。記録の中身が壊れていて前の値が読めないときは、
 何も変えずに止まるので、`--reset` を付けて値を与え直す。
 
-記録した値と、AMI に焼いた値は `app show` で見られる。記録は暗号化されず、値は
-AMI にも残るので、オプションには秘密の値を渡さない。
+記録した値は `app show` で見られる。`status --apps` と同じく、動いているインスタンスから
+Run Command で記録を読み、読めなければ理由を表示する。記録はインスタンスの上で誰でも
+読め、AMI にも残るので、オプションには秘密の値を渡さない。
 
     temt-<svc> app show hello
 
-    app hello:
-      name:          hello
-      version:       2
-      user:          root
-      deployed:      2026-10-01 10:40:20
-      instance:      i-0123456789abcdef0
-      removed:       -
-      options:       port=8080
-      baked_version: 2
-      baked_image:   ami-0123456789abcdef0
-      baked_options: port=9000
-    options in ~/.config/temt/apps/hello (version 2):
+    app hello on i-0123456789abcdef0:
+      name:     hello
+      version:  2
+      user:     root
+      deployed: 2026-10-01 10:40:20
+      baked:    no
+      options:  port=8080
+    options in i-0123456789abcdef0:/opt/temt/apps/hello (version 2):
       port  8000  the port to listen on in the instance
       motd  off   show the URL in the login message: on or off
     keys: none
 
-`app remove <アプリID>` は、`uninstall` を実行してディレクトリを消し、状態
-（キー `status`）を消す。
-焼くまで AMI には残る。AMI に焼いてあったアプリなら、そのあいだ記録が残り、
-`app list` の `STATE` は `removed` になる。焼くと記録も消える。アプリの値は残るので、要らなければ `app unset` で消す。
-`uninstall` は、`install` を実行したのと同じユーザーで実行される。
-`--user` で変えられる。
-
-`destroy` のあとに `apply` し直したときは、`start` してから同じアプリを `deploy`
-し直して焼けば、記録が揃う。
+`app remove <アプリID>` は、`uninstall` を実行してディレクトリを記録ごと消し、状態
+（キー `status`）を消す。焼くまで AMI には残るので、焼かずにインスタンスが終了すると、
+次のインスタンスで AMI の版に戻る。アプリの値は残るので、要らなければ `app unset` で
+消す。`uninstall` は、記録にある、`install` を実行したユーザーで実行される。`--user` で
+変えられる。
 
 `deploy` と `app remove` はインスタンスに ssh でつなぐ。この ssh も、`--profile` と
 `--region` で選んだ AWS のプロファイルとリージョンを使う。別のインスタンスにつながった
@@ -1214,16 +1193,14 @@ AMI にも残るので、オプションには秘密の値を渡さない。
 `/temt-<svc>/<アプリID>/<キー>` に置く。手元からは `app` のコマンドで扱う。
 `apply` していないサービスでは、どれも `apply` を促して止まる。
 
-    temt-<svc> app list                    # 入っているアプリと、入れられるアプリの一覧
     temt-<svc> app show jupyter            # 記録、宣言したオプション、キーと更新時刻の一覧。値は表示しない
     temt-<svc> app get jupyter token       # 値をそのまま標準出力に書く。改行は足さない
     temt-<svc> app set jupyter limit=2h    # 値を書く
     temt-<svc> app unset jupyter limit     # 値を消す。確認は取らない
 
 アプリ ID とキーは、英小文字で始まり、英小文字・数字・ハイフンが続き、英小文字か
-数字で終わる 64 文字以内の名前である。キー `deploy` はアプリを入れたときの記録で、
-`get` で読めるが、`set` と `unset` では扱えない。`set` は、記録の無いアプリには
-書かない。アプリ ID の打ち間違いを防ぐためである。
+数字で終わる 64 文字以内の名前である。`set` は、アプリが入っているかを確かめない。
+アプリ ID を打ち間違えた値は `app show` のキーの一覧に出るので、`unset` で消す。
 
 値は、暗号化されない `String` のパラメータとして書かれる。同じアカウントの資格情報を
 持つ者と、パラメータを読める権限を持つ同じアカウントのインスタンスからは読める。

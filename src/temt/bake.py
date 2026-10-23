@@ -1,9 +1,9 @@
 """bake の本体。設計の手順 1〜9 を順に行う。
 
 インスタンスを停止して AMI にし、AMI が使えるようになってから、そのリージョンの
-起動テンプレートと deploy の記録を新しい AMI に向け、インスタンスを終了する。設定
-ファイルには書かない。AMI が作れないか、待つあいだに AWS の誤りが出れば、何も向けずに、
-その誤りと今の状態を知らせて終了する。
+起動テンプレートを新しい AMI に向け、インスタンスを終了する。設定ファイルには書かない。
+deploy の記録はアプリと一緒に AMI に入るので、触らない。AMI が作れないか、待つあいだに
+AWS の誤りが出れば、何も向けずに、その誤りと今の状態を知らせて終了する。
 
 app deploy と app remove の --bake も、手順 1 の check_unfixed を何かする前に呼び、同じ
 ロックを持ったまま、手順 3 の check、手順 4 の確認に並べる plan、手順 5〜9 の make を使う。
@@ -23,11 +23,11 @@ from typing import TYPE_CHECKING
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from temt import app, aws, conf, instances, lock, ltbuild, ltdata, msg, resources, terminate, wait
+from temt import aws, conf, instances, lock, ltbuild, ltdata, msg, resources, terminate, wait
 from temt.aws import error_code, field
 from temt.msg import TemtError, UsageError
 from temt.names import PREFIX
-from temt.table import aws_error, printable, tilde
+from temt.table import printable, tilde
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     import boto3
     from types_boto3_ec2.client import EC2Client
     from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef, TagTypeDef
-    from types_boto3_ssm.client import SSMClient
 
     from temt.conf import Conf
     from temt.instances import Instance
@@ -269,32 +268,17 @@ def wait_available(ec2: EC2Client, image_id: str) -> str | None:
 def _left(service: Service, one: Instance) -> None:
     """手順 7 で止まるときに、今の状態を知らせる。
 
-    bake はまだテンプレートにも記録にも何も書いていない。--bake を付けた deploy と
-    app remove は記録を書き換えているので、bake の範囲に限って知らせる。続くエラーに
-    添えるので、標準エラー出力に書く。
+    bake はまだテンプレートに何も書いていない。続くエラーに添えるので、標準エラー出力に
+    書く。
     """
     msg.tell(
-        f"bake has not changed the launch template {service.launch_template} or the deploy "
-        f"records; {one.id} is left {instances.STOPPED}\n",
+        f"bake has not changed the launch template {service.launch_template}; "
+        f"{one.id} is left {instances.STOPPED}\n",
         side=True,
     )
 
 
-def _mark(ssm: SSMClient, service: Service, one: Instance, image_id: str) -> None:
-    """手順 8。deploy の記録を、テンプレートに続けて新しい AMI に向ける。
-
-    テンプレートの AMI と記録が食い違わないようにするためである。記録が読めなくても、
-    焼くことは止めない。
-    """
-    try:
-        app.mark_baked(ssm, service, one, image_id)
-    except (ClientError, BotoCoreError, TemtError) as e:
-        msg.warn(
-            f"cannot read the deploy records: {aws_error(e)}; app list may show the apps as lost"
-        )
-
-
-def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> None:
+def make(ec2: EC2Client, service: Service, one: Instance) -> None:
     """手順 5〜9。インスタンスを止めて AMI にし、向け直し、インスタンスを終了する。
 
     呼ぶ側がロックを持ち、手順 1〜4 を済ませてあるものとする。
@@ -307,7 +291,7 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
         instances.wait_stopped(ec2, one.id)
     # 手順 6
     image_id, name = create(ec2, service, one.id, one.other_devices)
-    # 手順 7。ここで止まれば、テンプレートも記録も元のまま
+    # 手順 7。ここで止まれば、テンプレートは元のまま
     try:
         why = wait_available(ec2, image_id)
     except (ClientError, BotoCoreError):
@@ -318,9 +302,8 @@ def make(ec2: EC2Client, ssm: SSMClient, service: Service, one: Instance) -> Non
         _left(service, one)
         raise TemtError(why)
     # 手順 8。テンプレートは ImageId だけを替えたバージョンを作って既定にし、他のバージョンを
-    # 消す
+    # 消す。deploy の記録はアプリと一緒に AMI に入っているので、触らない
     resources.point_image(ec2, service, image_id)
-    _mark(ssm, service, one, image_id)
     # 手順 9。手順 1 で読んだ状態は running のことがあるので、止めた後の状態から待つ
     halted = replace(one, state=instances.STOPPED)
     terminate.shut_down(ec2, service, [halted])
@@ -348,4 +331,4 @@ def run(service: Service, *, yes: bool) -> None:
         check(ec2, service, values, one)
         # 手順 4
         _confirm(session, service, one, yes=yes)
-        make(ec2, session.client("ssm"), service, one)
+        make(ec2, service, one)

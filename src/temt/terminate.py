@@ -15,14 +15,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from botocore.exceptions import BotoCoreError, ClientError
-
-from temt import app, aws, conf, home, instances, lock, msg, resources, table
+from temt import aws, conf, home, instances, lock, msg
 from temt.msg import TemtError
 
 if TYPE_CHECKING:
     from types_boto3_ec2.client import EC2Client
-    from types_boto3_ssm.client import SSMClient
 
     from temt.instances import Instance
     from temt.names import Service
@@ -39,38 +36,6 @@ def shut_down(ec2: EC2Client, service: Service, found: list[Instance]) -> None:
         # 要求が受け付けられてから消す。EC2 はインスタンス ID を再利用しないので、
         # 終了を待たなくてよい
         home.forget_known_hosts(service, one.id)
-
-
-def _warn_unbaked(ec2: EC2Client, ssm: SSMClient, service: Service, found: list[Instance]) -> None:
-    """手順 3 の確認の前に、終了すると消える、焼いていないアプリを警告する。
-
-    焼かずに外したアプリが起動テンプレートの AMI に焼いてあれば、次のインスタンスに
-    戻ることも警告する。記録やテンプレートが読めなくても、終了は止めない。
-    """
-    ids = {one.id for one in found}
-    try:
-        found_records = app.records(ssm, service)
-    except (ClientError, BotoCoreError, TemtError) as e:
-        msg.warn(f"cannot read the deploy records: {table.aws_error(e)}")
-        return
-    unbaked = [app_id for app_id, record in found_records if record.fields.get("instance") in ids]
-    removed = [
-        (app_id, record.fields.get("baked_image"))
-        for app_id, record in found_records
-        if record.fields.get("removed") in ids
-    ]
-    if removed:
-        # テンプレートが無いか読めなければ、戻るかどうか分からないので挙げない
-        try:
-            image_id = resources.default_image(ec2, service)
-        except (ClientError, BotoCoreError, TemtError):
-            image_id = None
-        removed = [(app_id, baked) for app_id, baked in removed if baked and baked == image_id]
-    if unbaked:
-        msg.warn(f"unbaked apps will be lost: {', '.join(unbaked)}")
-    if removed:
-        found_ids = ", ".join(app_id for app_id, _ in removed)
-        msg.warn(f"apps removed without baking come back from the AMI: {found_ids}")
 
 
 def _chosen(service: Service, found: list[Instance], ids: tuple[str, ...]) -> list[Instance]:
@@ -111,7 +76,6 @@ def run(service: Service, *, ids: tuple[str, ...] = (), is_async: bool, yes: boo
             return
         chosen = _chosen(service, found, ids)
         # 手順 3
-        _warn_unbaked(ec2, session.client("ssm"), service, chosen)
         listed = ", ".join(f"{one.id} ({one.state})" for one in chosen)
         aws.confirm(session, f"terminate {listed}", yes=yes)
         # 手順 4

@@ -374,9 +374,6 @@ def baked(stubs: Stubs) -> None:
         {"SuccessfullyDeletedLaunchTemplateVersions": [{"VersionNumber": 1}]},
         {"LaunchTemplateName": TEMPLATE, "Versions": ["1"]},
     )
-    stubs.ssm.add_response(
-        "get_parameters_by_path", {"Parameters": []}, {"Path": f"/{NAME}", "Recursive": True}
-    )
     stubs.ec2.add_response(
         "terminate_instances",
         {

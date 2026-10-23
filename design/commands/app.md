@@ -1,152 +1,152 @@
 # app commands
 
-The `app` commands handle, from the client, the values and records of the apps that run
-on a service's instance. Only `app list` without `--svc` looks at the local apps instead.
-Values live in the SSM parameters `/<name>/<app ID>/<key>`.
+The `app` commands handle, from the client, the apps that run on a service's instance and
+their values. `app list` looks at the local apps instead. Values live in the SSM
+parameters `/<name>/<app ID>/<key>`; what is installed lives on the instance.
 
 `app list`, `app show`, `app get`, `app set`, and `app unset` only display or rewrite one
 value, so they take no lock. `deploy` and `app remove` take the lock
 ([topics/instance.md](../topics/instance.md#locks)).
 
+An app's contents (`manifest.toml`, `install`, `uninstall`, and the rest) and everything
+under `/opt/temt/apps` on the instance are trusted as their writers wrote them: the app's
+author and the instance's root. temt checks them to report mistakes clearly, not to defend
+against malicious contents. The time a `pattern` takes to match, a broken tar.gz read from
+the instance, and whatever `install` does are the writer's responsibility.
+
 ## Deploy record
 
-The key `deploy` is the record of installing the app, written by temt. It is a JSON
+The deploy record is the file `temt-deploy.json` directly under the app directory on the
+instance, `/opt/temt/apps/<app ID>/temt-deploy.json`, written by `deploy`. It is a JSON
 object with these fields:
 
-| Field | Written by | Value |
-| --- | --- | --- |
-| `name` | `deploy` | App name |
-| `version` | `deploy` | The version installed last |
-| `user` | `deploy` | The user that ran `install` |
-| `deployed` | `deploy` | When the install finished, in UTC as `2026-09-20T03:00:00Z` |
-| `instance` | `deploy` | ID of the instance it was installed on. `bake` removes it, so it is present only while the version installed last is not baked yet |
-| `removed` | `app remove` | ID of the instance the app was removed from without baking, while the app is still in the template's AMI ([`app remove`](#app-remove)) |
-| `options` | `deploy` | The options used by the last install that came from the command line or the previous record: a JSON object from option name to value. Values filled from the default are not written; with none, the field is omitted |
-| `baked_version` | `bake` | The version baked into the AMI |
-| `baked_image` | `bake` | ID of the newest AMI that has that version. Re-pointed on every rebake |
-| `baked_options` | `bake` | The `options` of the baked version. With none, the field is omitted |
+| Field | Value |
+| --- | --- |
+| `user` | The user that runs `install` |
+| `deployed` | When `deploy` sent the app, by the client's clock, in UTC as `2026-09-20T03:00:00Z` |
+| `instance` | ID of the instance it was sent to |
+| `options` | The options used by the install that came from the command line or the previous record: a JSON object from option name to value. Values filled from the default are not written; with none, the field is omitted |
 
-All fields other than `options` and `baked_options` are strings. The record is written as
-UTF-8, without `\u` escapes for Japanese and other non-ASCII text. But SSM rejects a value
-containing `{{` as a reference to another parameter, so wherever `{` is followed by `{`
-inside a string, the first `{` is written as `\u007b`.
+The app name and version are those of `manifest.toml` in the same directory. The record is
+sent with the directory and swapped with it in one step, so it always describes the files
+in place: when `install` fails, the record of the failed run stays with the new files.
+It is baked into the AMI with the directory, so what the AMI has is read from the
+instance launched from it, and nothing outside the instance is rewritten by `bake` or
+lost by an interrupt. An app is baked when the record's `instance` is not the instance it
+is read on: it came from the AMI. When `instance` is that instance, the app was deployed
+there and is not baked yet. Rejected: keeping the records in SSM parameters, which
+`bake` had to rewrite after pointing the template and which disagreed with the AMI when
+it stopped partway; and deciding baked from `deployed` and the AMI's creation time,
+which takes an app lost by terminating before baking for a baked one.
 
-The record is an SSM parameter, so anyone can rewrite it. A record that is not a JSON
-object, or whose fields contain a value that cannot be written as UTF-8 (a `\u` escape of
-an unpaired surrogate), is an unreadable record. Other keys are not checked; they are
-dropped when the record is rewritten. If `options` or `baked_options` is malformed (not a
-mapping from name to value, a name that breaks the option name rule, or a value with a
-control character), only that field is unreadable; when the record is rewritten, the
-value as parsed from JSON is written back unchanged.
+The record is written as UTF-8, without `\u` escapes for Japanese and other non-ASCII
+text, owned by root with mode 644 like `temt-options.env`. A record that is not a JSON
+object, whose `user`, `deployed`, or `instance` is not a string, or whose fields contain a
+value that cannot be written as UTF-8 (a `\u` escape of an unpaired surrogate), is an
+unreadable record. If `options` is malformed (not a mapping from name to value, a name
+that breaks the option name rule, or a value with a control character), only that field
+is unreadable. Other keys are ignored.
 
-`deploy` carries over `baked_version`, `baked_image`, and `baked_options` from the
-previous record, because the AMI keeps the previous version until the next bake. It
-writes `instance` even when reinstalling the same version, because `install` or the app's
-files may have changed. It does not carry over `removed`.
-
-`app remove` keeps the record only while the app is still in the template's AMI, marked
-with `removed`, so that `status` and `app list` can show that baking is needed to drop
-it. Otherwise it deletes the record. While the instance in `removed` exists and the
-template still points at `baked_image`, the app is `removed`. If that instance
-terminates before a bake, the removal is lost: the next
-instance from the AMI has the baked version again, so the record counts as baked, and
-the next rewrite (`bake` or `deploy`) drops `removed`.
+Apps deployed by temt before the record moved onto the instance have no record; their
+records in SSM (`/<name>/<app ID>/deploy`) are no longer read. Deploying the app again
+writes the record (the requester); the old parameter is an ordinary app value now, deleted
+with `app unset` or by `destroy`.
 
 The key `status` is the app's current state, written by the app from the instance and
 shown by `status` ([instance.md](instance.md#status),
 [apps.md](../../docs/apps.md#アプリの状態)).
+
+## Reading the apps on the instance
+
+`status --apps`, `app show`, `deploy`, and `app remove` read `manifest.toml` and
+`temt-deploy.json` of the apps on the running instance as root: of the directories
+directly under `/opt/temt/apps/` for `status --apps`, of the one app for the others.
+Directories whose names break the app ID rule are skipped.
+
+- `deploy` and `app remove` read over ssh, as they connect anyway ([Steps](#steps)
+  step 2): after confirming that ssh reaches the instance found.
+- `status --apps` and `app show` only display, so they read with Run Command
+  (`AWS-RunShellScript`, 30 seconds each to deliver and to run, given up after their
+  sum and one polling interval). An ssh session counts as use for `idle-shutdown`
+  ([apps/idle-shutdown.md](../apps/idle-shutdown.md)), so reading over ssh would put off
+  the idle shutdown (the requester); Run Command does not open a login session. They
+  read only when exactly one `running` instance is found (excluding `shutting-down`)
+  and its SSM agent is `Online`; otherwise they show why they did not read (no
+  instance, not running, two or more, the agent not online or not checkable). The
+  read files are sent back as a base64 tar.gz; an output over the 24000 characters
+  that `get-command-invocation` returns is not read. If the command cannot be sent
+  (including an AWS error), fails, or does not finish in time, they warn and go on. The local credentials need
+  `ssm:SendCommand`, `ssm:GetCommandInvocation`, and
+  `ssm:DescribeInstanceInformation`, as `reboot` does.
+
+ A `manifest.toml` that cannot be read is warned about and its
+values are left empty; an unreadable record is warned about and its values are left
+empty, except where `deploy` and `app remove` say otherwise.
 
 ## App IDs and keys
 
 An app ID or key starts with a lowercase letter, continues with lowercase letters,
 digits, and hyphens, ends with a lowercase letter or digit, and has at most 64
 characters. Hierarchies with `/` are not allowed. A name that breaks the rule is a usage
-error, detected before calling AWS. `app set` and `app unset` reject the key `deploy` as
-a usage error.
+error, detected before calling AWS.
 
 ## `app list`
 
 `app list [--svc <svc>] [--format <columns>]`
 
-With `--svc`, it lists one row per app: the apps that have a `deploy` record under
-`/<name>`, together with the apps that `deploy` can use by app ID (those in `apps/` of
-the conf directory and the bundled apps). Rows are ordered by app ID. If a record is
-unreadable ([Deploy record](#deploy-record)) or a `manifest.toml` cannot be read, it
-warns and leaves those values empty. In both `apps/` of the conf directory and the
-bundled apps' location, entries that are not directories (including broken links) and
-names that break the app ID rule are not listed. The local app's values come from the app
-that `deploy` uses for that app ID (the one in `apps/` of the conf directory if present,
-otherwise the bundled one).
+Lists the apps that `deploy` can use by app ID (those in `apps/` of the conf directory and
+the bundled apps), one row per app ordered by app ID, and calls no AWS API. With `--svc`
+the list is the same, since local apps do not depend on the service; it is accepted so
+that the service command (`temt-<svc> app list`) works. What is installed is shown by
+`status --apps` ([instance.md](instance.md#status)), which needs the running instance
+(the requester): the local list is always available, so it is not mixed with it.
 
-| Column | Default | Value |
-| --- | --- | --- |
-| `ID` | yes | App ID |
-| `NAME` | | App name: the record's, or the `manifest.toml`'s if the record has none or is unreadable |
-| `VERSION` | | The version installed last (the record's `version`) |
-| `DEPLOYED` | | When the install finished |
-| `STATE` | | Whether the version installed last is baked (table below) |
-| `BAKED` | yes | The version in the AMI the launch template points to: `baked_version` when `baked_image` is that AMI. Followed by `*` when the local app's version differs from it |
-| `LOCAL` | | Version in the local app's `manifest.toml` |
-| `PATH` | yes | Directory of the local app |
-
-The defaults answer what the next `start` has and where the app `deploy` would use is
-(the requester): the user remembers what they deployed, so `BAKED` alone shows what is
-not baked, and the `*` shows that the local app has another version to deploy and bake,
-whose number `app show` gives. Versions are compared only for equality, so an older local
-version is marked too. No `*` when nothing is baked, there is no local app, or its
-`manifest.toml` cannot be read. `PATH` is long for a bundled app, which lies inside
-temt's install; rejected: showing `(bundled)` instead, which hides where the source is.
-
-`STATE` is decided from the record, the `ImageId` of the launch template's default
-version, and the instance found by the same rule as `start`
-([topics/instance.md](../topics/instance.md#finding)). A `shutting-down` instance counts
-as absent.
-
-| `STATE` | Condition | Meaning |
-| --- | --- | --- |
-| `removed` | `removed` is set, that instance exists, and `baked_image` is the template's AMI | Removed from that instance without baking; still in the template's AMI. Checked before the rows below; if `apply` switched the AMI, the rows below give `lost` |
-| `unbaked` | `instance` is set and that instance exists | The version installed last exists only on that instance |
-| `lost` | `instance` is set and that instance does not exist | The instance terminated before baking; the version installed last is gone |
-| `baked` | No `instance`, and `baked_image` is the template's AMI | The version installed last is in the AMI |
-| `lost` | No `instance`, and `baked_image` is not the template's AMI | Not in the AMI, e.g. because `apply` switched to another AMI |
-| `-` | Neither is set | A record written by a `deploy` from before baking was recorded |
-
-Without `--svc`, it lists only the apps that `deploy` can use by app ID, by the same
-rules, and calls no AWS API. `VERSION`, `DEPLOYED`, `STATE`, and `BAKED` are per-service
-values, so they are not columns.
+In both `apps/` of the conf directory and the bundled apps' location, entries that are not
+directories (including broken links) and names that break the app ID rule are not listed.
+The values come from the app that `deploy` uses for that app ID (the one in `apps/` of the
+conf directory if present, otherwise the bundled one). If a `manifest.toml` cannot be
+read, it warns and leaves those values empty.
 
 | Column | Default | Value |
 | --- | --- | --- |
 | `ID` | yes | App ID |
 | `NAME` | yes | App name in `manifest.toml` |
-| `LOCAL` | yes | Version in `manifest.toml`; same as `LOCAL` with `--svc` |
-| `PATH` | yes | Directory of the app; same as `PATH` with `--svc` |
+| `LOCAL` | yes | Version in `manifest.toml` |
+| `PATH` | yes | Directory of the app. Long for a bundled app, which lies inside temt's install; rejected: showing `(bundled)` instead, which hides where the source is |
 | `DESCRIPTION` | | Description in `manifest.toml` |
 
 ## `app show`
 
 `app show --svc <svc> <app ID>`
 
-Prints the `deploy` record, the declared options (below), and the list of keys
-other than `deploy` directly under the app's hierarchy (key, last modified time), in
-this order. Values are not shown. Without a record, it says the app is not deployed.
-Keys that break the key rule are listed too. The
-record's `options` and `baked_options` are shown as `<name>=<value>` separated by
-spaces, each value quoted for the shell when needed so it can be typed on a command line
-as is; a malformed field is shown as unreadable.
+Prints the deploy record, the declared options (below), and the list of keys directly
+under the app's hierarchy (key, last modified time), in this order. Values are not shown.
+Keys that break the key rule are listed too.
 
-If there is an app that `deploy` can use by this app ID, it lists the options its
-`manifest.toml` declares (name, default, description). Defaults are quoted like values;
-an option without a default is shown as required. If the `manifest.toml` cannot be read, it
-warns.
+The record is read from the instance found by the same rule as `start`
+([topics/instance.md](../topics/instance.md#finding)), as in
+[Reading the apps on the instance](#reading-the-apps-on-the-instance): the app name and
+version from its `manifest.toml`, and the record's `user`, `deployed`, `options`, and
+whether it is baked (as in [Deploy record](#deploy-record)). Without the directory, it
+says the app is not deployed on that instance. When it does not read, it says that the
+record was not read and why, and goes on. The baked version and its options are not shown: they are what the
+AMI has, read from an instance launched from it. `options` is shown as `<name>=<value>`
+separated by spaces, each value quoted for the shell when needed so it can be typed on a
+command line as is; a malformed field is shown as unreadable.
 
-The record and the keys can be written from the instance, so unprintable characters such
-as newline and ESC are replaced by `?`. Option values, and the `manifest.toml` version,
-defaults, and descriptions in the declared options, have only the characters that disturb
-the terminal replaced ([App options](#app-options)).
+It lists the options that the app's `manifest.toml` declares (name, default,
+description): the instance's when it was read, otherwise the local one that `deploy`
+would use by this app ID. Defaults are quoted like values; an option without a default
+is shown as required. If the `manifest.toml` cannot be read, it warns.
 
-If there is no record, no value, and no app that `deploy` can use by this app ID, it
-takes the app ID as a typo and exits with an error.
+The record, the instance's `manifest.toml`, and the keys can be written from the
+instance, so unprintable characters such as newline and ESC are replaced by `?`. Option
+values, and the version, defaults, and descriptions in `manifest.toml`, have only the
+characters that disturb the terminal replaced ([App options](#app-options)).
+
+If the app is not on the instance (or the instance could not be read), has no value, and
+there is no app that `deploy` can use by this app ID, it takes the app ID as a typo and
+exits with an error.
 
 ## `app get`
 
@@ -155,7 +155,7 @@ takes the app ID as a typo and exits with an error.
 Writes one value to stdout as is, in UTF-8: no newline is added, and newlines and
 non-ASCII characters are written unchanged. Exits with an error if the value does not
 exist. A `SecureString` value read without decryption is ciphertext, so it is not
-written; the command exits with an error. It can also read the `deploy` record.
+written; the command exits with an error.
 
 ## `app set`
 
@@ -170,16 +170,17 @@ is taken unprocessed, including a value starting with `-`. Usage errors:
 - A value that is not valid UTF-8, because `app get` could not write it.
 
 If the existing value is not a `String`, an overwrite cannot change its type, so it tells
-the user to run `app unset` first and exits. For an app without a `deploy` record it
-writes nothing and exits with an error. It reports whether it created or overwrote the
-value.
+the user to run `app unset` first and exits. Whether the app is deployed is not checked
+(the requester): it is known only on the running instance, and a value written for a
+mistyped app ID shows in the keys of `app show` and is deleted with `app unset`. It
+reports whether it created or overwrote the value.
 
 ## `app unset`
 
 `app unset --svc <svc> <app ID> <key>`
 
-Deletes one value without confirmation. Works even without a `deploy` record. If the
-value does not exist, it says so and does not treat it as an error.
+Deletes one value without confirmation. If the value does not exist, it says so and does
+not treat it as an error.
 
 ## `deploy`
 
@@ -200,19 +201,18 @@ uses, such as S3 buckets, either. An app is one directory:
     install        bash script that installs. Required
     uninstall      bash script that removes. Optional; without it, app remove
                    cannot remove the app
-    ...            files install uses. temt-options.env is added by temt, so the
-                   app cannot have it
+    ...            files install uses. temt-options.env and temt-deploy.json are
+                   added by temt, so the app cannot have them
 ```
 
 ### Users
 
 The instance user that runs `install` is the `--user` value, else `user` in
 `manifest.toml`, else root. `uninstall` runs as the recorded `user` (see
-[`app remove`](#app-remove) step 1). While a record is left, including one with `removed`,
-`deploy` refuses another user, naming the recorded one. Otherwise, if an unbaked version deployed as another user were lost, the instance
-would come back from the AMI with the baked version, and `app remove` would run its
-`uninstall` as the wrong user. To change the user, remove the app first, and bake if it
-is in the AMI. A user name starts with a lowercase letter or `_`,
+[`app remove`](#app-remove) step 1). While the instance has the app with a record,
+`deploy` refuses another user, naming the recorded one: the new user's `uninstall` would
+not undo what the old user's `install` did. To change the user, remove the app first. A
+user name starts with a lowercase letter or `_`,
 continues with lowercase letters, digits, `_`, and `-`, and has at most 32 characters; a
 name that breaks the rule is a usage error or an error in `manifest.toml`. A non-root user
 runs the script through `sudo` as that user with its home, so `HOME` is that user's home
@@ -248,7 +248,8 @@ a close name if there is one, and exits. The app ID rule is that of
    [`bake`](ami.md#bake) does.
 
    Locate the app directory and report where it came from; for a link, add its target.
-   Read `manifest.toml`, and check that `install` exists and `temt-options.env` does not.
+   Read `manifest.toml`, and check that `install` exists and that neither
+   `temt-options.env` nor `temt-deploy.json` does.
    Check the app options given on the command line against the declarations
    ([App options](#app-options)). Up to here, nothing touches AWS or the instance.
 2. Take the lock, check that the launch template exists, and find the instance by the
@@ -268,16 +269,19 @@ a close name if there is one, and exits. The app ID rule is that of
    ([topics/ssh.md](../topics/ssh.md#regions)). The `ProxyCommand`'s waiting notices
    and ssh's errors go to stderr as they are.
 
-   Read the previous record. If it has a `user` other than the one that would run
+   Read the previous record of the app from the instance
+   ([Reading the apps on the instance](#reading-the-apps-on-the-instance)). If the
+   reading itself fails, exit without changing anything, even with `--reset`. If it has a `user` other than the one that would run
    `install`, exit without changing anything ([Users](#users)).
 
    If the user that runs `install` is not root, check that the user exists on the
    instance; if not, exit without changing anything.
 
-   Decide the option values to use, and report each on one
-   line with its source. Check that the record fits in an SSM parameter, and prepare the
-   directory for sending. If the record cannot be read from SSM (no permission, etc.),
-   exit without changing anything, even with `--reset`.
+   Decide the option values to use, and report each on one line with its source, and
+   prepare the directory for sending with `temt-options.env` and the record:
+   `user` is the user that runs `install`, `deployed` is now by the client's clock in
+   UTC, `instance` is the ID of the instance, and `options` is the values decided here
+   whose source is `given` or `kept`.
 
    With `--bake`, run the checks of `bake` step 3 ([ami.md](ami.md#bake)); then list
    the install and what `bake` will do, and ask for confirmation, with the region and
@@ -287,25 +291,21 @@ a close name if there is one, and exits. The app ID rule is that of
    earlier interrupted run are cleaned up. Then run `bash /opt/temt/apps/<app ID>/install`
    over ssh as the user, with the app directory as the current directory. ssh's output goes to stdout
    and stderr as it is.
-4. Write the record `/<name>/<app ID>/deploy`: `user` is the user that ran `install`,
-   `deployed` is when `install` finished by the client's clock, in UTC, `instance` is the ID of
-   the instance, and `options` is the values decided in step 2 whose source is `given` or
-   `kept`. Carry over `baked_version`, `baked_image`, and `baked_options` from the
-   previous record.
-5. With `--bake`, bake as `bake` does after its confirmation ([ami.md](ami.md#bake)),
+4. With `--bake`, bake as `bake` does after its confirmation ([ami.md](ami.md#bake)),
    holding the same lock; only that region's launch template gets the new AMI.
    Without it, report that the app will not be in the next instance until baked.
 
-The whole directory is sent, including hidden files. If the app directory itself is a
-symlink, it is followed, but links inside are sent as links, so those pointing outside the
-app break on the instance. Stopping ssh with Ctrl-C may leave `install` running on the
-instance.
+The whole directory is sent, including hidden files. Every symlink, the app directory
+itself and those inside, is followed and sent as a copy of its target, so the instance
+gets regular files and directories. A broken symlink or a symlink loop stops `deploy`
+with the error from reading it, before anything is changed. Stopping ssh with Ctrl-C may leave
+`install` running on the instance.
 
 Nothing is rolled back on failure. A failure up to step 2 changes nothing. If sending
-fails in step 3, the old directory remains. If `install` fails, the new directory
-remains. Either way, running `deploy` again converges. The record is written only when
-`install` succeeds; on failure nothing is baked even with `--bake`. The record's
-`options` also stays as before, so a retry must give the same options again.
+fails in step 3, the old directory remains with its record. If `install` fails, the new
+directory remains with its record, so a retry carries over the options given to the
+failed run. Either way, running `deploy` again converges. On failure nothing is baked
+even with `--bake`.
 
 ## App options
 
@@ -320,7 +320,7 @@ key is an error in `manifest.toml`.
 | `pattern` | no | A Python regular expression the whole value must match. A `default` that does not match is an error in `manifest.toml` |
 
 A value is a string and may contain anything except control characters (Unicode Cc:
-newline, tab, ESC, etc.). There is no length limit; the record size is checked instead.
+newline, tab, ESC, etc.). There is no length limit.
 `<name>=` on the command line means "back to the default", so an empty value cannot be
 given from the command line.
 
@@ -335,10 +335,10 @@ description added.
 The value used is decided per declared option in this order:
 
 1. `<name>=<value>` on the command line (source `given`).
-2. The value in the previous record's `options` (`kept`). With `--reset`, nothing is
-   carried over from the previous record, nor when its `removed` is the instance being
-   deployed to (the app was removed from it). `<name>=` (empty value) stops that name
-   from being carried over.
+2. The value in the previous record's `options` (`kept`): the record on the instance,
+   which is the one baked into the AMI unless the app was deployed again on this
+   instance. With `--reset`, nothing is carried over. `<name>=` (empty value) stops that
+   name from being carried over.
 3. The declaration's `default` (`default`). An option without a default that still has
    no value here makes `deploy` exit. `<name>=` for an option without a default makes
    step 1 exit.
@@ -349,18 +349,10 @@ Depending on the previous record:
 
 | Previous record | Behavior |
 | --- | --- |
-| None (first `deploy`, or after `destroy` or an `app remove` that deleted the record), or `removed` is this instance | Nothing is carried over. A kept record whose `removed` names another instance (the removal was lost) carries its `options` over; `app remove` set them to the baked options |
-| Readable from SSM, but the record is unreadable or its `options` is malformed | Exit without changing anything, telling the user to give the options again with `--reset`. If the app declares no options, nothing would be carried over, so it does not stop; a malformed `options` is discarded with a warning |
+| None (first `deploy`, after `app remove`, or deployed by an older temt) | Nothing is carried over |
+| Unreadable, or its `options` is malformed | Exit without changing anything, telling the user to give the options again with `--reset`. If the app declares no options, nothing would be carried over, so it does not stop; a malformed `options` is discarded with a warning |
 | Has a name the app does not declare | Warn, drop it, and continue. It disappears from the record too |
 | A carried-over value does not match `pattern` | Exit without changing anything, telling the user to give `<name>=<value>`, or `<name>=` if there is a default |
-
-If only the previous record's `baked_options` is unreadable, it does not stop; the value
-is carried over as written.
-
-The record must fit in a (standard tier) SSM parameter. In step 2 it estimates, in UTF-8
-bytes, the size of the record this `deploy` writes and of the record after a following
-bake (with `options` also copied to `baked_options`); if either exceeds 4096 bytes, it
-exits without changing anything.
 
 The values used, for all declared options, are passed to `install` in the file
 `temt-options.env`, added directly under the app directory. It is sent owned by root
@@ -382,8 +374,8 @@ zero-width joiners, and the like are shown as is. Values contain no control char
 so the only values whose display cannot be typed back as is are those with line or
 paragraph separators or bidirectional controls.
 
-Record values are not encrypted, and `temt-options.env` stays in the AMI readable by
-anyone on the instance, so options must not carry secrets.
+The record and `temt-options.env` stay in the AMI readable by anyone on the instance, so
+options must not carry secrets.
 
 ## `app remove`
 
@@ -397,53 +389,38 @@ removed from the config file and `apply`ed by the user after removing the app.
    with a usage error before doing anything else, as in `deploy` step 1.
 
    Confirm, as in `deploy` step 2, that ssh reaches the instance found. Check that
-   `/opt/temt/apps/<app ID>/` and its `uninstall` exist on the instance. If `uninstall`
-   does not exist, exit without changing anything. If neither the directory nor the
-   record exists, take the app ID as a typo and exit.
+   `/opt/temt/apps/<app ID>/` and its `uninstall` exist on the instance. If the
+   directory does not exist, say the app is not deployed on that instance and exit. If
+   `uninstall` does not exist, exit without changing anything.
 
-   If the directory exists, the user that runs `uninstall` is the `--user` value, else
-   the record's `user`. If the record is missing or unreadable or has no `user`, warn
-   that it runs as root and use root. If the record's `user` breaks the user name rule,
-   exit telling the user to give it with `--user`, without showing the value. If the user
-   is not root, check that the user exists on the instance as in `deploy` step 2. If the
-   directory does not exist, warn; no user is decided.
+   The user that runs `uninstall` is the `--user` value, else the record's `user`. If
+   there is no record (deployed by an older temt) or it is unreadable or has no `user`,
+   warn and use the `user` of the instance's `manifest.toml`, else root. If the record's
+   `user` breaks the user name rule, exit telling the user to give it with `--user`,
+   without showing the value. If the user is not root, check that the user exists on the
+   instance as in `deploy` step 2.
 
-   In both cases, with `--bake`, run the checks of `bake` step 3 and ask for
-   confirmation as in `deploy` step 2 (with the region and account), listing the user
-   when there is one. Then go to step 2, or to
-   step 3 when the directory does not exist.
+   With `--bake`, run the checks of `bake` step 3 and ask for confirmation as in
+   `deploy` step 2 (with the region and account), listing the user.
 2. Run `bash /opt/temt/apps/<app ID>/uninstall` as that user with the app directory as
-   the current directory, and on success delete the directory as root. On failure, leave the record
-   and exit. Stopping with Ctrl-C may leave `uninstall` running on the instance.
-3. Delete the status `/<name>/<app ID>/status`, then handle the record
-   `/<name>/<app ID>/deploy`. If the record is readable and its `baked_image` is the
-   template's default-version AMI, rewrite it ([Deploy record](#deploy-record)): set
-   `removed` to the instance, remove `instance` and `deployed` (when the baked version
-   was installed is not recorded), and set `version` and `options` to `baked_version`
-   and `baked_options` (what comes back if the removal is lost; an unreadable
-   `baked_options` is copied as written). Otherwise delete it. If the rewritten record
-   would not fit in an SSM parameter, warn and delete it, since a retry could never
-   write it. When the directory is absent, the warning of step 1 says that only the
-   record is updated. The status is
-   deleted because otherwise `status` keeps showing the old state of the removed app.
-   The record goes last so that, if anything fails partway, the remaining record lets a
-   retry continue from where it stopped. Other values of the app and the role's policies
-   are not deleted.
-4. With `--bake`, bake as in `deploy` step 5. Without it, report that the app was
+   the current directory, and on success delete the directory, with its record, as root.
+   On failure, exit. Stopping with Ctrl-C may leave `uninstall` running on the instance.
+3. Delete the status `/<name>/<app ID>/status`, because otherwise `status` keeps
+   showing the old state of the removed app. Other values of the app and the role's
+   policies are not deleted.
+4. With `--bake`, bake as in `deploy` step 4. Without it, report that the app was
    removed from that instance and that baking removes it from the next instance too.
-   This is reported even when the record was deleted because the
-   app is not in the template's AMI, where baking changes nothing for it.
+
+Nothing records the removal outside the instance: an app removed without baking comes
+back with the AMI's version in the next instance (the requester).
 
 ## Clones in other regions
 
 SSM parameters are per region, so a clone in another region
-([config.md](../config.md#clones)) has none of the deploy records or app values of the
-region it was copied from. temt does nothing about it (the requester). In the clone's
-region, `deploy` and `app remove` work as they are (`app remove` removes an app whose
-directory exists even without a record); `app list` and `app show` do not show the apps
-baked into the copied AMI until they are deployed there again; app values are set again
-with `app set`. The usage doc gives these as steps of making a clone. Records are
-matched to the AMI by its ID, which differs in each region, not by its name.
+([config.md](../config.md#clones)) has none of the app values of the region it was copied
+from. temt does nothing about it (the requester); they are set again with `app set`. The
+deploy records are in the copied AMI, so `status --apps` and `app show` show the apps
+baked into it, as baked.
 
 ## Bundled apps
 

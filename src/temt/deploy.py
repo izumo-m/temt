@@ -1,18 +1,16 @@
 """app deploy（短縮形 deploy）と app remove の本体。
 
 deploy は、アプリのディレクトリを動いているインスタンスの /opt/temt/apps/<アプリID>/
-に送って install を実行し、deploy の記録を書く。アプリがオプションを宣言していれば、
-使う値を決めて記録に残し、temt-options.env をディレクトリに足して install に渡す
-（options）。remove は uninstall を実行してディレクトリを消し、記録を消す。どちらも
-ロールのポリシーには触らない。アプリが使う権限は、設定ファイルの
-[[role.<ポリシー名>]] に書き、apply で付ける。どちらも --bake を付ければ、
-終わったあとに、同じロックを持ったまま bake と同じ手順で AMI にする。
+に送って install を実行する。ディレクトリには deploy の記録 temt-deploy.json を足して
+一緒に送る（remote）。アプリがオプションを宣言していれば、使う値を決めて記録に残し、
+temt-options.env をディレクトリに足して install に渡す（options）。remove は uninstall を
+実行してディレクトリを記録ごと消す。どちらもロールのポリシーには触らない。アプリが使う
+権限は、設定ファイルの [[role.<ポリシー名>]] に書き、apply で付ける。どちらも --bake を
+付ければ、終わったあとに、同じロックを持ったまま bake と同じ手順で AMI にする。
 
-アプリは OpenSSH の ssh で、apply が用意した Host <名前> を通して運ぶ。ssh の
-ProxyCommand の proxy には、このコマンドが決めたリージョンとプロファイルを環境変数で
-渡す（proxy.passed_env）。ディレクトリを tar.gz にして標準入力に流し、インスタンスの上
-では sudo で動く。途中で失敗しても巻き
-戻さない。install は何度実行してもよいので、もう一度 deploy すれば揃う。
+アプリは OpenSSH の ssh で、apply が用意した Host <名前> を通して運ぶ（remote）。
+ディレクトリを tar.gz にして標準入力に流し、インスタンスの上では sudo で動く。途中で
+失敗しても巻き戻さない。install は何度実行してもよいので、もう一度 deploy すれば揃う。
 
 boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
 例外もそこで包む。
@@ -23,7 +21,6 @@ from __future__ import annotations
 import difflib
 import io
 import os
-import re
 import shlex
 import tarfile
 import time
@@ -43,53 +40,37 @@ from temt import (
     options,
     proc,
     proxy,
+    remote,
     resources,
     table,
 )
 from temt.manifest import find_app, known_apps, read_manifest
 from temt.msg import TemtError
-from temt.names import (
-    DEPLOY_KEY,
-    PREFIX,
-    ROOT_USER,
-    STATUS_KEY,
-    app_dir,
-    is_user_name,
-    user_apps_dir,
-)
+from temt.names import ROOT_USER, STATUS_KEY, app_dir, is_user_name, user_apps_dir
+from temt.remote import REMOTE_ROOT, SSH, SSH_FAILED
 from temt.table import tilde
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import boto3
-    from types_boto3_ec2.client import EC2Client
-    from types_boto3_ssm.client import SSMClient
 
-    from temt.app import Record
     from temt.instances import Instance
     from temt.manifest import Manifest
     from temt.names import Service
     from temt.options import Choice
+    from temt.remote import Installed, Record
 
-SSH = "ssh"
-# インスタンスの上で、cloud-init が自分のインスタンス ID を書くファイル
-INSTANCE_ID_FILE = "/var/lib/cloud/data/instance-id"
-INSTANCE_ID_RE = re.compile(r"\bi-[0-9a-f]+\b")
-# インスタンスの上でアプリを置くディレクトリ
-REMOTE_ROOT = "/opt/temt/apps"
 INSTALL = "install"
 UNINSTALL = "uninstall"
 # 送るファイルのモードから落とすビット。グループと他人の書き込み、setuid、setgid、sticky
 ALLOWED_OFF = 0o7022
 # deploy の記録の時刻の形。UTC で書く
 RECORD_TIME = "%Y-%m-%dT%H:%M:%SZ"
-# 入れ直しても引き継ぐ、deploy の記録の項目。baked_options も引き継ぐ
-BAKED_FIELDS = ("baked_version", "baked_image")
-# 焼いたあとの記録の大きさを見積もるときの AMI の ID。いまの AMI の ID と同じ長さ
-IMAGE_ID_SAMPLE = "ami-0123456789abcdef0"
-# temt がディレクトリに足すファイル（temt-options.env）のモード
+# temt がディレクトリに足すファイル（temt-options.env と temt-deploy.json）のモード
 ADDED_MODE = 0o644
+# 止めるときの誤りに添える文
+UNCHANGED = "; nothing was changed"
 
 # 送った tar.gz を一時ディレクトリに展開してから、古いものと入れ替える。$1 は入れる先の
 # 親ディレクトリ、$2 はアプリ ID。途中で失敗すれば一時ディレクトリを消し、古いものは
@@ -122,8 +103,6 @@ trap - EXIT
 CHECK_SCRIPT = f"""if [ ! -d "$1" ]; then exit {{absent}}; fi
 if [ ! -f "$1/{UNINSTALL}" ]; then exit {{no_uninstall}}; fi
 """
-# ssh が自分の失敗に使う終了コード
-SSH_FAILED = 255
 # CHECK_SCRIPT の終了コード。ssh が自分の失敗に使う 255 とも、0 とも重ならない
 ABSENT_CODE = 3
 NO_UNINSTALL_CODE = 4
@@ -212,13 +191,14 @@ def _owned(info: tarfile.TarInfo) -> tarfile.TarInfo:
 def archive(path: Path, added: Mapping[str, bytes] | None = None) -> bytes:
     """ディレクトリの中身を、隠しファイルも含めて tar.gz にする。
 
-    path 自身がシンボリックリンクなら辿る。中のシンボリックリンクはリンクのまま入れる
-    ので、アプリの外を指すものはインスタンスで切れる。added は、temt がディレクトリの
-    すぐ下に足すファイルの名前と中身で、root の持ち物のモード 644 で入れる。
+    シンボリックリンクは、path 自身も中のものもすべて辿り、その先の中身を入れる。
+    インスタンスでは普通のファイルとディレクトリになる。切れたリンクやループは、tar が
+    出す OSError で止まる。added は、temt がディレクトリのすぐ下に足すファイルの名前と
+    中身で、root の持ち物のモード 644 で入れる。
     """
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        tar.add(path.resolve(), arcname=".", filter=_owned)
+    with tarfile.open(fileobj=buffer, mode="w:gz", dereference=True) as tar:
+        tar.add(path, arcname=".", filter=_owned)
         for name, data in (added or {}).items():
             info = _owned(tarfile.TarInfo(f"./{name}"))
             info.size = len(data)
@@ -226,47 +206,6 @@ def archive(path: Path, added: Mapping[str, bytes] | None = None) -> bytes:
             info.mtime = int(time.time())
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
-
-
-def _remote(script: str, *args: str) -> str:
-    """インスタンスの上で、script を root の bash で実行するコマンドライン。"""
-    return " ".join(
-        ["sudo", "-n", "bash", "-c", shlex.quote(script), PREFIX, *map(shlex.quote, args)]
-    )
-
-
-def _ssh(
-    service: Service, command: str, data: bytes | None = None, *, env: Mapping[str, str]
-) -> int:
-    """Host <名前> に ssh でつなぎ、command を実行して終了コードを返す。
-
-    env は ssh の環境で、proxy に決めたリージョンとプロファイルを渡す（proxy.passed_env）。
-    """
-    return proc.stream([SSH, "-T", service.name, command], data, env=env)
-
-
-def _reach(service: Service, one: Instance, env: Mapping[str, str]) -> None:
-    """ssh でつながり、sudo が使え、つながった先が one であることを確かめる。
-
-    何かを変える前に呼ぶ。初めてつなぐインスタンスのホスト鍵を確かめられないときなどに、
-    何も変えずに止まれる。proxy には決めたリージョンとプロファイルを渡すが、利用者の
-    ControlMaster が別のリージョンやアカウントへの前の接続を使い回すと、ssh は別の
-    インスタンスにつながりうる。そのときも止める。ProxyCommand の待ちの知らせと ssh の
-    誤りは、そのまま見せる。env は ssh の環境。
-    """
-    msg.info(f"checking that 'ssh {service.name}' reaches {one.id}")
-    code, out = proc.read([SSH, "-T", service.name, f"sudo -n cat {INSTANCE_ID_FILE}"], env=env)
-    if code != 0:
-        raise TemtError(
-            f"cannot reach {one.id} with 'ssh {service.name}' (exit {code}); nothing was changed"
-        )
-    # ログインシェルが何かを書いても、ID だけを取り出す
-    found = INSTANCE_ID_RE.findall(out)
-    if found[-1:] != [one.id]:
-        raise TemtError(
-            f"'ssh {service.name}' reached {found[-1] if found else 'an unknown instance'}, "
-            f"not {one.id}; nothing was changed"
-        )
 
 
 def _has_user(
@@ -321,33 +260,38 @@ def _confirm(
     aws.confirm(session, f"{what} and bake {one.id} ({one.state})", yes=yes)
 
 
-def _previous(ssm: SSMClient, name: str) -> Record | None:
-    """手順 2。前の deploy の記録を読む。無ければ None。読めなければ何も変えずに止める。"""
+def _previous(
+    service: Service, one: Instance, app_id: str, env: Mapping[str, str]
+) -> Installed | None:
+    """手順 2。インスタンスに入っている前のアプリと記録を読む。無ければ None。
+
+    読めなければ何も変えずに止める。--reset でも止める。記録が無いのか読めないのかが
+    分からないまま入れ替えると、前のユーザーを確かめられないからである。
+    """
     try:
-        found = app.read(ssm, name)
-    except (ClientError, BotoCoreError) as e:
-        raise TemtError(
-            f"{table.aws_error(e)}; cannot read the deploy record {name}; nothing was changed"
-        ) from None
-    if found is None:
-        return None
-    return app.parse_record(name, str(found.get("Value") or ""))
+        return remote.read_apps(service, one, env, app_id).get(app_id)
+    except TemtError as e:
+        raise TemtError(f"{e}{UNCHANGED}") from None
 
 
-def _same_user(app_id: str, name: str, before: Record | None, user: str) -> None:
+def _where(one: Instance, app_id: str) -> str:
+    """インスタンスの上の deploy の記録の場所。誤りと警告に添える。"""
+    return f"{one.id}:{REMOTE_ROOT}/{app_id}/{remote.RECORD_FILE}"
+
+
+def _same_user(app_id: str, where: str, before: Record | None, user: str) -> None:
     """記録の user と違うユーザーで入れ直さない。
 
-    app remove は記録の user で uninstall を実行する。版の間でユーザーを変えると、焼いて
-    いない版を失って AMI の古い版に戻ったとき、記録の user が AMI の版のものでなくなる。
-    記録が残っている間（AMI に焼いてあって外した removed も含む）は、ユーザーを変えさせない。
+    app remove は記録の user で uninstall を実行する。版の間でユーザーを変えると、
+    新しいユーザーの uninstall は、前のユーザーの install がしたことを片づけない。
+    インスタンスに記録が残っている間は、ユーザーを変えさせない。
     """
     recorded = before.fields.get("user") if before is not None else None
     if recorded is None or recorded == user:
         return
     raise TemtError(
-        f"{app_id} was deployed as {table.printable(recorded)} ({name}), not {user}; deploy it "
-        f"as {table.printable(recorded)}, or remove it first to change the user (and bake, if "
-        "it is in the AMI); nothing was changed"
+        f"{app_id} was deployed as {table.printable(recorded)} ({where}), not {user}; deploy it "
+        f"as {table.printable(recorded)}, or remove it first to change the user{UNCHANGED}"
     )
 
 
@@ -358,7 +302,7 @@ def _choose(
     before: Record | None,
     *,
     reset: bool,
-    record: str,
+    where: str,
 ) -> tuple[dict[str, str], list[Choice]]:
     """手順 2。使うオプションの値を決め、1 つ 1 行で出どころとともに知らせる。
 
@@ -371,85 +315,17 @@ def _choose(
         kept = before.options
         if kept is None and not manifest.options:
             kept = {}
-            if app.OPTIONS in before.unread:
+            if before.unread_options:
                 msg.warn(
-                    f"dropping the options of the deploy record {record} that cannot be read; "
+                    f"dropping the options of the deploy record {where} that cannot be read; "
                     f"{app_id} {options.visible(manifest.version)} declares no options"
                 )
     explicit, chosen = options.choose(
-        app_id, manifest.version, manifest.options, given, kept, record=record
+        app_id, manifest.version, manifest.options, given, kept, record=where
     )
     for one in chosen:
         msg.info(f"option {options.show(one.name, one.value)} ({one.source})")
     return explicit, chosen
-
-
-def _new_record(
-    manifest: Manifest, user: str, one: Instance, explicit: dict[str, str], before: Record | None
-) -> Record:
-    """書く記録を作る。deployed はいまの時刻で、手順 4 で install を終えた時刻に書き直す。
-
-    install を実行したユーザーも書き、app remove が uninstall を同じユーザーで実行する。
-    入れたインスタンスを instance に書き、まだ焼いていないことを表す。前の記録の
-    焼いた版（baked_version、baked_image、baked_options）は引き継ぐ。AMI にはその版が
-    残っているからである。読めない baked_options は、書かれていたままの値を引き継ぐ。
-    """
-    record = app.Record(
-        fields={
-            "name": manifest.name,
-            "version": manifest.version,
-            "user": user,
-            "deployed": time.strftime(RECORD_TIME, gmtime()),
-            "instance": one.id,
-        },
-        options=explicit,
-    )
-    if before is not None:
-        baked = {key: before.fields[key] for key in BAKED_FIELDS if key in before.fields}
-        record.fields.update(baked)
-        if before.baked_options is None:
-            record.baked_options = None
-            if app.BAKED_OPTIONS in before.unread:
-                record.unread[app.BAKED_OPTIONS] = before.unread[app.BAKED_OPTIONS]
-        else:
-            record.baked_options = dict(before.baked_options)
-    return record
-
-
-def _check_size(app_id: str, record: Record) -> None:
-    """手順 2。記録が、いまも焼いたあとも、SSM パラメータに収まることを確かめる。
-
-    焼くと、オプションが baked_options にもコピーされて大きくなる。収まらなければ、何も変えずに
-    止める。
-    """
-    baked = app.Record(
-        fields=dict(record.fields),
-        options=record.options,
-        baked_options=record.baked_options,
-        unread=dict(record.unread),
-    )
-    app.mark_fresh(baked, IMAGE_ID_SAMPLE)
-    for value, when in ((record, ""), (baked, " after bake")):
-        size = app.record_size(value)
-        if size > app.RECORD_MAX:
-            raise TemtError(
-                f"the deploy record of {app_id} would be {size} bytes{when}, over the "
-                f"{app.RECORD_MAX} bytes that SSM allows; shorten the options; nothing was changed"
-            )
-
-
-def _record(ssm: SSMClient, service: Service, app_id: str, record: Record, one: Instance) -> None:
-    """手順 4。deploy の記録を書く。install を終えたときの時刻を UTC で書く。"""
-    name = service.app_parameter(app_id, DEPLOY_KEY)
-    record.fields["deployed"] = time.strftime(RECORD_TIME, gmtime())
-    try:
-        state = app.put(ssm, name, app.record_value(record))
-    except (ClientError, BotoCoreError) as e:
-        raise TemtError(
-            f"{table.aws_error(e)}; {app_id} is installed on {one.id} but not recorded; "
-            f"deploy again"
-        ) from None
-    msg.info(f"parameter {name}: {state}")
 
 
 def run(
@@ -483,36 +359,34 @@ def run(
     manifest = read_manifest(path)
     if not (path / INSTALL).is_file():
         raise TemtError(f"no {INSTALL} in {table.printable(tilde(path))}")
-    if os.path.lexists(path / options.FILE):
-        raise TemtError(
-            f"{table.printable(tilde(path / options.FILE))}: temt writes this file; rename it"
-        )
+    for name in (options.FILE, remote.RECORD_FILE):
+        if os.path.lexists(path / name):
+            raise TemtError(
+                f"{table.printable(tilde(path / name))}: temt writes this file; rename it"
+            )
     options.check_given(app_id, manifest.options, given)
     user = user or manifest.user or ROOT_USER
     session = aws.session(values)
     ec2 = session.client("ec2")
-    ssm = session.client("ssm")
     env = proxy.passed_env(values)
-    record_name = service.app_parameter(app_id, DEPLOY_KEY)
     with lock.hold(service):
         # 手順 2
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "deploy")
-        _reach(service, one, env)
-        before = _previous(ssm, record_name)
-        _same_user(app_id, record_name, before, user)
+        remote.reach(service, one, env, note=UNCHANGED)
+        installed = _previous(service, one, app_id, env)
+        before = installed.record if installed is not None else None
+        record_at = _where(one, app_id)
+        _same_user(app_id, record_at, before, user)
         _has_user(service, one, user, "make the user, or fix user in manifest.toml or --user", env)
-        # このインスタンスから外したアプリは、外す前のオプションを引き継がない。焼いた版は
-        # AMI に残っているので、_new_record は引き継ぐ
-        removed = before is not None and before.fields.get("removed") == one.id
-        explicit, chosen = _choose(
-            app_id, manifest, given, None if removed else before, reset=reset, record=record_name
-        )
-        record = _new_record(manifest, user, one, explicit, before)
-        _check_size(app_id, record)
-        added = None
+        explicit, chosen = _choose(app_id, manifest, given, before, reset=reset, where=record_at)
+        added = {
+            remote.RECORD_FILE: remote.record_data(
+                user, time.strftime(RECORD_TIME, gmtime()), one.id, explicit
+            )
+        }
         if manifest.options:
-            added = {options.FILE: options.env_file(app_id, manifest.version, chosen)}
+            added[options.FILE] = options.env_file(app_id, manifest.version, chosen)
         data = archive(path, added)
         if baking:
             bake.check(ec2, service, values, one, command="deploy")
@@ -520,20 +394,20 @@ def run(
             _confirm(session, service, one, what, yes=yes)
         # 手順 3
         msg.info(f"sending {app_id} to {one.id}")
-        code = _ssh(service, _remote(SEND_SCRIPT, REMOTE_ROOT, app_id), data, env=env)
+        code = remote.ssh(service, remote.remote(SEND_SCRIPT, REMOTE_ROOT, app_id), data, env=env)
         if code != 0:
             raise TemtError(f"cannot send {app_id} to {one.id} (exit {code}); deploy again")
         msg.info(f"running {INSTALL} of {app_id} as {user} on {one.id}")
-        code = _ssh(service, _remote(INSTALL_SCRIPT, f"{REMOTE_ROOT}/{app_id}", user), env=env)
+        command = remote.remote(INSTALL_SCRIPT, f"{REMOTE_ROOT}/{app_id}", user)
+        code = remote.ssh(service, command, env=env)
         if code != 0:
             raise TemtError(
                 f"{INSTALL} of {app_id} failed on {one.id} (exit {code}); the files are in "
                 f"place; fix it and deploy again"
             )
         # 手順 4
-        _record(ssm, service, app_id, record, one)
         if baking:
-            bake.make(ec2, ssm, service, one)
+            bake.make(ec2, service, one)
             return
     msg.info(
         f"deployed {app_id} {options.visible(manifest.version)} to {one.id}; "
@@ -541,62 +415,36 @@ def run(
     )
 
 
-def _recorded_user(name: str, found: Record | None) -> str:
-    """deploy の記録にある、install を実行したユーザー。記録か user が無ければ root。
+def _recorded_user(app_id: str, where: str, installed: Installed) -> str:
+    """uninstall を実行するユーザー。記録の user、無ければ manifest.toml の user、無ければ root。
 
-    記録か user が無ければ、root で実行することを警告する。deploy が記録を書けずに
-    終わったときなどで、install を別のユーザーで実行していたかもしれないからである。
-    記録は SSM パラメータで誰でも書き換えられるので、名前の規則を確かめ、外れた値は
-    端末に出さない。
+    記録か user が無ければ、どのユーザーで実行するかを警告する。前の temt が入れたアプリ
+    には記録が無く、install を別のユーザーで実行していたかもしれないからである。記録は
+    インスタンスの root が書き換えられるので、名前の規則を確かめ、外れた値は端末に出さない。
     """
-    hint = f"give the user with --user if {INSTALL} ran as another user"
-    if found is None:
-        msg.warn(f"no deploy record {name}; running {UNINSTALL} as {ROOT_USER}; {hint}")
-        return ROOT_USER
-    user = found.fields.get("user")
-    if user is None:
-        msg.warn(f"no user in the deploy record {name}; running {UNINSTALL} as {ROOT_USER}; {hint}")
-        return ROOT_USER
-    if not is_user_name(user):
-        raise TemtError(f"the deploy record {name} has a bad user; give the user with --user")
+    record = installed.record
+    found = record.fields.get("user") if record is not None else None
+    if found is not None:
+        if not is_user_name(found):
+            raise TemtError(f"the deploy record {where} has a bad user; give the user with --user")
+        return found
+    manifest_user = installed.manifest.user if installed.manifest is not None else None
+    user = manifest_user or ROOT_USER
+    why = "no deploy record" if record is None else "no user in the deploy record"
+    msg.warn(
+        f"{why} {where}; running {UNINSTALL} of {app_id} as {user}; "
+        f"give the user with --user if {INSTALL} ran as another user"
+    )
     return user
-
-
-def _left(
-    ec2: EC2Client, service: Service, name: str, found: Record | None, one: Instance
-) -> Record | None:
-    """外したあとに残す記録。アプリが起動テンプレートの AMI に焼いてなければ None。
-
-    焼いてあれば、外したインスタンス one を書く。そのまま残すと、status と app list が
-    焼いてあるとしか出さず、AMI に残っていることが分からないからである。記録が無いか
-    読めなければ、焼いてあるか分からないので None。書き換えた記録が SSM パラメータに
-    収まらなければ、警告して None とする。残そうとすると、やり直しても書けないからである。
-    """
-    if found is None:
-        return None
-    record = found
-    image_id = record.fields.get("baked_image")
-    if not image_id or image_id != resources.default_image(ec2, service):
-        return None
-    app.mark_removed(record, one.id)
-    size = app.record_size(record)
-    if size > app.RECORD_MAX:
-        msg.warn(
-            f"the deploy record {name} would be {size} bytes, over the {app.RECORD_MAX} bytes "
-            f"that SSM allows; deleting it, although the app stays in the AMI until baked"
-        )
-        return None
-    return record
 
 
 def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes: bool) -> None:
     """アプリを動いているインスタンスから外す。baking なら、続けて AMI にする。
 
     uninstall の無いアプリは外さない。中途半端に消すと、何が残ったか分からなくなる。
-    インスタンスにディレクトリが無ければ、記録だけを扱う。user は --user の値で、省けば
-    deploy の記録にある install を実行したユーザー、それも無ければ root で uninstall を
-    実行する。記録は、アプリが起動テンプレートの AMI に焼いてあれば外したことを書いて
-    残し（_left）、そうでなければ消す。
+    インスタンスにディレクトリが無ければ、入っていないとして止める。user は --user の値で、
+    省けば deploy の記録にある install を実行したユーザー、それも無ければ manifest.toml の
+    user、それも無ければ root で uninstall を実行する。ディレクトリは記録ごと消える。
     """
     values = conf.load(service)
     # ImageId を書いていれば、焼けないので何もせずに止まる
@@ -608,69 +456,51 @@ def remove(service: Service, app_id: str, *, user: str | None, baking: bool, yes
     directory = f"{REMOTE_ROOT}/{app_id}"
     ssm = session.client("ssm")
     env = proxy.passed_env(values)
-    record = service.app_parameter(app_id, DEPLOY_KEY)
-    # アプリが書いた状態。記録と一緒に消す
+    # アプリが書いた状態。アプリと一緒に消す
     state = service.app_parameter(app_id, STATUS_KEY)
     with lock.hold(service):
         resources.require_template(ec2, service)
         one = _running(service, instances.find(ec2, service), "app remove")
         # 確認の前に、読むだけで分かることを確かめる
-        _reach(service, one, env)
+        remote.reach(service, one, env, note=UNCHANGED)
         check = CHECK_SCRIPT.format(absent=ABSENT_CODE, no_uninstall=NO_UNINSTALL_CODE)
-        code = _ssh(service, _remote(check, directory), env=env)
+        code = remote.ssh(service, remote.remote(check, directory), env=env)
+        if code == ABSENT_CODE:
+            raise TemtError(f"{app_id} is not deployed on {one.id}: no {directory}")
         if code == NO_UNINSTALL_CODE:
             raise TemtError(f"{app_id} has no {UNINSTALL} on {one.id}; temt cannot remove it")
-        if code not in (0, ABSENT_CODE):
+        if code != 0:
             raise TemtError(f"cannot check {directory} on {one.id} (exit {code})")
-        present = code == 0
-        parameter = app.read(ssm, record)
-        # ディレクトリも記録も無ければ、アプリ ID の打ち間違いとみなす
-        if not present and parameter is None:
-            raise TemtError(
-                f"no app {app_id} for {service.name}: no {directory} on {one.id}, "
-                f"and no record {record}"
-            )
-        # 読めない記録の警告を 1 度だけ出すよう、ここで 1 度だけ読む
-        found = None
-        if parameter is not None:
-            found = app.parse_record(record, str(parameter.get("Value") or ""))
-        what = f"remove {app_id} from {one.id}"
-        # uninstall を実行するユーザー。ディレクトリが無ければ実行しないので決めない
-        runner = ROOT_USER
-        if present:
-            runner = user or _recorded_user(record, found)
-            _has_user(service, one, runner, "give another user with --user", env)
-            what += f" as {runner}"
-        else:
-            msg.warn(f"{directory} is not on {one.id}; updating only the record")
+        runner = user
+        if runner is None:
+            installed = _previous(service, one, app_id, env)
+            if installed is None:
+                # 確かめたあとで消えた
+                raise TemtError(f"{app_id} is not deployed on {one.id}: no {directory}")
+            runner = _recorded_user(app_id, _where(one, app_id), installed)
+        _has_user(service, one, runner, "give another user with --user", env)
+        what = f"remove {app_id} from {one.id} as {runner}"
         if baking:
             bake.check(ec2, service, values, one, command="app remove")
             _confirm(session, service, one, what, yes=yes)
-        if present:
-            msg.info(f"running {UNINSTALL} of {app_id} as {runner} on {one.id}")
-            code = _ssh(service, _remote(UNINSTALL_SCRIPT, directory, runner), env=env)
-            if code != 0:
-                raise TemtError(
-                    f"{UNINSTALL} of {app_id} or deleting {directory} failed on {one.id} "
-                    f"(exit {code}); the record is left; fix it and remove again"
-                )
-            msg.info(f"{directory} on {one.id}: {resources.DELETED}")
-        # 状態も消す。残すと、status が外したアプリの古い状態を出し続ける。記録を最後に
-        # 扱うのは、途中で失敗しても、記録が残っていればやり直しで続きから進めるため
+        msg.info(f"running {UNINSTALL} of {app_id} as {runner} on {one.id}")
+        code = remote.ssh(service, remote.remote(UNINSTALL_SCRIPT, directory, runner), env=env)
+        if code != 0:
+            raise TemtError(
+                f"{UNINSTALL} of {app_id} or deleting {directory} failed on {one.id} "
+                f"(exit {code}); fix it and remove again"
+            )
+        msg.info(f"{directory} on {one.id}: {resources.DELETED}")
+        # 状態も消す。残すと、status が外したアプリの古い状態を出し続ける
         try:
             msg.info(f"parameter {state}: {app.delete(ssm, state)}")
-            left = _left(ec2, service, record, found, one)
-            if left is None:
-                msg.info(f"parameter {record}: {app.delete(ssm, record)}")
-            else:
-                msg.info(f"parameter {record}: {app.put(ssm, record, app.record_value(left))}")
         except (ClientError, BotoCoreError) as e:
             raise TemtError(
-                f"{table.aws_error(e)}; {app_id} is off {one.id} but its parameters are left; "
-                "remove again"
+                f"{table.aws_error(e)}; {app_id} is off {one.id} but {state} is left; delete it "
+                f"with 'temt app unset --svc {service.svc} {app_id} status'"
             ) from None
         if baking:
-            bake.make(ec2, ssm, service, one)
+            bake.make(ec2, service, one)
             return
     msg.info(
         f"removed {app_id} from {one.id}; run 'temt bake --svc {service.svc}' to remove it "

@@ -33,10 +33,10 @@ The service is selected with `--svc <svc>`:
 - Without `--svc`, the command deals with the things of all services in the environment
   given by `--profile` and `--region`, else the defaults file and AWS's rules
   ([config.md](config.md#commands-without---svc)).
-  Exception: `app list` without `--svc` deals only with the apps that can be named by app
-  ID.
+  Exception: `app list` deals only with the local apps that can be named by app ID, with
+  or without `--svc`.
 - Commands that do not call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and
-  `app list` without `--svc`) take neither `--profile` nor `--region`.
+  `app list`) take neither `--profile` nor `--region`.
 
 ## Commands
 
@@ -51,7 +51,7 @@ The service is selected with `--svc <svc>`:
 | | `instance stop --svc <svc> [--async] [--yes]` | `stop` |
 | | `instance terminate --svc <svc> [<instance ID>...] [--async] [--yes]` | `terminate` |
 | | `instance reboot --svc <svc> [--async] [--yes]` | `reboot` |
-| | `instance show --svc <svc>` | `status` |
+| | `instance show --svc <svc> [--apps]` | `status` |
 | | `instance list [--svc <svc>] [--format <columns>]` | |
 | `ami` | `ami bake --svc <svc> [--yes]` | `bake` |
 | | `ami list [--svc <svc>] [--format <columns>]` | |
@@ -125,8 +125,7 @@ operations can be typed in this form.
   ([config.md](config.md#profile)). With
   `--svc`, a `--profile` that differs from `AwsProfile` written in the service's config
   file is a usage error, as for the region. It is a usage error for the commands that
-  do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`, and `app list`
-  without `--svc`.
+  do not call AWS: `service list`, `sg list`, `sg add`, `sg remove`, and `app list`.
 - `--region <region>` is accepted by the commands that call AWS, for this run only. No
   command writes it to the config file. With `--svc`, a `--region` that differs from
   `AwsRegion` written in the service's config file is a usage error
@@ -235,7 +234,7 @@ missing, it exits naming it.
 
 If the AWS SDK for Python (boto3) is not installed, every command exits saying so,
 except those that do not call AWS (`service list`, `sg list`, `sg add`, `sg remove`, and
-`app list` without `--svc`).
+`app list`).
 
 ### Deadlines
 

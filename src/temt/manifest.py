@@ -1,8 +1,8 @@
-"""manifest.toml の読み込み、アプリ ID で使うアプリの場所、--svc を省いた app list の本体。
+"""manifest.toml の読み込み、アプリ ID で使うアプリの場所、app list の本体。
 
 アプリ ID で指したアプリは、conf ディレクトリの apps/ から探し、無ければ temt と一緒に
-配るアプリを使う。--svc を省いた app list は、そうして使えるアプリだけを挙げ、AWS は
-呼ばない。boto3 を使わないので、cli.run は botocore を読み込む前にこれを呼ぶ。
+配るアプリを使う。app list は、--svc の有無にかかわらず、そうして使えるアプリだけを
+挙げ、AWS は呼ばない。boto3 を使わないので、cli.run は botocore を読み込む前にこれを呼ぶ。
 """
 
 from __future__ import annotations
@@ -44,20 +44,28 @@ class Manifest:
 
 
 def read_manifest(path: Path) -> Manifest:
-    """manifest.toml を読む。
-
-    options を除くどの項目も空でない文字列で、user はユーザー名の規則に従う。options は
-    [options.<名前>] のテーブルで、options.declarations が確かめる。
-    """
+    """手元のアプリ path の manifest.toml を読む。"""
     file = path / MANIFEST
     # 誤りの頭に付ける場所。パスは利用者の手元から来るので、表示できない文字を置き換える
     where = table.printable(tilde(file))
     try:
-        found = tomllib.loads(file.read_text(encoding="utf-8"))
+        data = file.read_bytes()
     except FileNotFoundError:
         raise TemtError(f"no {MANIFEST} in {table.printable(tilde(path))}") from None
     except OSError as e:
         raise TemtError(f"{where}: {e.strerror}") from None
+    return parse_manifest(data, where)
+
+
+def parse_manifest(data: bytes, where: str) -> Manifest:
+    """manifest.toml の中身 data を読む。where は誤りの頭に付ける場所で、表示できる形にしてある。
+
+    options を除くどの項目も空でない文字列で、user はユーザー名の規則に従う。options は
+    [options.<名前>] のテーブルで、options.declarations が確かめる。インスタンスの上の
+    manifest.toml も、これで読む。
+    """
+    try:
+        found = tomllib.loads(data.decode("utf-8"))
     except UnicodeDecodeError as e:
         raise TemtError(f"{where}: not valid UTF-8: {e.reason}") from None
     except tomllib.TOMLDecodeError as e:
@@ -89,7 +97,7 @@ def read_manifest(path: Path) -> Manifest:
     )
 
 
-# --svc を省いた app list の列。LOCAL は --svc を付けたときと同じく manifest.toml の版
+# app list の列。LOCAL は manifest.toml の版
 COLUMNS = table.Columns(defaults=("ID", "NAME", "LOCAL", "PATH"), extras=("DESCRIPTION",))
 
 

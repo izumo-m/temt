@@ -270,7 +270,7 @@ def run(service: Service, ports: Sequence[int], *, yes: bool) -> None:
         one = instances.look_up(ec2, instance_id)
         if one is None:
             raise TemtError(f"{instance_id} is not found; run set-port again")
-        bake.make(ec2, ssm, service, one)
+        bake.make(ec2, service, one)
         # 手順 7
         if home.write_edit(home.detect_port(service, ports[0])):
             msg.info(

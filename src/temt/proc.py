@@ -99,8 +99,8 @@ def stream(
         return child.wait()
 
 
-def read(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
-    """コマンドを実行し、終了コードと標準出力を返す。標準エラー出力はそのまま見せる。
+def capture(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, bytes]:
+    """コマンドを実行し、終了コードと標準出力のバイト列を返す。標準エラー出力はそのまま見せる。
 
     ssh の ProxyCommand が出す待ちの知らせや、ssh 自身の誤りを利用者に見せるため、
     標準エラー出力は受け取らない。標準入力は閉じる。env を渡せば、子の環境をそれにする。
@@ -109,4 +109,10 @@ def read(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int,
     done = subprocess.run(
         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env, check=False
     )
-    return done.returncode, done.stdout.decode(errors="replace")
+    return done.returncode, done.stdout
+
+
+def read(argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
+    """capture と同じく実行し、標準出力を文字列で返す。読めないバイトは置き換える。"""
+    code, out = capture(argv, env=env)
+    return code, out.decode(errors="replace")

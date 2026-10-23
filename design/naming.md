@@ -30,9 +30,9 @@ absent ([resources.md](resources.md#long-names)).
 | Instance role and instance profile | `<name>`, one pair shared by every region |
 | Default login key | `~/.ssh/temt/keys/temt` and `temt.pub`, shared by every service. The key ssh uses is `IdentityFile` in the `Host` block ([topics/login-key.md](topics/login-key.md)) |
 | SSM parameter hierarchy | `/<name>`. `destroy` deletes everything under it |
-| App values and deploy record | `/<name>/<app ID>/<key>`. Key `deploy` is the deploy record; `status` is the app status the app writes |
+| App values | `/<name>/<app ID>/<key>`. Key `status` is the app status the app writes |
 | Role policies | Inline policies `temt-<policy name>` of the instance role. `<policy name>` comes from `[[role.<policy name>]]`. `temt-ec2` holds the permissions of the instance itself |
-| Apps on the instance | `/opt/temt/apps/<app ID>/`, owned by root |
+| Apps on the instance | `/opt/temt/apps/<app ID>/`, owned by root. `temt-deploy.json` in it is the deploy record |
 | Config file | `~/.config/temt/<svc>.toml`; the defaults file is `~/.config/temt/defaults.toml` ([config.md](config.md#defaults-file)) |
 | ssh `Host` | `<name>` (a block in `~/.ssh/temt/config`) |
 | known_hosts | `~/.ssh/temt/known_hosts.d/<name>/`, one file per instance |

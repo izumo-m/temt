@@ -26,8 +26,6 @@ LABEL_RULE = (
     "must start with a lowercase letter, use only lowercase letters, digits, and '-', "
     f"end with a letter or digit, and be at most {LABEL_MAX} characters"
 )
-# temt がアプリの記録に使うキー。app set と app unset からは扱えない
-DEPLOY_KEY = "deploy"
 # アプリがインスタンスから自分の状態を書くキー。status が表示し、app remove が消す
 STATUS_KEY = "status"
 # アプリの install と uninstall を実行するインスタンスのユーザーの名前の規則。shadow の
@@ -323,7 +321,7 @@ class Service:
 
     @property
     def parameter_path(self) -> str:
-        """このサービスの SSM パラメータを置く階層。アプリの値と記録はこの下に置く。"""
+        """このサービスの SSM パラメータを置く階層。アプリの値はこの下に置く。"""
         return f"/{self.name}"
 
     def app_path(self, app: str) -> str:
