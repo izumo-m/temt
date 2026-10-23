@@ -68,7 +68,8 @@ class Box:
             text=True,
             check=False,
             env=self.env,
-            cwd="/",
+            # deploy と同じく、アプリのディレクトリで実行する
+            cwd=self.root / "app",
         )
 
 

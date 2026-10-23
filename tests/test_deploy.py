@@ -1676,10 +1676,12 @@ def over_ssh(command: str, env: dict[str, str], data: bytes | None = None) -> in
 
 
 @pytest.mark.parametrize(("user", "sudo"), [("root", None), ("ubuntu", "-n -H -u ubuntu bash")])
-def test_install_script_runs_in_the_root_directory_as_the_user(
+def test_install_script_runs_in_the_app_directory_as_the_user(
     home_dir: Path, shell: dict[str, str], user: str, sudo: str | None
 ) -> None:
-    """root なら内側の sudo を通さず、ほかのユーザーなら sudo -n -H -u で実行する。"""
+    """root なら内側の sudo を通さず、ほかのユーザーなら sudo -n -H -u で実行する。
+    カレントディレクトリはアプリのディレクトリにする。
+    """
     log = home_dir / "sudo.log"
     inner = home_dir / "bin" / "sudo"
     # 外側の sudo（-n bash -c ...）のほかは、受け取った引数を控える
@@ -1691,7 +1693,7 @@ def test_install_script_runs_in_the_root_directory_as_the_user(
     directory = make_app(home_dir / "jupyter")
     (directory / "install").write_text(f'pwd > "{home_dir}/pwd"\n', encoding="utf-8")
     assert over_ssh(deploy._remote(deploy.INSTALL_SCRIPT, str(directory), user), shell) == 0
-    assert (home_dir / "pwd").read_text(encoding="utf-8") == "/\n"
+    assert (home_dir / "pwd").read_text(encoding="utf-8") == f"{directory}\n"
     logged = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     assert logged == ([] if sudo is None else [f"{sudo} {directory}/install"])
 
@@ -1700,7 +1702,7 @@ def test_install_check_and_uninstall_commands_pass_through_the_shell(
     home_dir: Path, shell: dict[str, str]
 ) -> None:
     directory = make_app(home_dir / "o'p $x" / "jupyter")
-    (directory / "install").write_text('touch "$(dirname "$0")/installed"\n', encoding="utf-8")
+    (directory / "install").write_text("touch installed\n", encoding="utf-8")
     check = deploy.CHECK_SCRIPT.format(
         absent=deploy.ABSENT_CODE, no_uninstall=deploy.NO_UNINSTALL_CODE
     )

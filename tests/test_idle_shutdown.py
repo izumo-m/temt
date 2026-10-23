@@ -1149,7 +1149,7 @@ def test_service_tells_how_to_enable_the_tags(
 def test_install_checks_the_tag_before_anything() -> None:
     """install は、タグ temt:service が読めることを、制限時間を書くより先に確かめる。"""
     install = (APP / "install").read_text(encoding="utf-8")
-    checked = install.index('python3 -I "$here/idle_shutdown.py" service')
+    checked = install.index("python3 -I idle_shutdown.py service")
     assert checked < install.index("limit --deploy")
 
 
@@ -1187,8 +1187,8 @@ def test_install_gives_the_limit_before_placing_anything() -> None:
     判定の結果は、タイマーを有効にしたあと、最後に書く。
     """
     install = (APP / "install").read_text(encoding="utf-8")
-    given = install.index('. "$here/temt-options.env"')
-    limit = install.index('python3 -I "$here/idle_shutdown.py" limit --deploy "$TEMT_OPTION_LIMIT"')
+    given = install.index(". ./temt-options.env")
+    limit = install.index('python3 -I idle_shutdown.py limit --deploy "$TEMT_OPTION_LIMIT"')
     aws_cli = install.index("snap install aws-cli")
     placed = install.index("install -m 755")
     timer = install.index("systemctl enable --now idle-shutdown.timer")
@@ -1230,7 +1230,8 @@ def test_install_places_every_file_of_the_app() -> None:
     install = (APP / "install").read_text(encoding="utf-8")
     shipped = {p.name for p in APP.iterdir()} - {"manifest.toml", "install", "uninstall"}
     for name in shipped:
-        assert f'"$here/{name}"' in install
+        # install はアプリのディレクトリで実行されるので、ファイルを名前だけで指す
+        assert f" {name} " in install
 
 
 def placed_by_install() -> tuple[list[str], list[str]]:

@@ -34,9 +34,7 @@ description = "インスタンスの中で index.html を返す"
 # hello を入れる。deploy が root で実行する。何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-
-install -m 644 "$here/hello.service" /etc/systemd/system/
+install -m 644 hello.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable hello.service
 systemctl restart hello.service
@@ -181,11 +179,10 @@ temt は、宣言したすべてのオプションの値を、利用者が与え
 シェルの引用符で囲んだものである。`install` は、これを `.` で読み込む。
 
 ```bash
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-. "$here/temt-options.env"
+. ./temt-options.env
 
 # hello.service の @PORT@ を、与えられたポートにして置く
-sed "s/@PORT@/$TEMT_OPTION_PORT/" "$here/hello.service" >/etc/systemd/system/hello.service
+sed "s/@PORT@/$TEMT_OPTION_PORT/" hello.service >/etc/systemd/system/hello.service
 ```
 
 `pattern` で形を決めていない値は何が来るか分からないので、使うときは
@@ -196,12 +193,12 @@ sed "s/@PORT@/$TEMT_OPTION_PORT/" "$here/hello.service" >/etc/systemd/system/hel
 
 `temt-options.env` はアプリのディレクトリと一緒に入れ替わり、焼けば AMI に残る。
 `uninstall` も同じファイルを読める。インスタンスの上で、`deploy` と同じく、カレント
-ディレクトリを `/` にして、`install` を実行したユーザーで実行すれば、最後に `deploy`
+ディレクトリをアプリのディレクトリにして、`install` を実行したユーザーで実行すれば、最後に `deploy`
 したときと同じ値で入れ直せる。root なら 1 行め、ほかのユーザー（`manifest.toml` の
 `user` か `deploy --user`）なら 2 行めの形である。
 
-    cd / && sudo bash /opt/temt/apps/<アプリID>/install
-    cd / && sudo -H -u <ユーザー> bash /opt/temt/apps/<アプリID>/install
+    cd /opt/temt/apps/<アプリID> && sudo bash install
+    cd /opt/temt/apps/<アプリID> && sudo -H -u <ユーザー> bash install
 
 次の `deploy` は、利用者が前に与えた値を引き継ぐ（[usage.md](usage.md#アプリを入れる)）。
 版を上げて既定を変えれば、利用者が値を与えていないオプションは新しい既定になる。
@@ -257,8 +254,10 @@ fi
   実行される。アプリを更新するときも同じで、前の版の `uninstall` は実行されない。
   前の版が入れて、新しい版では要らなくなったもの（名前を変えた前のサービスなど）は、
   新しい `install` が消す。
-- **自分のファイルは、スクリプトのあるディレクトリから探す。** カレントディレクトリは `/` なので、
-  `here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")` のように求める。
+- **自分のファイルは、名前だけで指せる。** カレントディレクトリはアプリのディレクトリ
+  なので、`hello.service` や `./common.sh` で届く。`.` で読み込むときは、`./` を付けないと
+  `PATH` から探されるので、`. ./temt-options.env` と書く。途中で `cd` したら、
+  そのあとは相対パスで届かない。
 - **問いかけるコマンドを使わない。** 端末は無く、標準入力は空である。出力は手元に
   そのまま出る。
 - **apt のロックを待つ。** `start` の直後は、起動時の自動更新が apt のロックを

@@ -221,9 +221,9 @@ that need root. Root runs the script under `sudo` without a password prompt.
 
 ### Writing install and uninstall
 
-`install` and `uninstall` find their own files relative to the script's directory and do
-not depend on the current directory. temt runs them with `/` as the current directory,
-because the running user cannot necessarily enter any other directory. `install` must be
+temt runs `install` and `uninstall` with the app directory as the current directory, so
+they reach their own files by relative paths (the requester). A user that can read the
+script can enter its directory, so the directory is always enterable. `install` must be
 idempotent. Daemons are started by systemd or the like; if `install` backgrounds a
 process, it redirects the output to `/dev/null`. A process left holding `install`'s output
 keeps ssh from ending, and `deploy` hangs holding the lock. Files are sent with group and
@@ -285,7 +285,7 @@ a close name if there is one, and exits. The app ID rule is that of
 3. Send the directory over ssh and, as root, replace `/opt/temt/apps/<app ID>/` with it
    in one step: on failure partway the old directory remains, and leftovers of an
    earlier interrupted run are cleaned up. Then run `bash /opt/temt/apps/<app ID>/install`
-   over ssh as the user, with `/` as the current directory. ssh's output goes to stdout
+   over ssh as the user, with the app directory as the current directory. ssh's output goes to stdout
    and stderr as it is.
 4. Write the record `/<name>/<app ID>/deploy`: `user` is the user that ran `install`,
    `deployed` is when `install` finished by the client's clock, in UTC, `instance` is the ID of
@@ -412,8 +412,8 @@ removed from the config file and `apply`ed by the user after removing the app.
    confirmation as in `deploy` step 2 (with the region and account), listing the user
    when there is one. Then go to step 2, or to
    step 3 when the directory does not exist.
-2. Run `bash /opt/temt/apps/<app ID>/uninstall` as that user with `/` as the current
-   directory, and on success delete the directory as root. On failure, leave the record
+2. Run `bash /opt/temt/apps/<app ID>/uninstall` as that user with the app directory as
+   the current directory, and on success delete the directory as root. On failure, leave the record
    and exit. Stopping with Ctrl-C may leave `uninstall` running on the instance.
 3. Delete the status `/<name>/<app ID>/status`, then handle the record
    `/<name>/<app ID>/deploy`. If the record is readable and its `baked_image` is the

@@ -3,10 +3,9 @@
 # 実行する。何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 # deploy のオプション。TEMT_OPTION_SIZE は、deploy のオプション size の値
-. "$here/temt-options.env"
-. "$here/common.sh"
+. ./temt-options.env
+. ./common.sh
 
 # fstab に書く行。nofail を付けるので、ファイルが壊れていても swap.target は失敗の扱いに
 # ならない。付けなくても起動は止まらない
