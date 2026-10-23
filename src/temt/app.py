@@ -81,8 +81,10 @@ LOST = "lost"
 REMOVED = "removed"
 
 COLUMNS = table.Columns(
-    defaults=("ID", "NAME", "VERSION", "DEPLOYED", "STATE", "BAKED", "LOCAL"), extras=("PATH",)
+    defaults=("ID", "BAKED", "PATH"), extras=("NAME", "VERSION", "DEPLOYED", "STATE", "LOCAL")
 )
+# BAKED の版の後ろに付ける、手元のアプリの版がそれと違うことの印
+CHANGED = "*"
 
 
 def _ssm(service: Service) -> SSMClient:
@@ -381,8 +383,10 @@ def list_apps(service: Service, spec: str | None) -> None:
     """deploy の記録のあるアプリと、アプリ ID で使えるアプリを、1 つ 1 行の表で挙げる。
 
     アプリ ID の順に並べる。STATE は焼いたかどうか、BAKED は起動テンプレートの AMI に
-    入っている版。LOCAL は手元の manifest.toml の版で、入っている版と比べられる
-    ようにする。PATH はそのディレクトリ。manifest.toml が読めなければ、警告して空とする。
+    入っている版。LOCAL は手元の manifest.toml の版で、PATH はそのディレクトリ。
+    manifest.toml が読めなければ、警告して空とする。LOCAL が BAKED と違えば、BAKED に
+    CHANGED を付け、版を出さない既定の列でも、焼き直すものがあると分かるようにする。
+    版は同じかどうかだけを比べる。
     """
     chosen = COLUMNS.choose(spec)
     session = aws.session(conf.load(service))
@@ -410,6 +414,9 @@ def list_apps(service: Service, spec: str | None) -> None:
             row["NAME"] = manifest.name if manifest else ""
         row["LOCAL"] = manifest.version if manifest else ""
         row["PATH"] = tilde(path)
+        baked = row.get("BAKED")
+        if baked and row["LOCAL"] and row["LOCAL"] != baked:
+            row["BAKED"] = baked + CHANGED
     table.write(chosen, [rows[app_id] for app_id in sorted(rows)])
 
 

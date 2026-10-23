@@ -81,13 +81,21 @@ otherwise the bundled one).
 | Column | Default | Value |
 | --- | --- | --- |
 | `ID` | yes | App ID |
-| `NAME` | yes | App name: the record's, or the `manifest.toml`'s if the record has none or is unreadable |
-| `VERSION` | yes | The version installed last (the record's `version`) |
-| `DEPLOYED` | yes | When the install finished |
-| `STATE` | yes | Whether the version installed last is baked (table below) |
-| `BAKED` | yes | The version in the AMI the launch template points to: `baked_version` when `baked_image` is that AMI |
-| `LOCAL` | yes | Version in the local app's `manifest.toml` |
-| `PATH` | | Directory of the local app |
+| `NAME` | | App name: the record's, or the `manifest.toml`'s if the record has none or is unreadable |
+| `VERSION` | | The version installed last (the record's `version`) |
+| `DEPLOYED` | | When the install finished |
+| `STATE` | | Whether the version installed last is baked (table below) |
+| `BAKED` | yes | The version in the AMI the launch template points to: `baked_version` when `baked_image` is that AMI. Followed by `*` when the local app's version differs from it |
+| `LOCAL` | | Version in the local app's `manifest.toml` |
+| `PATH` | yes | Directory of the local app |
+
+The defaults answer what the next `start` has and where the app `deploy` would use is
+(the requester): the user remembers what they deployed, so `BAKED` alone shows what is
+not baked, and the `*` shows that the local app has another version to deploy and bake,
+whose number `app show` gives. Versions are compared only for equality, so an older local
+version is marked too. No `*` when nothing is baked, there is no local app, or its
+`manifest.toml` cannot be read. `PATH` is long for a bundled app, which lies inside
+temt's install; rejected: showing `(bundled)` instead, which hides where the source is.
 
 `STATE` is decided from the record, the `ImageId` of the launch template's default
 version, and the instance found by the same rule as `start`

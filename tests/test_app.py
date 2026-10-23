@@ -69,6 +69,10 @@ def placed(stubs: Stubs, *items: dict[str, Any], image: str = IMAGE) -> None:
     stubs.ec2.add_response("describe_instances", reservations(*items), SEARCH)
 
 
+# PATH を除くすべての列
+ALL_BUT_PATH = "id,name,version,deployed,state,baked,local"
+
+
 def a_record(name: str = "Jupyter Lab", version: str = "1.2") -> str:
     """deploy の記録の値。"""
     return json.dumps(
@@ -146,7 +150,7 @@ def test_list_shows_the_deploy_records_by_app_id(
         {"Path": PATH, "Recursive": True, "NextToken": "t"},
     )
 
-    app.list_apps(configured, None)
+    app.list_apps(configured, ALL_BUT_PATH)
 
     aws_stubs.done()
     assert capsys.readouterr().out.splitlines() == [
@@ -185,7 +189,7 @@ def test_list_adds_the_apps_in_the_apps_directory(
     a_local_app(home_dir, "Bad", 'name = "bad"\nversion = "1"\n')
     (home_dir / ".config" / "temt" / "apps" / "file").write_text("", encoding="utf-8")
 
-    app.list_apps(configured, None)
+    app.list_apps(configured, ALL_BUT_PATH)
 
     aws_stubs.done()
     captured = capsys.readouterr()
@@ -241,7 +245,7 @@ def test_list_warns_about_a_manifest_it_cannot_read(
     (home_dir / ".config" / "temt" / "apps" / "folder" / "manifest.toml").mkdir()
     a_local_app(home_dir, "mise", 'name = "mise"\nversion = "1"\n')
 
-    app.list_apps(configured, None)
+    app.list_apps(configured, ALL_BUT_PATH)
 
     aws_stubs.done()
     captured = capsys.readouterr()
@@ -730,6 +734,53 @@ def test_list_shows_whether_each_app_is_baked(
         "moved   1         lost      -",
         "newer   2         lost      1",
         "old     1         -         -",
+    ]
+
+
+def test_list_marks_a_baked_version_that_differs_from_the_local_app(
+    aws_stubs: Stubs,
+    configured: Service,
+    home_dir: Path,
+    no_bundled_apps: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """既定の列は ID、BAKED、PATH。手元のアプリの版が焼いた版と違えば、BAKED に印を付ける。
+
+    版は同じかどうかだけを比べるので、手元のほうが古くても付ける。焼いていなければ、
+    手元のアプリが無ければ、manifest.toml が読めなければ、付けない。
+    """
+    applied(aws_stubs)
+    placed(aws_stubs)
+    baked = {"baked_image": IMAGE}
+    aws_stubs.ssm.add_response(
+        "get_parameters_by_path",
+        {
+            "Parameters": [
+                a_parameter(f"{PATH}/newer/deploy", a_full_record(baked_version="1", **baked)),
+                a_parameter(f"{PATH}/older/deploy", a_full_record(baked_version="3", **baked)),
+                a_parameter(f"{PATH}/same/deploy", a_full_record(baked_version="2", **baked)),
+                a_parameter(f"{PATH}/fresh/deploy", a_full_record(instance=GONE)),
+                a_parameter(f"{PATH}/gone/deploy", a_full_record(baked_version="1", **baked)),
+                a_parameter(f"{PATH}/broken/deploy", a_full_record(baked_version="1", **baked)),
+            ]
+        },
+        {"Path": PATH, "Recursive": True},
+    )
+    for app_id in ("newer", "older", "same", "fresh"):
+        a_local_app(home_dir, app_id, f'name = "{app_id}"\nversion = "2"\n')
+    a_local_app(home_dir, "broken", None)
+
+    app.list_apps(configured, None)
+
+    aws_stubs.done()
+    assert capsys.readouterr().out.splitlines() == [
+        "ID       BAKED   PATH",
+        "broken   1       ~/.config/temt/apps/broken",
+        "fresh    -       ~/.config/temt/apps/fresh",
+        "gone     1       -",
+        "newer    1*      ~/.config/temt/apps/newer",
+        "older    3*      ~/.config/temt/apps/older",
+        "same     2       ~/.config/temt/apps/same",
     ]
 
 

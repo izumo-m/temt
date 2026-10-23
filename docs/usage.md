@@ -1106,20 +1106,21 @@ Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 入れたアプリは、インスタンスの `/opt/temt/apps/<アプリID>/` に置かれ、記録が
 `app list` に出る。途中で失敗しても巻き戻さないので、直してもう一度 `deploy` する。
 
-    ID               NAME             VERSION   DEPLOYED              STATE     BAKED   LOCAL
-    emacs            emacs            2         2026-09-28 09:58:31   baked     2       2
-    idle-shutdown    idle-shutdown    2         2026-09-28 09:41:02   baked     2       2
-    jupyter          Jupyter Lab      -         -                     -         -       1.2
-    mise             mise             3         2026-10-01 10:20:13   lost      2       3
-    swapfile         swapfile         -         -                     -         -       1
-    timezone-tokyo   timezone-tokyo   1         2026-10-01 10:26:57   unbaked   -       1
+    ID               BAKED   PATH
+    emacs            2       ~/.config/temt/apps/emacs
+    idle-shutdown    2       ~/.local/share/uv/tools/temt/lib/python3.14/site-packages/temt/apps/idle-shutdown
+    jupyter          -       ~/.config/temt/apps/jupyter
+    mise             2*      ~/.config/temt/apps/mise
+    swapfile         -       ~/.local/share/uv/tools/temt/lib/python3.14/site-packages/temt/apps/swapfile
 
-- `VERSION` は最後に入れた版（`removed` では AMI に残っている版で、`DEPLOYED` は
-  `-`）、`BAKED` は
-  起動テンプレートの AMI に焼いてある版
-  （次の `start` で入っている版）、`LOCAL` はアプリ ID で指したときに使われるもの
-  の版である。アプリ ID で指せるアプリは、入れていなくても表示する。`LOCAL` が `VERSION`
-  と違えば、もう一度 `deploy` すれば更新になる。
+- `BAKED` は起動テンプレートの AMI に焼いてある版（次の `start` で入っている版）である。
+  後ろに `*` があれば、アプリ ID で指したときに使われるものの版がそれと違う。もう一度
+  `deploy` して焼けば更新になる。
+- `PATH` は、アプリ ID で指したときに使われるもののディレクトリで、temt と一緒に配る
+  アプリは temt の中を指す。アプリ ID で指せるアプリは、入れていなくても表示する。
+- `--format` で、`NAME`、`VERSION`（最後に入れた版。`removed` では AMI に残っている版）、
+  `DEPLOYED`（`removed` では `-`）、`STATE`、`LOCAL`（アプリ ID で指したときに使われる
+  ものの版）も表示できる。
 - `STATE` は、最後に入れた版を焼いたかどうか。`baked` は AMI に入っている。
   `unbaked` は、いまのインスタンスにだけあり、焼く前にインスタンスが終了すると
   消える（`idle-shutdown` の自動終了も含む）。`lost` は、焼く前にインスタンスが
@@ -1133,8 +1134,6 @@ Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 `LOCAL` は
 `manifest.toml` の版、`PATH` はアプリのディレクトリで、temt と一緒に配るアプリは
 temt の中を指す。`--format` で `DESCRIPTION`（`manifest.toml` の説明）も表示できる。
-`--svc` を付けたときは、`--format id,version,local,path` のように列を選べば `PATH` を
-表示できる。
 
     temt app list --format id,local,description
 
