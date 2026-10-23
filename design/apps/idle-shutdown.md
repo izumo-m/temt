@@ -262,7 +262,7 @@ message produced when the master was opened. In Ubuntu's default `/etc/pam.d/ssh
 `root/pam` when the script runs.
 
 `/etc/update-motd.d/60-idle-shutdown` prints an empty line, the heading
-`idle-shutdown (sudo idle-shutdown limit 4h to change):`, and the output of
+`idle-shutdown (idle-shutdown --help for usage):`, and the output of
 `idle-shutdown status --login`, each line (warnings from stderr included) indented by
 two spaces. Warnings come before the state lines, since `status` checks everything
 before printing. If the program is missing, it prints nothing.

@@ -1389,16 +1389,14 @@ def motd(tmp_path: Path, body: str | None) -> str:
 def test_the_login_message_indents_status_and_its_warnings(tmp_path: Path) -> None:
     body = '[ "$*" = "status --login" ] || exit 9; echo "idle-shutdown: warn" >&2; echo "limit: 1h"'
     assert motd(tmp_path, body) == (
-        "\nidle-shutdown (sudo idle-shutdown limit 4h to change):\n"
-        "  idle-shutdown: warn\n"
-        "  limit: 1h\n"
+        "\nidle-shutdown (idle-shutdown --help for usage):\n  idle-shutdown: warn\n  limit: 1h\n"
     )
 
 
 def test_the_login_message_shows_a_failure(tmp_path: Path) -> None:
     body = 'echo "idle-shutdown: broken" >&2; exit 1'
     assert motd(tmp_path, body) == (
-        "\nidle-shutdown (sudo idle-shutdown limit 4h to change):\n  idle-shutdown: broken\n"
+        "\nidle-shutdown (idle-shutdown --help for usage):\n  idle-shutdown: broken\n"
     )
 
 

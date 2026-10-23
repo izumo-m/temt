@@ -122,7 +122,7 @@ root でない `status` は in-use.d の判定を見ない。見るには `sudo`
 出る案内。Ubuntu の motd）に、自動終了の状態が出る。
 
 ```
-idle-shutdown (sudo idle-shutdown limit 4h to change):
+idle-shutdown (idle-shutdown --help for usage):
   limit:        1h (set at deploy)
   in use:       no (not counting this session)
   power off:    1h after you log out
