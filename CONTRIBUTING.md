@@ -77,9 +77,27 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
 
     feat(service)!: サービスのコマンドをシェルスクリプトにし、temt を PATH から呼ぶ
 
+## 変更履歴
+
+コマンド、設定ファイル、出力、一緒に配るアプリのように、利用者から見て変わるものを
+変えたら、同じ commit で [CHANGELOG.md](CHANGELOG.md) の `## Unreleased` の節を直す。
+節が無ければ、`# Changelog` のすぐ下に作る。
+
+前の版との差を、利用者から見た普通の日本語で書く。commit ごとに項目を足すのではなく、
+同じものがまた変わったら、前に書いた項目を最後の形に書き直す。
+
+節の中は、次の順に、あるものだけを分けて書く。
+
+- `### Breaking changes`: 前の版と同じ使い方では、同じようには動かないもの。上げるときに
+  することも書く
+- `### Added`: 新しくできるようになったこと
+- `### Changed`: 前からあるものの振る舞いが変わったこと
+- `### Fixed`: 不具合を直したこと
+
 ## 言語
 
 - 文書（README、CONTRIBUTING、SECURITY、CLAUDE.md、docs/）とコード内のコメントは日本語で
+  書く。CHANGELOG.md は、見出しの語（`Unreleased`、`Breaking changes` など）だけを英語で
   書く。設計書（design/）は英語で書く。
 - コンソールに出す文は英語で、ASCII 文字だけを使う。
 - Issue と Pull Request は、日本語でも英語でもよい。
@@ -108,12 +126,17 @@ Conventional Commits の形（`type(scope): subject`、scope は省いてよい�
    temt の番号も揃える。`mise run check` を通してから、`chore(release): <番号>` で
    commit する。前のリリースから破壊的変更（`!`）を含めば 1 桁目を、そうでなく
    `feat` を含めば 2 桁目を、それ以外だけなら 3 桁目を上げ、上げた桁より下は 0 に
-   戻す。
+   戻す。同じ commit で、[CHANGELOG.md](CHANGELOG.md) の見出し `## Unreleased` を
+   `## <番号> - <日付>`（日付は `2026-10-22` の形）に変える。`## Unreleased` が無ければ、
+   その見出しで節を作り、`利用者から見た変更は無い。` と書く。
 2. `main` で `git merge --no-ff develop` する。
 3. マージした commit に、軽量の git のタグ `v<番号>` を付ける。
 4. `git push origin main develop v<番号>` で push し、`develop` に戻る。
-5. `gh release create v<番号> --verify-tag --generate-notes` で GitHub Release を
-   作る。mise の `pypi` バックエンドは、`latest` を最新の GitHub Release に解決する。
+5. CHANGELOG.md のその版の節を本文にして、GitHub Release を作る。mise の `pypi`
+   バックエンドは、`latest` を最新の GitHub Release に解決する。
+
+       awk -v v=<番号> '/^## /{p = index($0, "## " v " ") == 1; next} p' CHANGELOG.md |
+           gh release create v<番号> --verify-tag --title v<番号> --notes-file -
 
 番号を上げるのは、`src/temt/` の下か、`pyproject.toml` の依存が変わったときである。
 それ以外（`docs/`、`design/`、`README.md`、`tests/`、`mise.toml`、`uv.lock` など）だけのときは、

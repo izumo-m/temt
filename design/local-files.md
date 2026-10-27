@@ -9,6 +9,7 @@ tests/           tests of temt (pytest)
 design/          the design (this directory; English, for Claude)
 docs/            user docs: usage.md, conf.md, apps.md, apps/
 README.md        overview and installation
+CHANGELOG.md     user-visible changes of each release
 CONTRIBUTING.md  rules and steps for developing temt
 SECURITY.md      how to report a vulnerability
 CLAUDE.md        instructions for Claude Code; points to design/ and CONTRIBUTING.md
