@@ -777,6 +777,58 @@ def test_import_stops_when_it_cannot_write_the_instance_profile(
     )
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            '[[role.ec2]]\nAction = "ssm:*"\nResource = "*"\n\n'
+            '[launch-template]\nInstanceType = "t3.small"\n\n'
+            '[[role.web]]\nAction = "s3:*"\nResource = "*"\n',
+            id="policies split by another table",
+        ),
+        pytest.param(
+            '[[role.ec2]]\nAction = "ssm:*"\nResource = "*"\n\n'
+            '[launch-template]\nInstanceType = "t3.small"\n\n'
+            '[role]\nManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]\n',
+            id="the header apart from a policy",
+        ),
+        pytest.param(
+            'role = { ManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"] }\n\n'
+            '[launch-template]\nInstanceType = "t3.small"\n',
+            id="an inline table",
+        ),
+        pytest.param(
+            '[[role.ec2]]\nAction = "ssm:*"\nResource = "*"\n\n'
+            '[role]\nManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]\n',
+            id="the header right after a policy",
+        ),
+        pytest.param(
+            'role.ManagedPolicyArns = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]\n'
+            'AwsRegion = "us-west-2"\n',
+            id="dotted keys with a top-level key after them",
+        ),
+    ],
+)
+def test_import_stops_when_it_cannot_replace_role(
+    aws_stubs: Stubs, imported: Service, answer: Terminal, text: str
+) -> None:
+    """tomlkit が丸ごと置き換えられない [role] は、確認の前に止める。"""
+    imported.conf_path.write_text(text, encoding="utf-8")
+    source_read(aws_stubs, {"S3Access": S3_POLICY})
+
+    with pytest.raises(TemtError) as caught:
+        role.import_role(imported, SOURCE, yes=False)
+
+    aws_stubs.done()
+    assert answer.reads == 0
+    assert text_of(imported) == text
+    assert str(caught.value) == (
+        "cannot replace [role] in ~/.config/temt/dev-main.toml; write it as tables with no "
+        "other table between them and [role] before [[role.<policy name>]], and run role "
+        "import again"
+    )
+
+
 def test_import_runs_from_the_command_line(
     aws_stubs: Stubs, imported: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:

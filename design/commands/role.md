@@ -33,6 +33,11 @@ terminated and started again.
      `apply` stops because `IamInstanceProfile` points at `<name>` without `[role]`
      ([resources.md](../resources.md#instance-profile-and-instance-role)). That error
      shows it, so `role import` does not stop first.
+   - A `[role]` that cannot be replaced in the file (split across other tables, `[role]`
+     after a `[[role.<policy name>]]`, an inline table that policies cannot go into, or
+     dotted keys with top-level keys after them that the policies would take in) stops
+     before the confirmation, telling the user how to write it as tables. Nothing is
+     written.
 3. Set `IamInstanceProfile` in the config file's `[launch-template]` to
    `IamInstanceProfile.Name = "${temt:name}"`, the same form as the scaffold
    ([resources.md](../resources.md#instance-profile-and-instance-role)). Comments
