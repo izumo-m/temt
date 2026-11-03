@@ -239,7 +239,7 @@ def test_too_many_lists_the_instances_and_tells_how_to_go_on(
     # 続くエラーに添えるので、標準エラー出力に出す
     assert capsys.readouterr() == (
         "",
-        f"instances tagged Name={NAME}:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n",
+        f"instances tagged temt:service=dev-main:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n",
     )
 
 

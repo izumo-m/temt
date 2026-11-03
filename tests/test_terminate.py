@@ -576,7 +576,7 @@ def test_it_terminates_nothing_when_an_instance_it_is_given_is_not_found(
     assert out == ""
     # 見つかったものを挙げてから、エラーを出す
     assert err == (
-        f"instances tagged Name={NAME}:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n"
+        f"instances tagged temt:service=dev-main:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n"
         f"temt: no instance {missing} for {NAME}; nothing was terminated; "
         "see 'temt status --svc dev-main' and terminate again\n"
     )

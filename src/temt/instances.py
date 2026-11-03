@@ -212,7 +212,7 @@ def tell_found(service: Service, found: list[Instance]) -> None:
 
     続くエラーに添えるので、標準エラー出力に書く。終了する ID は、ここからしか分からない。
     """
-    msg.tell(f"instances tagged Name={service.name}:\n", side=True)
+    msg.tell(f"instances tagged {TAG_SERVICE}={service.svc}:\n", side=True)
     for one in found:
         msg.tell(f"  {one.id} ({one.state})\n", side=True)
 

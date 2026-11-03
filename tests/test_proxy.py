@@ -719,7 +719,7 @@ def test_it_stops_when_more_than_one_instance_is_tagged(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert told(captured.err) == [
-        f"instances tagged Name={NAME}:",
+        "instances tagged temt:service=dev-main:",
         f"  {INSTANCE} (running)",
         f"  {OTHER} (running)",
     ]
