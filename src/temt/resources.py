@@ -1511,7 +1511,7 @@ def delete_template(ec2: EC2Client, service: Service) -> None:
 def delete_parameters(ssm: SSMClient, service: Service) -> None:
     """/<名前> の下の SSM パラメータをすべて消す。無ければ absent と知らせる。
 
-    アプリの値と記録は temt のタグを持たないことがあるので、タグではなくパスで探す。
+    アプリの値は temt のタグを持たないことがあるので、タグではなくパスで探す。
     """
     path = service.parameter_path
     names = [

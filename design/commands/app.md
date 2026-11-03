@@ -79,7 +79,7 @@ Directories whose names break the app ID rule are skipped.
   `ssm:SendCommand`, `ssm:GetCommandInvocation`, and
   `ssm:DescribeInstanceInformation`, as `reboot` does.
 
- A `manifest.toml` that cannot be read is warned about and its
+A `manifest.toml` that cannot be read is warned about and its
 values are left empty; an unreadable record is warned about and its values are left
 empty, except where `deploy` and `app remove` say otherwise.
 

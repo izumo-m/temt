@@ -34,7 +34,7 @@ AWS とのやり取りを本物で通しで確かめるときは、自分の `~/
     home=$(mktemp -d)
     ln -s ~/.aws "$home/.aws"
     mkdir -p "$home/.config/temt" "$home/bin"
-    printf 'AwsRegion = "ap-northeast-1"\n' > "$home/.config/temt/verify.toml"
+    printf 'AwsRegion = "ap-northeast-1"\n' > "$home/.config/temt/defaults.toml"
     cat > "$home/bin/ssh" <<EOF
     #!/bin/sh
     sed "s|~/|$home/|g" "$home/.ssh/temt/config" > "$home/.ssh/verify-config"

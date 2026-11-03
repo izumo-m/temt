@@ -88,7 +88,7 @@ Description = "home"
 | `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
 | `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
 | `Defaults` | `app list` を除く、`--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
-| `WaitForSsm` | `start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
+| `WaitForSsm` | `apply`、`diff`、`start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
 
 **`AwsProfile`。** `<svc>.toml` に書けば、そのサービスはいつもその AWS のプロファイルを
 使う。違う値の `--profile` を付けると、引数の誤りになる。書かなければ、コマンドの
@@ -362,9 +362,9 @@ Manager 経由だけになる。変えたら `apply` を実行する。動いて
 
 | 項目 | 読むコマンド | 値 |
 | --- | --- | --- |
-| `Protocol` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | `tcp`、`udp`、`icmp` のどれか。既定は `tcp` |
-| `Port` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | ポート。整数（`22`）か、範囲を表す整数 2 つの配列（`[22, 23]`）。0 から 65535。`tcp` と `udp` では必ず書き、`icmp` では書かない |
-| `Cidr` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 送信元の IPv4 か IPv6 の CIDR（`203.0.113.10/32`） |
+| `Protocol` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | `tcp`、`udp`、`icmp` のどれか。既定は `tcp` |
+| `Port` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | ポート。整数（`22`）か、範囲を表す整数 2 つの配列（`[22, 23]`）。0 から 65535。`tcp` と `udp` では必ず書き、`icmp` では書かない |
+| `Cidr` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | 送信元の IPv4 か IPv6 の CIDR（`203.0.113.10/32`） |
 | `Description` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 規則の説明。省略できる |
 
 `Protocol`、`Port`、`Cidr` が同じ規則を 2 つ書くことはできない。AWS は規則を

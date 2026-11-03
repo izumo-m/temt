@@ -170,7 +170,7 @@ ssh の経路（[直接接続](#直接接続)）は手元のネットワーク�
 ように引数を誤ったときも、対象が分かれば、その対象のコマンドだけの使い方が表示される。
 `temt --version` で、temt のバージョンが表示される。
 
-AWS のプロファイルを選ぶ `--profile <プロファイル>` と、リージョンを選ぶ
+AWS のプロファイルを選ぶ `--profile <AWS のプロファイル>` と、リージョンを選ぶ
 `--region <リージョン>` は、AWS を呼ぶどのコマンドにも付けられる。AWS に問い合わせない
 `service list`、`sg list`、`sg add`、`sg remove`、`app list` は、どちらも付けられない。
 
@@ -648,7 +648,8 @@ temt のインスタンス（`temt:service` タグを持ち、`terminated` で�
 再起動して、またログインできるようになるまで待つ。ふつう 1 分ほどかかり、SSM
 エージェントの戻りを待っていること、戻ったことを 1 行ずつ表示する。見分けには、
 インスタンスの中で起動のたびに変わる ID（boot_id）を Run Command で読んで比べるので、
-手元の資格情報に `ssm:SendCommand` と `ssm:GetCommandInvocation` の権限が要る。
+手元の資格情報に `ssm:SendCommand`、`ssm:GetCommandInvocation`、
+`ssm:DescribeInstanceInformation` の権限が要る。
 SSM エージェントが応答していない（`status` の `ssm-agent` が `Online` でない）と
 見分けられないので、再起動せずに終わる。
 
@@ -733,7 +734,7 @@ temt と一緒に配るアプリ `idle-shutdown` を入れて焼いておけば�
 使われなくなってから制限時間（既定は 1 時間）で自分で終了する
 （[自動終了](apps/idle-shutdown.md)）。
 焼く前に自分で終了したときは警告が出ないので、入れたアプリを残したいときは、
-離れる前に `status` の `apps` を見て焼いておく。
+離れる前に `status --apps` で確かめて焼いておく。
 
 作った AWS リソース（インスタンスロール、インスタンスプロファイル、セキュリティ
 グループ、起動テンプレート）はそのまま残る。これらには費用はかからない。
@@ -1120,7 +1121,7 @@ Ubuntu の AMI には入っている。入っていない AMI では、ssh が
 - `PATH` はアプリのディレクトリで、temt と一緒に配るアプリは temt の中を指す。
 - `--format` で `DESCRIPTION`（`manifest.toml` の説明）も表示できる。
 
-    temt app list --format id,local,description
+      temt app list --format id,local,description
 
 `install` は、アプリの `manifest.toml` の `user` が指すユーザーで実行され、書いて
 いなければ root で実行される。`--user` を付ければ、`manifest.toml` の `user` より
@@ -1298,9 +1299,9 @@ AMI を替えたとき（`--image-id` で古い AMI や他のサービスの AMI
 失敗したとき、ほかのリージョンのクローンで `set-port` していないときに、インスタンスの
 実際のポートと違ってしまう。つながらなければ、`~/.ssh/temt/config` の Host ブロックの `Port` を手で
 直す（`deploy` と `app remove` もこれに従う）。その場だけなら `ssh -p <ポート>
-temt-<svc>` でつなぐ。直接接続では、つながらなかったポートと、`Port` が違うかも
-しれないことが表示される。Session Manager 経由では、session-manager-plugin が、
-宛先のポートにつなげなかったと表示して終わる。
+temt-<svc>` でつなぐ。直接接続では、つながらなかったポートが表示され、起動して間もない
+インスタンスでは、`Port` が違うかもしれないことも表示される。Session Manager 経由では、
+session-manager-plugin が、宛先のポートにつなげなかったと表示して終わる。
 
 ### `~/.ssh/temt/` の中身
 

@@ -209,7 +209,8 @@ The boot_id is read the same way in 4 and 7:
 - In 7, an agent that reported just before going down may return the old boot_id. If it
   is old, it is read again.
 
-The local credentials need `ssm:SendCommand` and `ssm:GetCommandInvocation`. The
+The local credentials need `ssm:SendCommand`, `ssm:GetCommandInvocation`, and
+`ssm:DescribeInstanceInformation`. The
 `[[role.ec2]]` that the scaffold of a new config file writes
 ([conf.md](../../docs/conf.md#role)) includes the permissions Run Command needs on the
 instance side.

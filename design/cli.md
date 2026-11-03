@@ -132,7 +132,10 @@ operations can be typed in this form.
   ([config.md](config.md#region)). It is a usage error for the commands that do not
   call AWS, as `--profile` is.
 - The region and the account are shown in the confirmations
-  ([Confirmation](#confirmation)), not in the other output of commands with `--svc`.
+  ([Confirmation](#confirmation)), not in the other output of commands with `--svc`,
+  except where the region is what the message is about: the `ImageId` line of `apply`
+  and `diff` that says Ubuntu was chosen ([topics/ami.md](topics/ami.md#selecting)) and
+  the errors about the default VPC.
 
 ### Messages
 
@@ -167,7 +170,8 @@ operations can be typed in this form.
 - A path under the home directory is shown starting with `~/`
   (`~/.config/temt/<svc>.toml`), in every message, errors from the OS included (the
   requester: shorter, and the same as the ssh side; a shell expands it when pasted).
-  Rejected: the path from `/`. A path given as an argument is shown as given.
+  Rejected: the path from `/`. An app directory given as an argument that does not
+  exist is shown as given.
 - Wording is English, ASCII only.
 - Exception: text that is not temt's own wording is shown as is, Japanese included:
   values from the user's side (config file, ssh config, environment variables,
@@ -181,7 +185,8 @@ operations can be typed in this form.
   - Not replaced: values that follow rules set by temt or AWS (AWS IDs, AMI names,
     states, names that passed a rule), and fixed text from the OS (the reason of a file
     error, etc.).
-  - Exception: `manifest.toml` values and app option values. In messages and in
+  - Exception: the version, defaults, and descriptions in `manifest.toml`, and app
+    option values. In messages and in
     `app show`, only the unprintable characters that disturb the terminal are replaced
     ([commands/app.md](commands/app.md#app-options)). In a list table, all unprintable
     characters are replaced, as for other values ([List tables](#list-tables)).
@@ -252,8 +257,8 @@ and its failure is shown as the SDK's error.
 
 ### Missing config file
 
-- A command run with `--svc` other than `apply`, `destroy`, and `service import` exits,
-  prompting to run `apply`, if the config file is missing.
+- A command run with `--svc` other than `apply`, `destroy`, `service import`, and
+  `app list` exits, prompting to run `apply`, if the config file is missing.
 - `apply` asks whether to create the service and writes the scaffold
   ([commands/service.md](commands/service.md#scaffold)).
 - `service import` requires the config file to be missing: it imports only into a
@@ -267,7 +272,8 @@ and its failure is shown as the SDK's error.
 ### Not applied
 
 - Commands that assume `apply` has been run (`start`, `bake`, `template show`,
-  `set-port`, and the `app` commands with `--svc`) look for the launch template before
+  `set-port`, and the `app` commands with `--svc` other than `app list`) look for the
+  launch template before
   their first operation on AWS, and if it is missing, exit prompting to run `apply`.
   `start` checks the template also when it resumes a stopped instance.
 - These do not check: `apply`, `diff`, `destroy`, `stop`, `terminate`, `reboot`,

@@ -325,7 +325,7 @@ class Service:
         return f"/{self.name}"
 
     def app_path(self, app: str) -> str:
-        """アプリの値と記録を置く階層 /<名前>/<アプリID>。"""
+        """アプリの値を置く階層 /<名前>/<アプリID>。"""
         return f"{self.parameter_path}/{app}"
 
     def app_parameter(self, app: str, key: str) -> str:

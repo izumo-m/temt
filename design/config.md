@@ -1,8 +1,8 @@
 # Config file and AWS environment
 
 The config file `~/.config/temt/<svc>.toml` is the definition of a service. Every
-command with `--svc` reads it; `service list` without `--svc` reads every
-`<svc>.toml`. The format, keys, and defaults are in [docs/conf.md](../docs/conf.md).
+command with `--svc` other than `app list` reads it; `service list` without `--svc`
+reads every `<svc>.toml`. The format, keys, and defaults are in [docs/conf.md](../docs/conf.md).
 
 `apply` writes nothing into an existing config file, as CDK does not rewrite its
 source. The file holds only what differs from the defaults; every value not written is
@@ -15,7 +15,7 @@ The config file holds no ssh route, which depends on the client's network; the
 environment variable `TEMT_LOGIN` gives that ([commands/ssh.md](commands/ssh.md#routes)).
 
 Commands with `--svc` other than `apply` exit when the file is missing, telling the
-user to run `apply`. `destroy` and `service import` are the exceptions
+user to run `apply`. `destroy`, `service import`, and `app list` are the exceptions
 ([cli.md](cli.md#missing-config-file)).
 
 ## Defaults file
