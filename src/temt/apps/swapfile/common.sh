@@ -8,15 +8,17 @@ SWAPFILE=/swapfile
 FSTAB=/etc/fstab
 # 使えるメモリ（MemAvailable）を読む場所
 MEMINFO=/proc/meminfo
+# 使っている swap の一覧を読む場所
+SWAPS=/proc/swaps
 MIB=$((1024 * 1024))
 # swap を止める前に、swap に出ている量に足して残っているべきメモリ
 MEMORY_MARGIN=$((256 * MIB))
 
-# SWAPFILE が swap として使われているか。--raw は名前の空白を \x20 にするので、使って
-# いるうちに消されたファイル（/swapfile (deleted)）は当たらない
+# SWAPFILE が swap として使われているか。使っているうちに消されたファイルは、SWAPS で
+# /swapfile\040(deleted) となるので当たらない。swapon --show は (deleted) を取り除いて表示
+# するので、これには使えない
 is_active() {
-    swapon --show=NAME --noheadings --raw |
-        awk -v f="$SWAPFILE" '$1 == f {found = 1} END {exit !found}'
+    awk -v f="$SWAPFILE" '$1 == f {found = 1} END {exit !found}' "$SWAPS"
 }
 
 # SWAPFILE の swap を止める。swap に出ているものが、余裕を持ってメモリに収まらなければ、
@@ -24,8 +26,8 @@ is_active() {
 # $1 は、再起動したあとにやり直すこと。誤りの頭には、実行しているスクリプトの名前を付ける
 turn_off() {
     local used available
-    used=$(swapon --show=NAME,USED --bytes --noheadings --raw |
-        awk -v f="$SWAPFILE" '$1 == f {print $2}')
+    # 消されたファイルと新しいファイルの両方が使われていても、新しいほうだけを読む。単位は KiB
+    used=$(($(awk -v f="$SWAPFILE" '$1 == f {print $4}' "$SWAPS") * 1024))
     available=$(($(awk '$1 == "MemAvailable:" {print $2}' "$MEMINFO") * 1024))
     if [ $((used + MEMORY_MARGIN)) -gt "$available" ]; then
         echo "${0##*/}: $SWAPFILE has $((used / MIB)) MiB swapped out, but only" \

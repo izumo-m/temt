@@ -67,8 +67,9 @@ chown root:root "$SWAPFILE"
 chmod 600 "$SWAPFILE"
 set_fstab "$FSTAB_LINE"
 
+# 使っているうちに消されたファイルがあれば、同じ名前で先に出るので、最後の行を読む
 if ! read -r total used < <(swapon --show=NAME,SIZE,USED --noheadings --raw |
-    awk -v f="$SWAPFILE" '$1 == f {print $2, $3}'); then
+    awk -v f="$SWAPFILE" '$1 == f {found = $2 " " $3} END {if (found != "") print found}'); then
     echo "install: $SWAPFILE is not in use as swap after swapon" >&2
     exit 1
 fi
