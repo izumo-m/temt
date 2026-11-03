@@ -153,7 +153,7 @@ def test_temt_adds_its_tags_and_groups_to_the_config_file(ec2: EC2Client, servic
     }
     assert found.image["ImageId"] == IMAGE
     assert (found.vpc_id, found.group_id) == (VPC, GROUP)
-    assert (found.makes_group, found.uses_group) == (True, True)
+    assert found.uses_group
     assert found.root is None
 
 
@@ -185,7 +185,7 @@ def test_a_missing_group_of_temt_is_new(ec2: EC2Client, service: Service) -> Non
     found = built(ec2, service, values(), group=None)
     assert found.data["NetworkInterfaces"] == [{**PRIMARY, "Groups": [ltbuild.NEW_GROUP]}]
     assert found.group_id is None
-    assert (found.makes_group, found.uses_group) == (True, True)
+    assert found.uses_group
 
 
 @pytest.mark.parametrize("temt", ["${temt:name}", NAME])
@@ -206,7 +206,7 @@ def test_groups_are_resolved_by_name_in_the_vpc(
     assert found.data["NetworkInterfaces"] == [
         {**PRIMARY, "Groups": [WEB, "sg-0000000000000aaaa", ltbuild.NEW_GROUP]}
     ]
-    assert (found.makes_group, found.uses_group) == (True, True)
+    assert found.uses_group
 
 
 def test_a_group_name_not_in_the_vpc_stops(ec2: EC2Client, service: Service) -> None:
@@ -259,7 +259,7 @@ def test_groups_written_by_id(ec2: EC2Client, service: Service, group: str, used
     found = built(ec2, service, values(NetworkInterfaces=[{**PRIMARY, "Groups": [group]}]))
     assert found.data["NetworkInterfaces"] == [{**PRIMARY, "Groups": [group]}]
     assert found.group_id == GROUP
-    assert (found.makes_group, found.uses_group) == (False, used)
+    assert found.uses_group == used
 
 
 @pytest.mark.parametrize(
@@ -279,7 +279,7 @@ def test_top_level_security_groups_leave_groups_alone(
     """
     found = built(ec2, service, values(**data))
     assert found.data["NetworkInterfaces"] == [PRIMARY]
-    assert (found.makes_group, found.uses_group) == (False, used)
+    assert found.uses_group == used
 
 
 def test_an_existing_network_interface_gets_no_groups(ec2: EC2Client, service: Service) -> None:
@@ -290,7 +290,7 @@ def test_an_existing_network_interface_gets_no_groups(ec2: EC2Client, service: S
     found = built(ec2, service, values(NetworkInterfaces=[primary]), subnet=False)
     assert found.data["NetworkInterfaces"] == [primary]
     assert found.vpc_id is None
-    assert (found.makes_group, found.uses_group) == (False, False)
+    assert not found.uses_group
 
 
 def test_only_the_primary_element_gets_groups(ec2: EC2Client, service: Service) -> None:

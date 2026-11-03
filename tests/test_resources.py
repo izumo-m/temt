@@ -2030,7 +2030,6 @@ def built(
         {"ImageId": IMAGE},
         vpc_id,
         group_id,
-        uses and group_id is None,
         uses,
         None,
     )
