@@ -10,10 +10,15 @@ in the config file; they never write to AWS.
 `apply` creates it only when the launch template uses it by name: when temt fills
 `Groups` of the `NetworkInterfaces` element with `DeviceIndex = 0` (not written, and
 not left out because of `SecurityGroupIds`, `SecurityGroups`, or `NetworkInterfaceId`;
-[launch-template.md](launch-template.md#what-temt-adds)), or when a `Groups` names it
+[launch-template.md](launch-template.md#what-temt-adds)), when a `Groups` names it
 (`<name>` or `${temt:name}`;
-[launch-template.md](launch-template.md#extensions-to-awss-form)). Whether to create it
-is decided by the name alone. Its ingress rules
+[launch-template.md](launch-template.md#extensions-to-awss-form)), or when the top-level
+`SecurityGroups` names it. Whether to create it
+is decided by the name alone. The top-level `SecurityGroups` ends in AWS's error
+([launch-template.md](launch-template.md#filled-when-missing)), and the security group made
+for it stays until `destroy`. Rejected: not creating it for that form (the requester:
+`start` stops at AWS's error either way, and `sg show` and `sg diff`, which say the next
+`apply` creates it, would have to tell the form apart). Its ingress rules
 are reconciled whenever it is among the template's security groups after resolving, an
 ID written by the user included. A template that
 lists only other security groups (as `service import` writes: the source's, by the IDs AWS

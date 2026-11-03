@@ -102,9 +102,10 @@ If it stops during the update phase, whatever was already written stays.
      tag remains, the role and the instance profile are deleted
      ([Regions](../resources.md#regions), [Deleting](../resources.md#deleting)). This
      comes after the launch template.
-   - The security group is created only when `Groups` is filled by temt or names it,
-     and its ingress rules are reconciled whenever it is among the template's security
-     groups ([topics/security-group.md](../topics/security-group.md#when-it-is-created)).
+   - The security group is created only when `Groups` is filled by temt or names it, or
+     the top-level `SecurityGroups` names it, and its ingress rules are reconciled
+     whenever it is among the template's security groups
+     ([topics/security-group.md](../topics/security-group.md#when-it-is-created)).
      If it does not exist yet, the launch template difference is detected with its ID
      as `(new)`, and the update puts in the ID of the security group it created.
    - After creating the instance profile, wait until IAM shows it. Even so, EC2 may not
