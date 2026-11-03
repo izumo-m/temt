@@ -1998,7 +1998,6 @@ def test_point_image_does_not_claim_the_instance_profile_exists(
         stub.assert_no_pending_responses()
     shown = capsys.readouterr().err
     assert f"{resources.PROFILE_NOT_READY}: The IamInstanceProfile.Name '{NAME}'" in shown
-    assert resources.NOT_READY_NOTE not in shown
 
 
 def test_point_image_stops_without_a_default_version(ec2: EC2Client, service: Service) -> None:
@@ -2372,18 +2371,16 @@ def test_a_warning_from_aws_is_shown(
         stub.assert_no_pending_responses()
     shown = capsys.readouterr().err
     assert "InvalidType: no such type" in shown
-    # 反映待ちの断りは、その誤りのときだけ添える
-    assert resources.NOT_READY_NOTE not in shown
 
 
 @pytest.mark.parametrize("managed", [True, False])
-def test_the_instance_profile_warning_says_it_is_iam_propagation(
+def test_the_instance_profile_warning_is_hidden_while_iam_propagates(
     ec2: EC2Client, service: Service, capsys: pytest.CaptureFixture[str], managed: bool
 ) -> None:
     """作った直後は EC2 がインスタンスプロファイルを見つけられないことがある。
 
     temt のインスタンスプロファイルなら、update はその前に揃えているので、これは反映待ち
-    であり、そう添える。temt のものでなければ、待っても直らないので添えない。
+    であり、見せない。temt のものでなければ、待っても直らないので見せる。
     """
     with Stubber(ec2) as stub:
         missing(
@@ -2407,8 +2404,7 @@ def test_the_instance_profile_warning_says_it_is_iam_propagation(
         align_template(ec2, service, managed=managed)
         stub.assert_no_pending_responses()
     shown = capsys.readouterr().err
-    assert f"{resources.PROFILE_NOT_READY}: The IamInstanceProfile.Name '{NAME}'" in shown
-    assert (resources.NOT_READY_NOTE in shown) == managed
+    assert (resources.PROFILE_NOT_READY in shown) != managed
 
 
 def test_an_instance_profile_arn_with_a_path(ec2: EC2Client, service: Service) -> None:

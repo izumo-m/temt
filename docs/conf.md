@@ -1,9 +1,9 @@
 # temt の設定ファイル
 
-`~/.config/temt/<svc>.toml`。サービスの定義で、`--svc <svc>` を付けたすべての
-コマンドが読む。`--svc` を付けない `service list` は、すべての `<svc>.toml` を
+`~/.config/temt/<svc>.toml`。サービスの定義で、`app list` を除く、`--svc <svc>` を
+付けたすべてのコマンドが読む。`--svc` を付けない `service list` は、すべての `<svc>.toml` を
 読んで並べる。`--svc` を付けない `instance list`、`ami list`、`ami prune`、
-`ami delete`、`app list` は読まない。`apply` はこの
+`ami delete` と、`app list` は読まない。`apply` はこの
 ファイルを正として、AWS リソースと手元の環境を揃える。ssh の経路は手元のネットワークで
 変わるので、このファイルではなく環境変数で与える（[設定ファイルに
 書かないもの](#設定ファイルに書かないもの)）。場所は環境変数 `TEMT_CONF_DIR` で
@@ -85,15 +85,20 @@ Description = "home"
 
 | 項目 | 読むコマンド | 既定 |
 | --- | --- | --- |
-| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
-| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
-| `Defaults` | `--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
-| `WaitForSsm` | `start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
+| `AwsProfile` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--profile`、共通ファイルの `AwsProfile` の順に探す。どれも無ければ AWS のプロファイルを指定せず、資格情報は AWS の既定の規則で決まる |
+| `AwsRegion` | `service list`、`sg list`、`sg add`、`sg remove`、`app list` を除く、`--svc` を付けたすべて。共通ファイルのものは、`--svc` を付けない `instance list`、`ami list`、`ami prune`、`ami delete` も読む | `--region`、共通ファイルの `AwsRegion`、環境変数 `AWS_REGION`、`AWS_DEFAULT_REGION`、AWS のプロファイルの `region` の順に探し、どれも無ければ `ap-northeast-1` |
+| `Defaults` | `app list` を除く、`--svc` を付けたすべて | `true`。`false` なら共通ファイルを読まない。共通ファイルには書けない |
+| `WaitForSsm` | `apply`、`diff`、`start` | `true`。`false` なら、`start` は SSM エージェントを待たない |
 
 **`AwsProfile`。** `<svc>.toml` に書けば、そのサービスはいつもその AWS のプロファイルを
 使う。違う値の `--profile` を付けると、引数の誤りになる。書かなければ、コマンドの
-たびに上の順で決める。`--profile` はその実行のあいだだけ効き、`apply` も
-`service import` もこの項目を書かない。
+たびに上の順で決める。
+
+`apply` の雛形と `service import` が設定ファイルを新しく書くときは、`--profile` か
+環境変数で AWS のプロファイルを選んでいれば、それをこの項目に書く。あとのコマンドは、
+`--profile` や環境変数が無くても同じアカウントを使う。共通ファイルの `AwsProfile` で
+決まるときは書かない。すでにある設定ファイルには書かず、`--profile` はその実行の
+あいだだけ効く。
 
 環境変数 `AWS_PROFILE` は、`--profile` も `AwsProfile` も無いときに使われる。
 `AWS_DEFAULT_PROFILE` と両方に別の値を入れると、temt は `AWS_DEFAULT_PROFILE` を使う。
@@ -327,8 +332,8 @@ Ubuntu の AMI（とそこから焼いた AMI）では、起動するとイン�
 
 #### 別のアカウントやリージョンで使うとき
 
-ファイルにアカウントは書かないので、別のアカウントの AWS のプロファイルを `--profile` に
-付けて `apply` を実行すれば、そのアカウントにサービスを新しく作る。`AwsRegion` を
+`AwsProfile` を書いていなければ、別のアカウントの AWS のプロファイルを `--profile` に
+付けて `apply` を実行すると、そのアカウントにサービスを新しく作る。`AwsRegion` を
 書いていなければ、別のリージョンで `apply` すると、そのリージョンにクローンができる。
 
 どちらの場合も、アカウントやリージョンの中のリソースを指す項目（`SubnetId`、ID で書いた
@@ -357,9 +362,9 @@ Manager 経由だけになる。変えたら `apply` を実行する。動いて
 
 | 項目 | 読むコマンド | 値 |
 | --- | --- | --- |
-| `Protocol` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | `tcp`、`udp`、`icmp` のどれか。既定は `tcp` |
-| `Port` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | ポート。整数（`22`）か、範囲を表す整数 2 つの配列（`[22, 23]`）。0 から 65535。`tcp` と `udp` では必ず書き、`icmp` では書かない |
-| `Cidr` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 送信元の IPv4 か IPv6 の CIDR（`203.0.113.10/32`） |
+| `Protocol` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | `tcp`、`udp`、`icmp` のどれか。既定は `tcp` |
+| `Port` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | ポート。整数（`22`）か、範囲を表す整数 2 つの配列（`[22, 23]`）。0 から 65535。`tcp` と `udp` では必ず書き、`icmp` では書かない |
+| `Cidr` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff`、`set-port` | 送信元の IPv4 か IPv6 の CIDR（`203.0.113.10/32`） |
 | `Description` | `apply`、`diff`、`sg list`、`sg add`、`sg remove`、`sg diff` | 規則の説明。省略できる |
 
 `Protocol`、`Port`、`Cidr` が同じ規則を 2 つ書くことはできない。AWS は規則を
@@ -484,8 +489,8 @@ Resource = [
 ]
 ```
 
-- 1 つ目は SSM エージェントの権限。Session Manager 経由の ssh と、`reboot` と
-  `set-port` が使う Run Command に要る最小のものである。`ec2messages` は要らない。SSM エージェント 3.3.40.0 からは `ssmmessages`
+- 1 つ目は SSM エージェントの権限。Session Manager 経由の ssh と、`reboot`、`set-port`、
+  `app show`、`status --apps` が使う Run Command に要る最小のものである。`ec2messages` は要らない。SSM エージェント 3.3.40.0 からは `ssmmessages`
   を使い、Ubuntu の snap のエージェントは自動で更新される。起動直後の 1 分ほどは、
   エージェントが `ec2messages:GetMessages` も試して拒否され、エージェントのログに
   残るが、動きには関わらない。
@@ -568,6 +573,8 @@ Resource = "arn:aws:s3:::my-bucket/*"
 作る。書くのは次のものだけで、ほかの項目は既定で埋まる。
 
 - 先頭の説明のコメント。
+- `--profile` か環境変数で選んだ AWS のプロファイルの [`AwsProfile`](#最上位)。
+  共通ファイルの `AwsProfile` で決まるときは書かない。
 - temt のインスタンスロールを付ける `IamInstanceProfile.Name = "${temt:name}"`。
 - [`ec2`](#role) の既定。
 - 受信規則とポリシーの例。コメントにしてある。

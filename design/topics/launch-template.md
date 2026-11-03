@@ -180,12 +180,16 @@ reading are aligned first; otherwise every `apply` would make a new version.
   is missing or has a different value, write it, and in that case report the template
   as updated even when the contents are the same.
 - AWS does not fully check the contents when creating a template or version and
-  returns problems as warnings. `apply` and `bake` show each as a warning. When EC2
-  does not see the instance profile yet, `apply` adds that the instance profile exists
-  and IAM has not propagated it to EC2 yet, but only when `[role]` exists and
-  `IamInstanceProfile` points at `<name>`: then it has just reconciled that profile
-  ([commands/instance.md](../commands/instance.md#right-after-apply)). `bake` does not
-  check the instance profile, which may have been deleted by hand, so it adds nothing.
+  returns problems as warnings. `apply` and `bake` show each as a warning, except that
+  `apply` does not show that EC2 does not see the instance profile
+  (`InvalidIamInstanceProfile.NotFound`) when `[role]` exists and `IamInstanceProfile`
+  points at `<name>`: then it has just reconciled that profile, and IAM has not
+  propagated it to EC2 yet; it goes away in seconds
+  ([commands/instance.md](../commands/instance.md#right-after-apply)). A `start` run
+  before that says so itself, so the warning would only worry the user (the requester).
+  Rejected: showing it with a note that the instance profile exists. `bake` does not
+  check the instance profile, which may have been deleted by hand, so it shows the
+  warning.
 - `bake` does not compare: it creates a new version from the default version's content
   with only `ImageId` replaced, and makes it the default. It changes the template only
   after the new AMI is `available`.

@@ -1,9 +1,10 @@
 """temt と一緒に配るアプリ swapfile のテスト。
 
 install と uninstall はインスタンスの上で root で動くので、アプリを一時ディレクトリにコピーし、
-common.sh の /swapfile、/etc/fstab、/proc/meminfo をその中に差し替える。swapon、swapoff、
-mkswap、fallocate、df、systemctl、chown は、呼ばれた引数を書き留めるものに差し替える。swapon は
-使っている swap を状態のファイルに覚えて、--show に答える。
+common.sh の /swapfile、/etc/fstab、/proc/meminfo、/proc/swaps をその中に差し替える。swapon、
+swapoff、mkswap、fallocate、df、systemctl、chown は、呼ばれた引数を書き留めるものに差し替える。
+swapon と swapoff は /proc/swaps の代わりのファイルを書き換え、swapon はそれを読んで --show に
+答える。
 """
 
 import os
@@ -24,6 +25,7 @@ GIB = 1024 * MIB
 FSTAB = (
     "# /etc/fstab: static file system information.\nLABEL=cloudimg-rootfs\t/\text4\tdefaults\t0 1\n"
 )
+SWAPS_HEADER = "Filename Type Size Used Priority\n"
 
 
 @dataclass
@@ -34,7 +36,7 @@ class Box:
     swapfile: Path
     fstab: Path
     meminfo: Path
-    state: Path
+    swaps: Path
     log: Path
     env: dict[str, str]
 
@@ -47,8 +49,18 @@ class Box:
         with self.swapfile.open("wb") as f:
             _ = f.truncate(size)
         self.swapfile.chmod(0o600)
-        _ = self.state.write_text(
-            f"{self.swapfile} {size // MIB}M {used // MIB}M {used}\n", encoding="ascii"
+        _ = self.swaps.write_text(
+            f"{SWAPS_HEADER}{self.swapfile} file {size // 1024} {used // 1024} -2\n",
+            encoding="ascii",
+        )
+
+    def delete_in_use(self, size: int) -> None:
+        """swap に使っている size バイトの swapfile を消した状態にする。/proc/swaps では、
+        名前に (deleted) が付く。
+        """
+        _ = self.swaps.write_text(
+            f"{SWAPS_HEADER}{self.swapfile}\\040(deleted) file {size // 1024} 0 -2\n",
+            encoding="ascii",
         )
 
     def calls(self) -> list[str]:
@@ -68,7 +80,8 @@ class Box:
             text=True,
             check=False,
             env=self.env,
-            cwd="/",
+            # deploy と同じく、アプリのディレクトリで実行する
+            cwd=self.root / "app",
         )
 
 
@@ -79,6 +92,8 @@ def box(tmp_path: Path) -> Box:
     swapfile = tmp_path / "swapfile"
     fstab = tmp_path / "fstab"
     meminfo = tmp_path / "meminfo"
+    swaps = tmp_path / "swaps"
+    _ = swaps.write_text(SWAPS_HEADER, encoding="ascii")
     _ = fstab.write_text(FSTAB, encoding="ascii")
     fstab.chmod(0o644)
     _ = meminfo.write_text(
@@ -86,7 +101,12 @@ def box(tmp_path: Path) -> Box:
     )
     common = copy / "common.sh"
     text = common.read_text(encoding="utf-8")
-    for name, path in (("SWAPFILE", swapfile), ("FSTAB", fstab), ("MEMINFO", meminfo)):
+    for name, path in (
+        ("SWAPFILE", swapfile),
+        ("FSTAB", fstab),
+        ("MEMINFO", meminfo),
+        ("SWAPS", swaps),
+    ):
         text, count = re.subn(rf"^{name}=.*$", f"{name}={path}", text, flags=re.MULTILINE)
         assert count == 1
     _ = common.write_text(text, encoding="utf-8")
@@ -94,20 +114,25 @@ def box(tmp_path: Path) -> Box:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "log"
-    state = tmp_path / "state"
-    state.touch()
     fakes = {
+        # 実物の --show と同じく、名前の (deleted) を取り除き、大きさを単位を付けて出す
         "swapon": f"""case "$*" in
-    "--show=NAME --noheadings --raw") awk '{{print $1}}' "{state}" ;;
-    "--show=NAME,USED --bytes --noheadings --raw") awk '{{print $1, $4}}' "{state}" ;;
-    "--show=NAME,SIZE,USED --noheadings --raw") awk '{{print $1, $2, $3}}' "{state}" ;;
+    "--show=NAME,SIZE,USED --noheadings --raw")
+        awk 'NR > 1 {{
+            sub(/.040.deleted.$/, "", $1)
+            print $1, int($3 / 1024) "M", ($4 ? int($4 / 1024) "M" : "0B")
+        }}' "{swaps}"
+        ;;
     --*) echo "swapon: unexpected arguments: $*" >&2; exit 2 ;;
     *)
         echo "swapon $*" >> "{log}"
-        [ -n "${{UNLISTED:-}}" ] || echo "$1 $(($(stat -c %s "$1") / {MIB}))M 0B 0" >> "{state}"
+        [ -n "${{UNLISTED:-}}" ] || echo "$1 file $(($(stat -c %s "$1") / 1024)) 0 -2" >> "{swaps}"
         ;;
 esac""",
-        "swapoff": f'echo "swapoff $*" >> "{log}"; : > "{state}"',
+        # 実物と同じく、指した名前のものだけを止める
+        "swapoff": f"""echo "swapoff $*" >> "{log}"
+awk -v f="$1" '$1 != f' "{swaps}" > "{swaps}.1"
+mv "{swaps}.1" "{swaps}\"""",
         "mkswap": f'echo "mkswap $*" >> "{log}"; echo "Setting up swapspace"',
         "fallocate": f'echo "fallocate $* umask=$(umask)" >> "{log}"; truncate -s "$2" "$3"',
         "df": f'echo "df $*" >> "{log}"; echo Avail; echo " $AVAIL"',
@@ -123,7 +148,7 @@ esac""",
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "AVAIL": str(6 * GIB),
     }
-    return Box(tmp_path, swapfile, fstab, meminfo, state, log, env)
+    return Box(tmp_path, swapfile, fstab, meminfo, swaps, log, env)
 
 
 def test_the_app_comes_with_temt(home_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,11 +214,10 @@ def test_install_keeps_the_swapfile_in_use_with_the_same_size(box: Box) -> None:
 
 
 def test_install_remakes_a_swapfile_deleted_in_use(box: Box) -> None:
-    """使っているうちに消されたファイルは、/proc/swaps で名前に (deleted) が付く。
-
-    --raw では空白が \\x20 になるので、/swapfile を使っているとはみなさずに作る。
+    """使っているうちに消されたファイルは、/swapfile を使っているとはみなさずに作る。
+    報告するのは新しいファイルの大きさである。
     """
-    _ = box.state.write_text(f"{box.swapfile}\\x20(deleted) 1024M 0B 0\n", encoding="ascii")
+    box.delete_in_use(512 * MIB)
     done = box.run("install")
     assert done.returncode == 0, done.stderr
     assert box.calls()[:4] == [
@@ -203,6 +227,20 @@ def test_install_remakes_a_swapfile_deleted_in_use(box: Box) -> None:
         f"swapon {box.swapfile}",
     ]
     assert done.stdout == f"swapfile: {box.swapfile} 1024M, active, 0B used\n"
+
+
+def test_install_resizes_a_swapfile_made_after_one_was_deleted_in_use(box: Box) -> None:
+    """消されたファイルと新しいファイルの両方が使われていても、新しいほうを止めて作り直す。"""
+    box.delete_in_use(GIB)
+    assert box.run("install").returncode == 0
+    box.log.unlink()
+    done = box.run("install", size="2g")
+    assert done.returncode == 0, done.stderr
+    assert box.calls()[:2] == [
+        f"df --output=avail -B1 {box.root}",
+        f"swapoff {box.swapfile}",
+    ]
+    assert done.stdout == f"swapfile: {box.swapfile} 2048M, active, 0B used\n"
 
 
 def test_install_says_why_when_swapon_does_not_take_the_file(box: Box) -> None:
@@ -281,7 +319,7 @@ def test_install_counts_the_space_of_the_old_swapfile(box: Box) -> None:
     assert done.returncode == 0, done.stderr
     box.env["AVAIL"] = str(2 * GIB - freed - 1)
     _ = box.swapfile.write_bytes(b"\1" * MIB)
-    _ = box.state.write_text("", encoding="ascii")
+    _ = box.swaps.write_text(SWAPS_HEADER, encoding="ascii")
     done = box.run("install")
     assert done.returncode == 1
     assert "not enough disk space" in done.stderr
@@ -337,6 +375,16 @@ def test_uninstall_turns_off_and_removes_the_swapfile(box: Box) -> None:
     assert (done.stdout, done.stderr) == ("", "")
     assert box.calls() == [f"swapoff {box.swapfile}", "systemctl daemon-reload"]
     assert not box.swapfile.exists()
+    assert box.fstab.read_text(encoding="ascii") == FSTAB
+
+
+def test_uninstall_does_not_turn_off_a_swapfile_deleted_in_use(box: Box) -> None:
+    """消されたファイルは swapoff できないので、止めずに fstab の行を外す。"""
+    box.delete_in_use(GIB)
+    _ = box.fstab.write_text(FSTAB + box.line(), encoding="ascii")
+    done = box.run("uninstall")
+    assert done.returncode == 0, done.stderr
+    assert box.calls() == ["systemctl daemon-reload"]
     assert box.fstab.read_text(encoding="ascii") == FSTAB
 
 

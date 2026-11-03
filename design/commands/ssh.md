@@ -27,8 +27,8 @@ There is one Host block per service ([topics/ssh.md](../topics/ssh.md)), so ssh,
 `start` and the others, reaches the instance of the region decided at that time. To be
 connected to two regions at once, the user sets up two services.
 
-When temt itself runs ssh (`deploy` and `app remove`; `set-port` uses Run Command
-instead), it passes the region and profile that command decided to `proxy` in the
+When temt itself runs ssh (`deploy` and `app remove`; `set-port`, `app show`, and
+`status --apps` use Run Command instead), it passes the region and profile that command decided to `proxy` in the
 environment variables `TEMT_PROXY_REGION` and `TEMT_PROXY_PROFILE`, and `proxy` takes
 them at the rank of `--region` and `--profile`, so both look at the same instance. They
 are internal to temt and not in docs/. `AWS_REGION` is not used for this: it ranks
@@ -180,7 +180,8 @@ requester).
 - Before the restart (`sshd -t` refused, or `Port` lines in another file): sshd still
   runs on the previous ports. The configuration on disk stays broken, so the error also
   says not to `reboot`, `stop`, or `bake` until it is fixed, that `ssh -p` with a
-  previous port logs in to fix it, and names the files with `Port` lines.
+  previous port logs in to fix it, and points at the files with `Port` lines, naming
+  them when `Port` lines in another file are the cause.
 - After the restart (not listening): the error says that sshd may listen on no port at
   all (`ssh.socket` drops the whole unit if one bind fails), and adds no way to fix it.
   The requester chose this over keeping a hint (open a shell with Session Manager, or
@@ -194,7 +195,7 @@ are needed only for direct connection (`TEMT_LOGIN=direct`). It changes no rules
 
 - If the service's config file has a rule for the previous port, it lists `sg add` for
   the new port with the same source, `sg remove` for the previous port, and `apply`.
-  Otherwise, only an example `sg add` for the new port.
+  Otherwise, only an example `sg add` for the new port, and `apply`.
 - If an existing rule's port range already includes the new port, it says no rule is
   needed.
 - If the rule for the previous port is in the defaults file, it adds that editing the

@@ -74,6 +74,7 @@ temt は自分の AWS アカウントにリソースを作るので、動いて�
   - swap を足す `swapfile`: [docs/apps/swapfile.md](docs/apps/swapfile.md)
   - タイムゾーンを日本時間にする `timezone-tokyo`:
     [docs/apps/timezone-tokyo.md](docs/apps/timezone-tokyo.md)
+- 変更履歴: [CHANGELOG.md](CHANGELOG.md)
 
 ## 開発に参加する
 

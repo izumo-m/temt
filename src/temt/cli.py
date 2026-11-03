@@ -10,7 +10,6 @@ from temt import conf, msg, options
 from temt.conf import RULE_PORT
 from temt.msg import TemtError, UsageError
 from temt.names import (
-    DEPLOY_KEY,
     INSTANCE_ID_RULE,
     LABEL_RULE,
     PREFIX,
@@ -142,10 +141,9 @@ PORTS_COMMANDS = (SSH_SET_PORT,)
 # --svc を省けるコマンド。付ければ、そのサービスのものだけを扱う。ほかのコマンドは
 # --svc が要る
 OPTIONAL_SERVICE_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, AMI_PRUNE, AMI_DELETE, APP_LIST)
-# AWS を呼ばないコマンド。--profile も --region も取らない
-LOCAL_COMMANDS = (SERVICE_LIST, SG_LIST, SG_ADD, SG_REMOVE)
-# --svc を省いたときだけ AWS を呼ばないコマンド。省けば --profile も --region も取らない
-LOCAL_WITHOUT_SERVICE_COMMANDS = (APP_LIST,)
+# AWS を呼ばないコマンド。--profile も --region も取らない。app list は --svc を付けても
+# 同じ手元のアプリを挙げる。付けるのは、サービスのコマンドから打てるようにするためである
+LOCAL_COMMANDS = (SERVICE_LIST, SG_LIST, SG_ADD, SG_REMOVE, APP_LIST)
 # 受信規則の <ポート> と <CIDR> を取るコマンド
 RULE_COMMANDS = (SG_ADD, SG_REMOVE)
 # 規則の説明を与える --description を取るコマンド
@@ -171,8 +169,8 @@ APP_ARGS = {
     APP_SET: ("app id", KEY_VALUE),
     APP_UNSET: ("app id", "key"),
 }
-# キー deploy を扱えないコマンド。deploy の記録は temt が書く
-RECORD_KEEPING = (APP_SET, APP_UNSET)
+# インスタンスから Run Command で読み、入っているアプリも出す --apps を取るコマンド
+APPS_COMMANDS = (INSTANCE_SHOW,)
 SVC_OPTION = "--svc"
 # 使うプロファイルを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
 # 付けたコマンドでは、設定ファイルに AwsProfile が無いときだけ使い、あれば同じ値でなければ
@@ -192,6 +190,7 @@ YES_OPTION = "--yes"
 BAKE_OPTION = "--bake"
 FORCE_OPTION = "--force"
 RESET_OPTION = "--reset"
+APPS_OPTION = "--apps"
 # 使い方を出して終わるコマンドラインオプション。ほかの引数は読まない。対象より後ろなら、
 # その対象の使い方を出す
 HELP_OPTION = "--help"
@@ -210,7 +209,7 @@ VALUE_OPTIONS = (
     IMAGE_ID_OPTION,
 )
 # 値を取らないコマンドラインオプション
-SWITCH_OPTIONS = (ASYNC_OPTION, YES_OPTION, BAKE_OPTION, FORCE_OPTION, RESET_OPTION)
+SWITCH_OPTIONS = (ASYNC_OPTION, YES_OPTION, BAKE_OPTION, FORCE_OPTION, RESET_OPTION, APPS_OPTION)
 # 値を空にできるコマンドラインオプション。空の --description は説明を消す
 EMPTY_OK_OPTIONS = (DESCRIPTION_OPTION,)
 # 一部のコマンドだけが取るコマンドラインオプションと、それを取るコマンド。--svc、--profile、
@@ -225,6 +224,7 @@ COMMAND_OPTIONS = {
     BAKE_OPTION: BAKE_COMMANDS,
     FORCE_OPTION: FORCE_COMMANDS,
     RESET_OPTION: APP_OPTION_COMMANDS,
+    APPS_OPTION: APPS_COMMANDS,
 }
 # 使い方に書く、動詞より後ろの引数と、そのコマンドだけが取るコマンドラインオプション。
 # --svc は区分から足す
@@ -238,7 +238,7 @@ SYNOPSES = {
     INSTANCE_STOP: "[--async] [--yes]",
     INSTANCE_TERMINATE: "[<id>...] [<options>]",
     INSTANCE_REBOOT: "[--async] [--yes]",
-    INSTANCE_SHOW: "",
+    INSTANCE_SHOW: "[--apps]",
     INSTANCE_LIST: "[--format <columns>]",
     AMI_BAKE: "[--yes]",
     AMI_LIST: "[--format <columns>]",
@@ -268,7 +268,7 @@ REMARKS = {SERVICE_LIST: "(no --profile/--region)"}
 # に関わる注意だけを書く
 NOTES = (
     (
-        tuple(c for c in OPTIONAL_SERVICE_COMMANDS if c not in LOCAL_WITHOUT_SERVICE_COMMANDS),
+        tuple(c for c in OPTIONAL_SERVICE_COMMANDS if c != APP_LIST),
         "[--svc <svc>] may be left out; with it, the command deals only with the\nservice.",
     ),
     (LIST_COMMANDS, "<columns> is a comma-separated list of column names, such as ID,STATE."),
@@ -296,11 +296,12 @@ and any AMI while a launch template version cannot be resolved, unless --force
 is given.""",
     ),
     (
-        LOCAL_WITHOUT_SERVICE_COMMANDS,
+        (APP_LIST,),
         """\
-[--svc <svc>] of app list may be left out; without it, app list lists only the
-apps that app deploy finds by id (in the apps directory beside the config files,
-and those that come with temt), and takes no --profile or --region.""",
+app list lists the apps that app deploy finds by id (in the apps directory
+beside the config files, and those that come with temt), with or without
+--svc, and takes no --profile or --region. instance show --apps lists the apps
+on the running instance.""",
     ),
     ((APP_SET,), "<value> of app set may contain '=' and start with '-'."),
     (
@@ -335,7 +336,7 @@ options of the last deploy unless --reset is given; app show lists them.
 <options> of app deploy and app remove are [--user <user>] [--bake] [--yes], and
 [--reset] for app deploy. --user runs install or uninstall as that user on the
 instance; app deploy defaults to user in manifest.toml, app remove to the user
-that ran install, and both to root.""",
+that ran install or else user in manifest.toml, and both to root.""",
     ),
 )
 # 使い方の、コマンドラインオプションの説明の行
@@ -459,6 +460,8 @@ class Request:
     options: tuple[tuple[str, str | None], ...] = ()
     # --reset。APP_OPTION_COMMANDS だけが取る
     reset: bool = False
+    # --apps。APPS_COMMANDS だけが取る
+    apps: bool = False
     port: int = DEFAULT_PORT
     # PORTS_COMMANDS が取る、sshd が待ち受けるポート。並びは打たれた順
     ports: tuple[int, ...] = ()
@@ -576,24 +579,12 @@ def _service(command: str, typed: str, svc: str | None) -> Service | None:
     return Service(svc)
 
 
-def _is_local(command: str, service: Service | None) -> bool:
-    """AWS を呼ばない実行か。--svc を省いたかどうかで変わるコマンドもある。"""
-    return command in LOCAL_COMMANDS or (
-        service is None and command in LOCAL_WITHOUT_SERVICE_COMMANDS
-    )
-
-
-def _check_options(
-    command: str, typed: str, cli_options: dict[str, str], service: Service | None
-) -> None:
+def _check_options(command: str, typed: str, cli_options: dict[str, str]) -> None:
     """そのコマンドが取らないコマンドラインオプションを誤りとする。"""
-    if _is_local(command, service):
-        why = "it does not call AWS"
-        if command in LOCAL_WITHOUT_SERVICE_COMMANDS:
-            why += f" without {SVC_OPTION}"
+    if command in LOCAL_COMMANDS:
         for option in (PROFILE_OPTION, REGION_OPTION):
             if option in cli_options:
-                raise UsageError(f"{typed}: {option} is not allowed; {why}")
+                raise UsageError(f"{typed}: {option} is not allowed; it does not call AWS")
     for option in cli_options:
         if option in COMMAND_OPTIONS and command not in COMMAND_OPTIONS[option]:
             raise UsageError(f"{typed}: unexpected argument: {option}")
@@ -699,8 +690,6 @@ def _app(command: str, typed: str, words: list[str]) -> tuple[str, str | None, s
             raise UsageError(f"{typed}: give the value as {KEY_VALUE}: {printable(words[1])}")
     if not is_label(key):
         raise UsageError(f"{typed}: the key {LABEL_RULE}: {printable(key)}")
-    if command in RECORD_KEEPING and key == DEPLOY_KEY:
-        raise UsageError(f"{typed}: the key {DEPLOY_KEY} holds the deploy record of temt")
     if value is not None:
         if not value:
             # SSM は空の値を受け付けない
@@ -791,7 +780,7 @@ def parse(args: list[str]) -> Request:
     if problem is not None:
         raise UsageError(f"{typed}: {problem}")
     service = _service(command, typed, cli_options.get(SVC_OPTION))
-    _check_options(command, typed, cli_options, service)
+    _check_options(command, typed, cli_options)
     request = Request(
         command,
         service,
@@ -804,6 +793,7 @@ def parse(args: list[str]) -> Request:
         force=FORCE_OPTION in cli_options,
         user=_user(typed, cli_options.get(USER_OPTION)),
         reset=RESET_OPTION in cli_options,
+        apps=APPS_OPTION in cli_options,
     )
     if command in IMAGE_COMMANDS:
         return replace(request, image=_image(typed, _one(typed, words, "AMI id or name")))
@@ -883,7 +873,7 @@ def _run_service(request: Request) -> None:
     if service is None:
         # parse がサービスを必ず決めるので、振り分けを書き忘れない限り来ない
         raise TemtError(f"{request.command}: missing service")
-    if request.command == APP_LIST or request.command in (*APP_ARGS, *TARGET_COMMANDS):
+    if request.command in (*APP_ARGS, *TARGET_COMMANDS):
         _run_app(request, service)
     elif request.command == SERVICE_APPLY:
         apply.run(service, image=request.image, yes=request.yes)
@@ -900,7 +890,7 @@ def _run_service(request: Request) -> None:
     elif request.command == INSTANCE_REBOOT:
         reboot.run(service, is_async=request.is_async, yes=request.yes)
     elif request.command == INSTANCE_SHOW:
-        status.run(service)
+        status.run(service, apps=request.apps)
     elif request.command == AMI_BAKE:
         bake.run(service, yes=request.yes)
     elif request.command == SERVICE_IMPORT:
@@ -928,9 +918,6 @@ def _run_app(request: Request, service: Service) -> None:
     """app のコマンドを実行する。"""
     from temt import app, deploy
 
-    if request.command == APP_LIST:
-        app.list_apps(service, request.format)
-        return
     app_id, key, value = request.app, request.app_key, request.value
     if app_id is None:
         # parse がアプリ ID を必ず読むので、振り分けを書き忘れない限り来ない
@@ -1016,7 +1003,7 @@ def run(request: Request) -> int:
     if request.command == SSH_PROXY:
         # ProxyCommand の標準出力は ssh の通信路なので、何も書かない
         msg.use_stderr()
-    if _is_local(request.command, request.service):
+    if request.command in LOCAL_COMMANDS:
         # AWS を呼ばないので、boto3 が無くても動くよう、読み込む前に済ませる
         _run_local(request)
         return 0

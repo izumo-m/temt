@@ -1,8 +1,8 @@
 # Config file and AWS environment
 
 The config file `~/.config/temt/<svc>.toml` is the definition of a service. Every
-command with `--svc` reads it; `service list` without `--svc` reads every
-`<svc>.toml`. The format, keys, and defaults are in [docs/conf.md](../docs/conf.md).
+command with `--svc` other than `app list` reads it; `service list` without `--svc`
+reads every `<svc>.toml`. The format, keys, and defaults are in [docs/conf.md](../docs/conf.md).
 
 `apply` writes nothing into an existing config file, as CDK does not rewrite its
 source. The file holds only what differs from the defaults; every value not written is
@@ -15,7 +15,7 @@ The config file holds no ssh route, which depends on the client's network; the
 environment variable `TEMT_LOGIN` gives that ([commands/ssh.md](commands/ssh.md#routes)).
 
 Commands with `--svc` other than `apply` exit when the file is missing, telling the
-user to run `apply`. `destroy` and `service import` are the exceptions
+user to run `apply`. `destroy`, `service import`, and `app list` are the exceptions
 ([cli.md](cli.md#missing-config-file)).
 
 ## Defaults file
@@ -66,9 +66,10 @@ avoid. Hints that tell the user to change a value name the file the value came f
   defaults file itself the key is an error.
 - `service import` does not write `Defaults = false` (the requester: the imported
   service then starts with the credentials and region used for the import). So the
-  defaults file's keys reach an imported service: its `AwsProfile` and `AwsRegion` are
-  used unless `--profile` and `--region` are given (a user whose import region differs
-  writes `AwsRegion` in the config file or passes `--region`); `[launch-template]` items the source lacks are added; ingress rules stop
+  defaults file's keys reach an imported service: its `AwsProfile` is used unless the
+  import wrote one ([Profile](#profile)), and its `AwsRegion` unless `--region` is given
+  (a user whose import region differs writes `AwsRegion` in the config file or passes
+  `--region`); `[launch-template]` items the source lacks are added; ingress rules stop
   `apply`, since the imported `Groups` has no temt security group
   ([topics/security-group.md](topics/security-group.md#when-it-is-created)); a `[role]`
   creates `<name>`, attached only if the service's `IamInstanceProfile` points at it
@@ -102,8 +103,15 @@ temt makes the aws-cli it runs use the same profile and region as its own AWS ca
 Left alone they could differ: boto3 and aws-cli v2 read `AWS_PROFILE` and
 `AWS_DEFAULT_PROFILE` in opposite orders, and boto3 does not read `AWS_REGION`.
 
-`apply` and `service import` do not write `AwsProfile`: `--profile` works for that run
-only, as `--region` does.
+When `apply` writes the scaffold, and when `service import` writes a config file, the
+new file gets `AwsProfile` if the profile was chosen by `--profile` or by the
+environment variable `AWS_DEFAULT_PROFILE` or `AWS_PROFILE` (in boto3's order), so that
+later commands reach the same account without them (the requester). A profile from the
+defaults file is not written, since it applies anyway. Nothing is written into an
+existing config file: there, `--profile` works for that run only. The run that writes
+the file uses the written profile by name as well, so it uses the same credentials as
+later commands even when key environment variables are set, which boto3 would use
+before `AWS_PROFILE`.
 
 ## Region
 
@@ -129,7 +137,7 @@ source instance in the region decided by this order.
 
 Applying the same config file in another region makes a clone of the service there
 ([principles.md](principles.md#assumptions)). Each region has its own launch template,
-security group, instance, and SSM parameters (app values and deploy records); the
+security group, instance, and SSM parameters (app values); the
 instance role and instance profile `<name>` are one pair shared by every region
 ([resources.md](resources.md#instance-profile-and-instance-role)). AMIs are not copied
 by temt: the user copies them by hand under the same name
@@ -174,14 +182,16 @@ none, since AWS answers `default` even when nothing was chosen, and then the
 credentials may come from key environment variables and the like.
 
 The commands that do not call AWS use neither a profile nor a region
-([cli.md](cli.md#grammar)). `app list` without `--svc` reads only `apps/` in the conf
-directory and the bundled apps.
+([cli.md](cli.md#grammar)). `app list`, with or without `--svc`, reads only `apps/` in
+the conf directory and the bundled apps, and no config file.
 
 ## Account
 
 The config file holds no account. The credentials decide which account is used;
-running `apply` with credentials of another account creates the service anew in that
-account. Items written that point at resources inside an account (`SubnetId`,
+without `AwsProfile` in the config file, running `apply` with credentials of another
+account creates the service anew in that account. A config file written with a profile
+chosen by `--profile` or the environment has `AwsProfile` ([Profile](#profile)), so the
+user copies it under another `<svc>` and edits `AwsProfile` there. Items written that point at resources inside an account (`SubnetId`,
 `ImageId`, `Groups` by ID, `IamInstanceProfile` other than `${temt:name}`, `KeyName`,
 ...), however, must be deleted or rewritten first
 ([docs/conf.md](../docs/conf.md#launch-template)).

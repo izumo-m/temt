@@ -199,8 +199,9 @@ COPIED: dict[str, Any] = {
     "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 2},
 }
 
-# 書く設定ファイル。apply と同じく AwsRegion も AwsProfile も書かず、共通ファイルを読む
-# ままにする（Defaults = false も書かない）。SSM に登録されているので WaitForSsm も書かない
+# 書く設定ファイル。AwsRegion は書かず、プロファイルを選んでいないので AwsProfile も書かない。
+# 共通ファイルを読むままにする（Defaults = false も書かない）。SSM に登録されているので
+# WaitForSsm も書かない
 WRITTEN = f"""\
 # Written by temt service import. Edit and run apply to update.
 
@@ -905,10 +906,11 @@ def test_it_does_not_overwrite_a_config_file_made_while_waiting(
     assert text_of(service) == mine
 
 
-def test_it_does_not_write_the_profile_and_the_region_given_on_the_command_line(
+def test_it_writes_the_profile_but_not_the_region_given_on_the_command_line(
     aws_stubs: Stubs, service: Service
 ) -> None:
-    """--profile と --region は、その実行で元のインスタンスを探すのに使い、設定ファイルには
+    """--profile と --region は、その実行で元のインスタンスを探すのに使う。--profile は
+    AwsProfile に書き、取り込んだサービスのあとのコマンドも同じアカウントを使う。--region は
     書かない。
     """
     read(aws_stubs)
@@ -936,7 +938,9 @@ def test_it_does_not_write_the_profile_and_the_region_given_on_the_command_line(
     aws_stubs.done()
     assert aws_stubs.passed[0].AwsProfile == "work"
     assert aws_stubs.passed[0].AwsRegion == "us-west-2"
-    assert text_of(service) == WRITTEN
+    assert text_of(service) == WRITTEN.replace(
+        importing.HEADER, f'{importing.HEADER}AwsProfile = "work"\n'
+    )
 
 
 def test_it_reads_the_defaults_file_and_writes_none_of_it(
@@ -968,10 +972,15 @@ def test_it_reads_the_defaults_file_and_writes_none_of_it(
     assert values.launch_template["InstanceType"] == "t3.small"
 
 
-def test_it_does_not_write_the_profile_from_the_environment(
-    aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
+def test_it_writes_the_profile_from_the_environment(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AWS_PROFILE は手元の環境のものなので、設定ファイルに書かない。"""
+    """プロファイルの環境変数で選んでいれば、AwsProfile に書く。確認の前に見せる設定ファイルにも
+    出る。
+    """
     monkeypatch.setenv("AWS_PROFILE", "from-env")
     read(aws_stubs)
     made(aws_stubs)
@@ -979,7 +988,42 @@ def test_it_does_not_write_the_profile_from_the_environment(
     importing.run(service, SOURCE, yes=True)
 
     aws_stubs.done()
-    assert "AwsProfile" not in text_of(service)
+    # 取り込みも書いたプロファイルで行い、あとのコマンドと同じ資格情報を使う
+    assert aws_stubs.passed[0].AwsProfile == "from-env"
+    assert text_of(service).startswith(f'{importing.HEADER}AwsProfile = "from-env"\n')
+    assert '  AwsProfile = "from-env"\n' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("option", "written"),
+    [
+        # 共通ファイルが環境変数より先なので、書かなくても効く
+        (None, None),
+        # --profile は共通ファイルより先なので書く
+        ("work", "work"),
+    ],
+)
+def test_the_profile_of_the_defaults_file_is_not_written(
+    aws_stubs: Stubs,
+    service: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    option: str | None,
+    written: str | None,
+) -> None:
+    """共通ファイルの AwsProfile で決まるなら書かない。"""
+    defaults_path().parent.mkdir(parents=True)
+    defaults_path().write_text('AwsProfile = "common"\n', encoding="utf-8")
+    monkeypatch.setenv("AWS_PROFILE", "from-env")
+    monkeypatch.setattr(conf, "OPTION_PROFILE", option)
+    read(aws_stubs)
+    made(aws_stubs)
+
+    importing.run(service, SOURCE, yes=True)
+
+    aws_stubs.done()
+    assert aws_stubs.passed[0].AwsProfile == (written or "common")
+    top = f'{importing.HEADER}AwsProfile = "{written}"\n' if written else importing.HEADER + "\n"
+    assert text_of(service).startswith(top)
 
 
 def test_it_stops_when_another_command_holds_the_lock(aws_stubs: Stubs, service: Service) -> None:

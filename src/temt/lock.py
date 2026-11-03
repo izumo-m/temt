@@ -1,5 +1,6 @@
-"""サービスごとのロック。start、stop、terminate、reboot、bake、destroy、deploy、app remove が
-動く前に取る。ami prune は、AMI を 1 つ消すたびに、その AMI のサービスのロックを取る。
+"""サービスごとのロック。start、stop、terminate、reboot、bake、destroy、service import、
+set-port、deploy、app remove が動く前に取る。ami prune は、AMI を 1 つ消すたびに、その AMI の
+サービスのロックを取る。
 
 known_hosts のディレクトリに置くロックファイル .lock に排他ロックを掛ける。取れな
 ければ、他のコマンドが動いていると告げて終了し、待たない。ロックはサービスごとな

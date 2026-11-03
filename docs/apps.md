@@ -4,8 +4,8 @@
 手元でディレクトリを作り、`deploy` で動いているインスタンスに入れて確かめ、`bake` で
 AMI に焼く。焼けば、そのサービスで次に起動するインスタンスにも入っている。
 
-temt がするのは、ディレクトリをインスタンスへ送って `install` を実行し、
-入れた記録を SSM パラメータに書くことだけである。何をどう入れるかは `install` に
+temt がするのは、入れた記録 `temt-deploy.json` を足したディレクトリをインスタンスへ送り、
+`install` を実行することだけである。何をどう入れるかは `install` に
 書く。入れ方と外し方のコマンドは [usage.md](usage.md#アプリを入れる) にある。
 
 ## 最小のアプリ
@@ -34,9 +34,7 @@ description = "インスタンスの中で index.html を返す"
 # hello を入れる。deploy が root で実行する。何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-
-install -m 644 "$here/hello.service" /etc/systemd/system/
+install -m 644 hello.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable hello.service
 systemctl restart hello.service
@@ -109,15 +107,14 @@ WantedBy=multi-user.target
   `~/.config/temt/apps/<アプリID>/`（`TEMT_CONF_DIR` を設定していれば、その下の
   `apps/<アプリID>/`）に置けば、`temt-<svc> deploy hello` のようにアプリ ID だけで
   指せる。ここに無いアプリ ID は、temt と一緒に配るアプリから探す。ここに置いた
-  アプリと temt と一緒に配るアプリは、入れていなくても `app list` に出る。`--svc` を
-  付けない `temt app list` は、これらだけを挙げる。temt と一緒に配るアプリと同じ
+  アプリと temt と一緒に配るアプリは、`app list` に出る。temt と一緒に配るアプリと同じ
   ID のディレクトリを自分で置けば、自分のものが選ばれる。
 - **送られるもの**: ディレクトリは、`.git` などの隠しファイルも含めてまるごと
   送られ、焼けば AMI に残る。送らないファイルを指定する仕組みは無いので、秘密の鍵、
-  `.venv` や `node_modules`、大きなファイルは置かない。中のシンボリックリンクは
-  リンクのまま送られるので、アプリの外を指すものはインスタンスで切れる。
-  `temt-options.env` は temt が足すファイル（[オプション](#オプション)）なので、
-  同じ名前のファイルは置けない。
+  `.venv` や `node_modules`、大きなファイルは置かない。シンボリックリンクは
+  辿られ、その先の中身が送られる。切れたリンクがあれば、何も変えずに止まる。
+  `temt-options.env`（[オプション](#オプション)）と、入れた記録の `temt-deploy.json` は
+  temt が足すファイルなので、同じ名前のファイルは置けない。
 - **持ち主とモード**: ファイルとディレクトリは root の持ち物になる。モードは手元の
   ものから、グループと他人の書き込み、setuid、setgid、sticky ビットを落としたものに
   なる。読み取りの許可はそのままなので、手元で 600 のファイルや 700 のディレクトリは、
@@ -128,9 +125,9 @@ WantedBy=multi-user.target
 
 | 項目 | 必須 | 中身 |
 | --- | --- | --- |
-| `name` | 必須 | 表示するアプリ名。空白や大文字を含んでよい。`app list` に出る |
-| `version` | 必須 | 版。`app list` に出る（最後に入れた版は `VERSION`、AMI に焼いた版は `BAKED`、手元にある版は `LOCAL` の列）。temt は比べないので、同じ版でも `deploy` すれば入れ直す |
-| `description` | 任意 | 説明。`--svc` を付けない `app list` で、`--format` に `DESCRIPTION` を選ぶと出る |
+| `name` | 必須 | 表示するアプリ名。空白や大文字を含んでよい。`app list` と `app show` に出る |
+| `version` | 必須 | 版。手元の版は `app list` の `LOCAL` に、入っている版は `status --apps` の `VERSION` に出る。`deploy` は版を比べないので、同じ版でも `deploy` すれば入れ直す |
+| `description` | 任意 | 説明。`app list` で、`--format` に `DESCRIPTION` を選ぶと出る |
 | `user` | 任意 | `install` を実行するインスタンスのユーザー。省けば root。`deploy --user` で変えられる。`app remove` は、記録を通して同じユーザーで `uninstall` を実行する |
 | `[options.<名前>]` | 任意 | `deploy` で値を変えられるオプションの宣言（[オプション](#オプション)） |
 
@@ -181,11 +178,10 @@ temt は、宣言したすべてのオプションの値を、利用者が与え
 シェルの引用符で囲んだものである。`install` は、これを `.` で読み込む。
 
 ```bash
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-. "$here/temt-options.env"
+. ./temt-options.env
 
 # hello.service の @PORT@ を、与えられたポートにして置く
-sed "s/@PORT@/$TEMT_OPTION_PORT/" "$here/hello.service" >/etc/systemd/system/hello.service
+sed "s/@PORT@/$TEMT_OPTION_PORT/" hello.service >/etc/systemd/system/hello.service
 ```
 
 `pattern` で形を決めていない値は何が来るか分からないので、使うときは
@@ -196,20 +192,21 @@ sed "s/@PORT@/$TEMT_OPTION_PORT/" "$here/hello.service" >/etc/systemd/system/hel
 
 `temt-options.env` はアプリのディレクトリと一緒に入れ替わり、焼けば AMI に残る。
 `uninstall` も同じファイルを読める。インスタンスの上で、`deploy` と同じく、カレント
-ディレクトリを `/` にして、`install` を実行したユーザーで実行すれば、最後に `deploy`
+ディレクトリをアプリのディレクトリにして、`install` を実行したユーザーで実行すれば、最後に `deploy`
 したときと同じ値で入れ直せる。root なら 1 行め、ほかのユーザー（`manifest.toml` の
 `user` か `deploy --user`）なら 2 行めの形である。
 
-    cd / && sudo bash /opt/temt/apps/<アプリID>/install
-    cd / && sudo -H -u <ユーザー> bash /opt/temt/apps/<アプリID>/install
+    cd /opt/temt/apps/<アプリID> && sudo bash install
+    cd /opt/temt/apps/<アプリID> && sudo -H -u <ユーザー> bash install
 
 次の `deploy` は、利用者が前に与えた値を引き継ぐ（[usage.md](usage.md#アプリを入れる)）。
 版を上げて既定を変えれば、利用者が値を与えていないオプションは新しい既定になる。
 オプションを宣言から消せば、前に与えた値は警告とともに捨てられる。`pattern` を
 狭めて前に与えた値が合わなくなると、利用者が値を与え直すまで `deploy` は止まる。
 
-`deploy` は与えた値を暗号化せずに記録に残し、`temt-options.env` は AMI に残って
-インスタンスの誰からも読めるので、パスワードや鍵のような秘密の値はオプションにしない。
+`deploy` は与えた値を記録と `temt-options.env` に書く。どちらも暗号化されず、AMI に
+残ってインスタンスの誰からも読めるので、パスワードや鍵のような秘密の値はオプションに
+しない。
 
 ## `install` と `uninstall`
 
@@ -230,7 +227,7 @@ root 以外で実行するときは、`sudo -n -H -u <ユーザー>` を通す�
   `.bashrc` も読まれない。入れたばかりのコマンドは、`"$HOME/.local/bin/mise"` の
   ようにフルパスで呼ぶ。
 - `systemctl --user` は使えない。
-- `user` を変えて `deploy` し直しても、前のユーザーで入れたものは残る。変えるときは、
+- 入れたあとに `user` を変えて `deploy` し直すと、エラーになる。変えるときは、
   先に `app remove` する。
 
 たとえば、mise を ubuntu のホームに入れるアプリは次のようになる。
@@ -257,8 +254,10 @@ fi
   実行される。アプリを更新するときも同じで、前の版の `uninstall` は実行されない。
   前の版が入れて、新しい版では要らなくなったもの（名前を変えた前のサービスなど）は、
   新しい `install` が消す。
-- **自分のファイルは、スクリプトのあるディレクトリから探す。** カレントディレクトリは `/` なので、
-  `here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")` のように求める。
+- **自分のファイルは、名前だけで指せる。** カレントディレクトリはアプリのディレクトリ
+  なので、`hello.service` や `./common.sh` で届く。`.` で読み込むときは、`./` を付けないと
+  `PATH` から探されるので、`. ./temt-options.env` と書く。途中で `cd` したら、
+  そのあとは相対パスで届かない。
 - **問いかけるコマンドを使わない。** 端末は無く、標準入力は空である。出力は手元に
   そのまま出る。
 - **apt のロックを待つ。** `start` の直後は、起動時の自動更新が apt のロックを
@@ -273,9 +272,8 @@ fi
 - **`/etc/ssh/sshd_config.d/` に `Port` を書かない。** sshd の待ち受けポートは
   `ssh set-port` で変える（[usage.md](usage.md#sshd-のポートを変える)）。アプリが
   `Port` を足すと、`set-port` が失敗する。
-- **失敗したら 0 以外で終わる。** `install` が失敗すると `deploy` も失敗し、記録は書かれず、
-  `--bake` を付けていても焼かれない。更新に失敗したときは、ファイルは新しい版に
-  なっているが、記録は前の版のままである。
+- **失敗したら 0 以外で終わる。** `install` が失敗すると `deploy` も失敗し、`--bake` を
+  付けていても焼かれない。ファイルと記録は新しい版になっている。
 
 `deploy` は途中で失敗しても巻き戻さない。直してもう一度 `deploy` する。Ctrl-C で
 止めても、インスタンスの上の `install` は走り続けることがある。
@@ -314,7 +312,7 @@ S3 などインスタンスの外に置く。インスタンスの中のデー�
 アプリの設定や小さな状態は、SSM パラメータ `/temt-<svc>/<アプリID>/<キー>` に
 置ける。手元からは `app set` と `app get` で読み書きできる
 （[usage.md](usage.md#アプリの値)）。キーは、アプリ ID と同じ規則の名前にする。
-キー `deploy` は temt が記録に使うので、アプリは書かない。値は 4 KB までで、
+値は 4 KB までで、
 `destroy` で消える。
 
 自分のサービスの階層 `/temt-<svc>` の値は、権限を足さずに読み書きできる。設定ファイルの
@@ -350,11 +348,9 @@ imds tags/instance/temt:service >/dev/null || {
 }
 ```
 
-手元から値を書けるのは、`deploy` が記録を書いたあとである。`app set` は、記録の
-無いアプリには書かない。記録は `install` が成功してから書かれるので、初めて
-`deploy` するときの `install` と、そのとき起動するサービスは、値が無いまま動く。
-`install` は値に頼らず、サービスは値が無ければ既定で動くか、待って読み直すように
-書く。
+`app set` は、アプリを入れる前でも値を書ける。ただ、値が無いまま入れられることも
+あるので、`install` は値に頼らず、サービスは値が無ければ既定で動くか、待って読み直す
+ように書く。
 
     temt-<svc> app set hello greeting=hi
 

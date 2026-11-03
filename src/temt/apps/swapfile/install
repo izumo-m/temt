@@ -3,10 +3,9 @@
 # 実行する。何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 # deploy のオプション。TEMT_OPTION_SIZE は、deploy のオプション size の値
-. "$here/temt-options.env"
-. "$here/common.sh"
+. ./temt-options.env
+. ./common.sh
 
 # fstab に書く行。nofail を付けるので、ファイルが壊れていても swap.target は失敗の扱いに
 # ならない。付けなくても起動は止まらない
@@ -68,8 +67,9 @@ chown root:root "$SWAPFILE"
 chmod 600 "$SWAPFILE"
 set_fstab "$FSTAB_LINE"
 
+# 使っているうちに消されたファイルがあれば、同じ名前で先に出るので、最後の行を読む
 if ! read -r total used < <(swapon --show=NAME,SIZE,USED --noheadings --raw |
-    awk -v f="$SWAPFILE" '$1 == f {print $2, $3}'); then
+    awk -v f="$SWAPFILE" '$1 == f {found = $2 " " $3} END {if (found != "") print found}'); then
     echo "install: $SWAPFILE is not in use as swap after swapon" >&2
     exit 1
 fi

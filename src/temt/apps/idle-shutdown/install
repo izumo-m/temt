@@ -2,17 +2,16 @@
 # idle-shutdown を入れる。deploy が root で実行する。何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 # deploy のオプション。TEMT_OPTION_LIMIT は、deploy のオプション limit の値
-. "$here/temt-options.env"
+. ./temt-options.env
 
 # 判定の結果を SSM パラメータに書くのに、インスタンスメタデータのタグ temt:service から
 # サービス名を読む。読めなければ、直し方を告げて、何も入れずに失敗する
-python3 -I "$here/idle_shutdown.py" service
+python3 -I idle_shutdown.py service
 
 # deploy で決めた制限時間を、/etc/idle-shutdown/limit に置く。期間は本体が検査するので、
 # aws-cli や本体などを入れる前に、送られた本体で行う。通らなければ、何も入れずに失敗する
-python3 -I "$here/idle_shutdown.py" limit --deploy "$TEMT_OPTION_LIMIT"
+python3 -I idle_shutdown.py limit --deploy "$TEMT_OPTION_LIMIT"
 
 # 判定の結果を SSM パラメータに書く aws-cli。本体が探す場所に無ければ snap で入れる。
 # 起動直後は snapd の初期化（seed）が終わっていないことがあるので、先に待つ。
@@ -22,13 +21,13 @@ if [ ! -x /snap/bin/aws ] && [ ! -x /usr/local/bin/aws ] && [ ! -x /usr/bin/aws 
     snap install aws-cli --classic
 fi
 
-install -m 755 "$here/idle_shutdown.py" /usr/local/bin/idle-shutdown
-install -m 644 "$here/idle-shutdown.service" "$here/idle-shutdown.timer" /etc/systemd/system/
-install -m 644 "$here/tmpfiles.conf" /etc/tmpfiles.d/idle-shutdown.conf
-install -m 644 "$here/pam-config" /usr/share/pam-configs/idle-shutdown
+install -m 755 idle_shutdown.py /usr/local/bin/idle-shutdown
+install -m 644 idle-shutdown.service idle-shutdown.timer /etc/systemd/system/
+install -m 644 tmpfiles.conf /etc/tmpfiles.d/idle-shutdown.conf
+install -m 644 pam-config /usr/share/pam-configs/idle-shutdown
 # ログインのメッセージに状態を出す
-install -D -m 755 "$here/motd" /etc/update-motd.d/60-idle-shutdown
-install -m 644 "$here/sshd.conf" /etc/ssh/sshd_config.d/idle-shutdown.conf
+install -D -m 755 motd /etc/update-motd.d/60-idle-shutdown
+install -m 644 sshd.conf /etc/ssh/sshd_config.d/idle-shutdown.conf
 # 他のアプリが使用中の判定を置く。中身は他のアプリのもの
 install -d -m 755 /etc/idle-shutdown/in-use.d
 

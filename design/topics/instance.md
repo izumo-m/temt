@@ -15,7 +15,7 @@ anything, so it may hold any value (an imported service may keep the source's `N
 
 - `start`, `stop`, `terminate`, `reboot`, `bake`, `destroy`, `set-port`, `deploy`,
   `app remove` find after taking the lock.
-- `proxy`, `status`, and `app list` find without taking the lock. `proxy` also decides
+- `proxy`, `status`, and `app show` find without taking the lock. `proxy` also decides
   where to connect from this result.
 
 `describe-instances` lags `run-instances` by a few seconds. `start --async` releases the

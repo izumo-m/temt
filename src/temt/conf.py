@@ -889,12 +889,20 @@ def common_profile() -> dict[str, Any] | None:
     return found[1].launch_template.get(ltdata.PROFILE)
 
 
-def scaffold(*, profile: bool, ec2: bool) -> str:
-    """雛形の中身。profile なら IamInstanceProfile を、ec2 なら [[role.ec2]] の既定を書く。
+def scaffold(*, profile: bool, ec2: bool, aws_profile: str | None = None) -> str:
+    """雛形の中身。aws_profile があれば AwsProfile を、profile なら IamInstanceProfile を、
+    ec2 なら [[role.ec2]] の既定を書く。
 
     先頭の説明と、末尾の受信規則とポリシーの例は、いつも書く。
     """
-    return HEADER + (SCAFFOLD_PROFILE if profile else "") + (EC2_DEFAULT if ec2 else "") + EXAMPLE
+    top = f"\nAwsProfile = {toml_value(aws_profile)}\n" if aws_profile else ""
+    return (
+        HEADER
+        + top
+        + (SCAFFOLD_PROFILE if profile else "")
+        + (EC2_DEFAULT if ec2 else "")
+        + EXAMPLE
+    )
 
 
 def create(service: Service, text: str) -> None:

@@ -167,9 +167,10 @@ neither, or exceeds 365 days is ignored with a warning. A redeploy does not remo
 | `idle-shutdown limit <duration>` | Required | Set the limit until reboot: `90m`, `4h`, `1d`, `3600` (seconds), `off`, or `default` (remove the until-reboot limit and return to the deploy one). Then print the limit and write the result of a check like `-n` (own session counted) to the SSM parameter |
 | `idle-shutdown limit --deploy <duration>` | Required | Set the deploy limit. For `install` only. Durations as `limit <duration>` without `default`. No check, no SSM write |
 | `idle-shutdown report` | Required | Write the result of a check like `-n` (own session counted) to the SSM parameter. For `install` only |
+| `idle-shutdown service` | No | Check that the tag `temt:service` can be read from the instance metadata; if not, fail saying how to fix it. For `install` only |
 | `idle-shutdown touch [<name>]` | No | Touch `root/<name>` as root, else `touch/<name>`. `<name>` defaults to the caller's user name |
 
-`limit --deploy`, `report`, and `status --login` are not shown in `--help`.
+`limit --deploy`, `report`, `service`, and `status --login` are not shown in `--help`.
 
 Durations: digits with an optional unit `s`, `m`, `h`, `d`; 0 and more than 365 days are
 refused. The limit is shown as `1d2h`, `1h30m`, `45s`. The source is `set until reboot`,
@@ -262,7 +263,7 @@ message produced when the master was opened. In Ubuntu's default `/etc/pam.d/ssh
 `root/pam` when the script runs.
 
 `/etc/update-motd.d/60-idle-shutdown` prints an empty line, the heading
-`idle-shutdown (sudo idle-shutdown limit 4h to change):`, and the output of
+`idle-shutdown (idle-shutdown --help for usage):`, and the output of
 `idle-shutdown status --login`, each line (warnings from stderr included) indented by
 two spaces. Warnings come before the state lines, since `status` checks everything
 before printing. If the program is missing, it prints nothing.

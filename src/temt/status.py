@@ -1,11 +1,12 @@
 """instance show（短縮形 status）と instance list の本体。
 
 instance show は、起動テンプレートの有無、サービスのインスタンス、そのパブリック
-IPv4 アドレス、SSM エージェントの状態、焼いていないアプリ、アプリが SSM パラメータ
+IPv4 アドレス、SSM エージェントの状態、アプリが SSM パラメータ
 /<名前>/<アプリID>/status に書いた状態を表示する。状態のうち、今動いている
-インスタンスが書いたとみなせないものには印を付ける。インスタンスが 2 台以上あれば
-警告する。表示するだけなので、ロックは取らない。テンプレートが無くても止めず、
-apply されていないことを表示する。
+インスタンスが書いたとみなせないものには印を付ける。--apps を付ければ、動いている
+インスタンスから Run Command で読み、入っているアプリも表示する（remote）。数秒かかる
+ので、付けなければ読まない。インスタンスが 2 台以上あれば警告する。表示するだけなので、
+ロックは取らない。テンプレートが無くても止めず、apply されていないことを表示する。
 
 instance list は、temt のインスタンス（temt:service タグを持ち、terminated でない
 もの）を 1 台 1 行の表で挙げる。docker の ps にあたる。SSM は見ない。
@@ -19,7 +20,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from temt import app, aws, conf, instances, msg, resources, table
+from temt import app, aws, conf, instances, msg, remote, resources, table
+from temt.manifest import find_app, read_manifest
+from temt.msg import TemtError
 from temt.names import STATUS_KEY, is_label
 
 if TYPE_CHECKING:
@@ -31,16 +34,18 @@ if TYPE_CHECKING:
 
     from temt.instances import Instance
     from temt.names import Service
+    from temt.remote import Installed
 
 # エージェントが一度も登録していないインスタンスの表示
 NOT_REGISTERED = "(not registered)"
 # パブリック IPv4 アドレスが付いていないインスタンスの表示
 NO_ADDRESS = "(none)"
-# 焼いていないアプリの行の、すべて焼いてあるときと、記録が 1 つも無いときの表示
-ALL_BAKED = "all baked"
+# 入っているアプリの行のラベルと、1 つも無いときの表示、表の見出し
+APPS = "apps"
 NO_APPS = "none"
-# 焼かずに外したアプリに添える説明
-REMOVED_NOTE = " (still in the AMI; bake to drop it)"
+APP_COLUMNS = ("ID", "VERSION", "BAKED", "DEPLOYED")
+# VERSION の後ろに付ける、アプリ ID で使える手元のアプリの版がそれと違うことの印
+CHANGED = "*"
 # アプリの状態の行のラベルと、1 つも無いときの表示
 APP_STATUS = "app status"
 NO_APP_STATUS = "none"
@@ -80,13 +85,12 @@ def _line(label: str, value: str) -> None:
     msg.tell(f"{label + ':':<12}{value}\n")
 
 
-def _show_template(ec2: EC2Client, service: Service) -> bool:
-    """起動テンプレートの有無を表示し、あるかを返す。無ければ apply されていない。"""
+def _show_template(ec2: EC2Client, service: Service) -> None:
+    """起動テンプレートの有無を表示する。無ければ apply されていない。"""
     if resources.has_template(ec2, service):
         _line("template", service.launch_template)
-        return True
+        return
     _line("template", f"none (not applied; run 'temt apply --svc {service.svc}')")
-    return False
 
 
 def _show_instances(ssm: SSMClient, found: list[Instance]) -> None:
@@ -101,22 +105,62 @@ def _show_instances(ssm: SSMClient, found: list[Instance]) -> None:
         _line("ssm-agent", pings.get(one.id, NOT_REGISTERED))
 
 
-def apps_line(found: list[tuple[str, dict[str, str]]], where: app.Place) -> str:
-    """焼いていないアプリの行の値。unbaked、lost、removed のアプリを、その順に挙げる。
+def _local_version(app_id: str) -> str | None:
+    """アプリ ID で使える手元のアプリの版。無いか読めなければ None。"""
+    path = find_app(app_id)
+    if path is None:
+        return None
+    try:
+        return read_manifest(path).version
+    except TemtError as e:
+        msg.warn(f"cannot read the manifest of {app_id}: {e}")
+        return None
 
-    removed には、AMI に残っていることを添える。どれも無ければ、焼いたアプリがあれば
-    ALL_BAKED、無ければ NO_APPS。焼いたかどうか分からない記録は数えない。
+
+def app_rows(found: dict[str, Installed], instance_id: str) -> list[list[str]]:
+    """入っているアプリの表の行。見出しは含まない。
+
+    VERSION は、アプリ ID で使える手元のアプリの版と違えば CHANGED を付ける。deploy して
+    焼けば更新になることが分かる。版は同じかどうかだけを比べる。BAKED は記録の instance
+    から決める（remote.baked）。値はインスタンスから来るので、表示できない文字を置き換える。
     """
-    states = [(app_id, app.state(record, where)) for app_id, record in found]
-    groups = [
-        f"{label} {', '.join(app_id for app_id, one in states if one == label)}"
-        + (REMOVED_NOTE if label == app.REMOVED else "")
-        for label in (app.UNBAKED, app.LOST, app.REMOVED)
-        if any(one == label for _, one in states)
-    ]
-    if groups:
-        return "; ".join(groups)
-    return ALL_BAKED if any(one == app.BAKED for _, one in states) else NO_APPS
+    rows: list[list[str]] = []
+    for app_id, installed in found.items():
+        version = installed.manifest.version if installed.manifest is not None else None
+        shown = table.printable(version) if version else table.EMPTY
+        local = _local_version(app_id)
+        if version and local is not None and local != version:
+            shown += CHANGED
+        record = installed.record
+        deployed = ""
+        if record is not None and record.readable:
+            deployed = record.fields.get("deployed", "")
+        deployed = aws.cell_time(deployed) or table.printable(deployed) or table.EMPTY
+        rows.append([app_id, shown, remote.baked(record, instance_id), deployed])
+    return rows
+
+
+def _show_apps(ssm: SSMClient, found: list[Instance]) -> None:
+    """--apps のとき、running のインスタンスがちょうど 1 台あれば、入っているアプリを表で出す。
+
+    Run Command で読む（remote）。読めなければ、読まない理由を出す。読み取りに失敗すれば
+    警告して続ける。
+    """
+    one, why = remote.readable(ssm, found)
+    if one is None:
+        _line(APPS, f"(not read; {why})")
+        return
+    try:
+        installed = remote.read_apps_by_command(ssm, one)
+    except TemtError as e:
+        msg.warn(str(e))
+        _line(APPS, f"(not read; cannot read {one.id})")
+        return
+    if not installed:
+        _line(APPS, NO_APPS)
+        return
+    msg.tell(f"{APPS}:\n")
+    msg.columns([list(APP_COLUMNS), *app_rows(installed, one.id)])
 
 
 def age(modified: Any, now: datetime) -> str:
@@ -193,24 +237,21 @@ def _show_app_statuses(ssm: SSMClient, service: Service, found: list[Instance]) 
         msg.tell(f"  {app_id:<{width}}  {value}  [{when}]\n")
 
 
-def run(service: Service) -> None:
-    """サービスの今の状態を表示する。"""
+def run(service: Service, *, apps: bool = False) -> None:
+    """サービスの今の状態を表示する。apps なら、入っているアプリも表示する。"""
     values = conf.load(service)
     session = aws.session(values)
     ec2 = session.client("ec2")
     ssm = session.client("ssm")
-    applied = _show_template(ec2, service)
+    _show_template(ec2, service)
     found = instances.find(ec2, service)
     _show_instances(ssm, found)
     # 終了の途中のものは数えない。余分なものは ID を指して終了させる
     count = len(instances.remaining(found))
     if count > 1:
         msg.warn(instances.extra(service, count))
-    # 焼いたかは起動テンプレートの AMI と比べて決めるので、テンプレートが無ければ出さない
-    if applied:
-        where = app.place(resources.default_image(ec2, service), found)
-        deployed = [(app_id, record.fields) for app_id, record in app.records(ssm, service)]
-        _line("apps", apps_line(deployed, where))
+    if apps:
+        _show_apps(ssm, found)
     _show_app_statuses(ssm, service, found)
 
 

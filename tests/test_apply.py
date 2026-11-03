@@ -2124,7 +2124,7 @@ def test_the_option_is_not_written_as_the_profile(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--profile はその実行のあいだだけ効き、設定ファイルには書かない。"""
+    """既にある設定ファイルには、--profile を書かない。その実行のあいだだけ効く。"""
     monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
     before = write_conf(service)
     make_key()
@@ -2139,13 +2139,85 @@ def test_the_option_is_not_written_as_the_profile(
     assert "--profile" not in (ssh_dir() / "config").read_text(encoding="utf-8")
 
 
-def test_the_scaffold_stays_when_a_resource_fails(
+def test_the_scaffold_writes_the_profile_given_by_the_option(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新しいサービスの雛形には、--profile を AwsProfile に書く。共通ファイルの AwsProfile
+    より --profile が先なので、共通ファイルにあっても書く。確認の前に、書く値を見せる。
+    """
+    write_defaults('AwsProfile = "common"\n')
+    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    made_from_scratch(aws_stubs)
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    written = conf.scaffold(profile=True, ec2=True, aws_profile="work")
+    assert service.conf_path.read_text(encoding="utf-8") == written
+    assert aws_stubs.passed[0].AwsProfile == "work"
+    out = capsys.readouterr().out
+    assert [head for head in heads(out) if head[1] == "conf"][0] == ["+", "conf", "AwsProfile"]
+    assert details(out, "conf")[0] == '+ "work"'
+
+
+@pytest.mark.parametrize(
+    ("env", "written"),
+    [
+        ({"AWS_PROFILE": "work"}, "work"),
+        ({"AWS_DEFAULT_PROFILE": "work"}, "work"),
+        # boto3 と同じく AWS_DEFAULT_PROFILE が先
+        ({"AWS_PROFILE": "other", "AWS_DEFAULT_PROFILE": "work"}, "work"),
+    ],
+)
+def test_the_scaffold_writes_the_profile_from_the_environment(
+    aws_stubs: Stubs,
+    service: Service,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    written: str,
+) -> None:
+    """プロファイルの環境変数で選んでいれば、雛形の AwsProfile に書く。作ったサービスの
+    あとのコマンドは、環境変数が無くても同じアカウントを使う。この実行も書いた
+    プロファイルを使う。
+    """
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    made_from_scratch(aws_stubs)
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    text = service.conf_path.read_text(encoding="utf-8")
+    assert text == conf.scaffold(profile=True, ec2=True, aws_profile=written)
+    assert aws_stubs.passed[0].AwsProfile == written
+    assert details(capsys.readouterr().out, "conf")[0] == f'+ "{written}"'
+
+
+def test_the_scaffold_leaves_the_profile_of_the_common_file_out(
     aws_stubs: Stubs, service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """雛形は更新の最初に書くので、手順 5 の更新で止まっても残る。AwsProfile も AwsRegion も
-    書かない。鍵は手順 6 で作るので、まだ作らない。
+    """共通ファイルの AwsProfile で決まるなら、書かなくても効くので書かない。環境変数より
+    共通ファイルが先なので、環境変数があっても書かない。
     """
-    monkeypatch.setattr(conf, "OPTION_PROFILE", "work")
+    write_defaults('AwsProfile = "common"\n')
+    monkeypatch.setenv("AWS_PROFILE", "work")
+    made_from_scratch(aws_stubs)
+
+    apply.run(service, yes=True)
+
+    aws_stubs.done()
+    assert service.conf_path.read_text(encoding="utf-8") == SCAFFOLD
+    assert aws_stubs.passed[0].AwsProfile == "common"
+
+
+def test_the_scaffold_stays_when_a_resource_fails(aws_stubs: Stubs, service: Service) -> None:
+    """雛形は更新の最初に書くので、手順 5 の更新で止まっても残る。鍵は手順 6 で作るので、
+    まだ作らない。
+    """
     chosen(aws_stubs)
     built(aws_stubs, group=None, read_image=False)
     validated(aws_stubs, EC2_POLICY)

@@ -43,7 +43,7 @@ behavior and is not to be changed.
 
 AMI names must be unique within the account and region. Baking the same service twice
 within the same minute makes the second creation fail on the duplicate name; temt
-shows AWS's error and adds no hint on what to do next.
+says that an AMI of that name exists and adds no hint on what to do next.
 
 `bake` does not delete old AMIs; [`ami prune`](../commands/ami.md#ami-prune) and
 [`ami delete`](../commands/ami.md#ami-delete) do. `ami prune` deregisters the AMIs

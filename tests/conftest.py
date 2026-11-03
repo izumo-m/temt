@@ -1,12 +1,16 @@
 """テストで共通に使う下ごしらえ。"""
 
+import base64
 import fcntl
+import io
+import json
 import signal
+import tarfile
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from types import FrameType
@@ -23,7 +27,7 @@ from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 from types_boto3_sts.client import STSClient
 
-from temt import aws, conf, ingress, lock, msg, names, wait
+from temt import aws, conf, ingress, lock, msg, names, proc, wait
 from temt.conf import Conf
 from temt.names import Service
 
@@ -441,3 +445,119 @@ def deadline(seconds: float) -> Generator[None]:
     finally:
         _ = signal.setitimer(signal.ITIMER_REAL, 0)
         _ = signal.signal(signal.SIGALRM, previous)
+
+
+# インスタンスの上のアプリを読むテストで、ssh がつながる先
+REACHED = "i-0123456789abcdef0"
+
+
+def apps_archive(apps: Mapping[str, Mapping[str, str | bytes]]) -> bytes:
+    """インスタンスの上のアプリを読む remote.READ_SCRIPT の出力の代わり。
+
+    apps はアプリ ID から、そのディレクトリのファイル名と中身への対応。ディレクトリも
+    項目として入れる。空なら、アプリが 1 つも無いときの空の出力とする。
+    """
+    if not apps:
+        return b""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for app_id, files in apps.items():
+            folder = tarfile.TarInfo(f"./{app_id}")
+            folder.type = tarfile.DIRTYPE
+            tar.addfile(folder)
+            for name, body in files.items():
+                data = body.encode() if isinstance(body, str) else body
+                info = tarfile.TarInfo(f"./{app_id}/{name}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def a_manifest(version: str, *, user: str | None = None) -> str:
+    """インスタンスの上の manifest.toml。"""
+    text = f'name = "Jupyter Lab"\nversion = "{version}"\n'
+    return text + (f'user = "{user}"\n' if user else "")
+
+
+def a_record(instance: str, **more: Any) -> str:
+    """インスタンスの上の deploy の記録。more は足すか置き換える項目。"""
+    found = {"user": "root", "deployed": "2026-09-27T03:04:05Z", "instance": instance, **more}
+    return json.dumps(found, ensure_ascii=False)
+
+
+@dataclass
+class Remote:
+    """インスタンスの上のアプリを読む ssh の代わり。
+
+    reached はつながる先のインスタンス ID で、None ならつながらない。apps はインスタンスの
+    上のアプリ（apps_archive）で、code が 0 でなければ、読み取りがその終了コードで失敗する。
+    """
+
+    apps: dict[str, dict[str, str | bytes]] = field(default_factory=dict)
+    reached: str | None = REACHED
+    code: int = 0
+    # 読み取りで渡されたコマンドライン
+    reads: list[list[str]] = field(default_factory=list)
+
+    def read(self, argv: list[str], *, env: Mapping[str, str] | None = None) -> tuple[int, str]:
+        _ = env
+        if self.reached is None:
+            return 255, ""
+        return 0, f"{self.reached}\n"
+
+    def capture(
+        self, argv: list[str], *, env: Mapping[str, str] | None = None
+    ) -> tuple[int, bytes]:
+        _ = env
+        self.reads.append(argv)
+        if self.code:
+            return self.code, b""
+        return 0, apps_archive(self.apps)
+
+
+@pytest.fixture
+def remote_apps(monkeypatch: pytest.MonkeyPatch) -> Remote:
+    """ssh を Remote に差し替える。"""
+    fake = Remote()
+    monkeypatch.setattr(proc, "read", fake.read)
+    monkeypatch.setattr(proc, "capture", fake.capture)
+    monkeypatch.setattr(proc, "require", lambda command: command)
+    return fake
+
+
+# Run Command で読むときの、送ったコマンドの ID
+COMMAND_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def online(stubs: Stubs, instance: str, ping: str = "Online") -> None:
+    """Run Command で読む前に確かめる、SSM エージェントの状態。"""
+    stubs.ssm.add_response(
+        "describe_instance_information",
+        {"InstanceInformationList": [{"InstanceId": instance, "PingStatus": ping}]},
+        {"Filters": [{"Key": "InstanceIds", "Values": [instance]}]},
+    )
+
+
+def commanded(
+    stubs: Stubs,
+    instance: str,
+    apps: Mapping[str, Mapping[str, str | bytes]],
+    *,
+    status: str = "Success",
+    error: str = "",
+    output: str | None = None,
+) -> None:
+    """Run Command でインスタンスの上のアプリ（apps_archive）を読む応答を積む。
+
+    SSM エージェントが Online で、送ったコマンドが status で終わる。output を与えれば、
+    標準出力をそれにする。
+    """
+    online(stubs, instance)
+    stubs.ssm.add_response("send_command", {"Command": {"CommandId": COMMAND_ID}})
+    if output is None:
+        output = base64.b64encode(apps_archive(apps)).decode()
+    stubs.ssm.add_response(
+        "get_command_invocation",
+        {"Status": status, "StandardOutputContent": output, "StandardErrorContent": error},
+        {"CommandId": COMMAND_ID, "InstanceId": instance},
+    )

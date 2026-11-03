@@ -97,8 +97,7 @@ avoid the ones marked "not".
 | app ID, `<app ID>` | アプリ ID、`<アプリID>` | No space inside the placeholder |
 | bundled app | temt と一緒に配るアプリ | Under `src/temt/apps/` |
 | deploy, remove (an app) | 入れる、外す | |
-| removed without baking (`removed`) | 焼かずに外した | Still in the AMI until baked |
-| deploy record | 記録、`deploy` の記録 | SSM parameter `/<name>/<app ID>/deploy` |
+| deploy record | 記録、`deploy` の記録 | `/opt/temt/apps/<app ID>/temt-deploy.json` on the instance |
 | app value | アプリの値 | SSM parameter `/<name>/<app ID>/<key>` |
 | app status | アプリの状態 | SSM parameter `/<name>/<app ID>/status` |
 | key (of an app value), `<key>` | キー、`<キー>` | Not 項目 |

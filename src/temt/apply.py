@@ -47,17 +47,22 @@ TEMT_PROFILE_NAME = "${temt:name}"
 class ConfDiff:
     """手順 2 の差分。設定ファイルが無いときに書く雛形。
 
-    text は書く雛形の中身で、ファイルがあれば None。profile と ec2 は、雛形が
-    IamInstanceProfile と [[role.ec2]] の既定を書くか。
+    text は書く雛形の中身で、ファイルがあれば None。aws_profile は雛形が書く AwsProfile。
+    profile と ec2 は、雛形が IamInstanceProfile と [[role.ec2]] の既定を書くか。
     """
 
     text: str | None = None
+    aws_profile: str | None = None
     profile: bool = False
     ec2: bool = False
 
     def changes(self) -> list[Change]:
         """diff に出す形にする。雛形が書く値を、設定ファイルの位置で挙げる。"""
         found: list[Change] = []
+        if self.aws_profile:
+            found.append(
+                Change(ADD, CONF, "AwsProfile", printable(conf.toml_value(self.aws_profile)))
+            )
         if self.profile:
             key = conf.launch_template_key(f"{ltdata.PROFILE}{conf.SEPARATOR}Name")
             found.append(Change(ADD, CONF, key, printable(conf.toml_value(TEMT_PROFILE_NAME))))
@@ -69,14 +74,16 @@ class ConfDiff:
 def _scaffold(service: Service) -> ConfDiff:
     """手順 2。設定ファイルの代わりに読む雛形を決める。
 
+    --profile か環境変数でプロファイルを選んでいれば、AwsProfile に書く（aws.written_profile）。
     共通ファイルに IamInstanceProfile があれば、その行は書かず、共通ファイルの値を使う。
     [[role.ec2]] の既定は、IamInstanceProfile が temt のインスタンスプロファイルを指すとき
     だけ書く。ほかのものを指していれば、使われない <名前> を作らないよう書かない。
     """
+    aws_profile = aws.written_profile()
     common = conf.common_profile()
     ec2 = common is None or ltbuild.points_at_temt({ltdata.PROFILE: common}, service)
-    text = conf.scaffold(profile=common is None, ec2=ec2)
-    return ConfDiff(text, profile=common is None, ec2=ec2)
+    text = conf.scaffold(profile=common is None, ec2=ec2, aws_profile=aws_profile)
+    return ConfDiff(text, aws_profile=aws_profile, profile=common is None, ec2=ec2)
 
 
 def _check_profile(service: Service, values: Conf) -> None:

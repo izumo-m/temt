@@ -219,15 +219,16 @@ def test_target_and_verb_rejected(args: list[str], message: str) -> None:
 
 @pytest.mark.parametrize("args", [["status", *SVC], ["instance", "show", *SVC]])
 def test_main_runs_instance_show(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
-    """status と instance show は、同じ表示を通す。"""
-    seen: list[Service] = []
+    """status と instance show は、同じ表示を通す。--apps を付ければ、入っているアプリも出す。"""
+    seen: list[tuple[Service, bool]] = []
 
-    def remember(service: Service) -> None:
-        seen.append(service)
+    def remember(service: Service, *, apps: bool) -> None:
+        seen.append((service, apps))
 
     monkeypatch.setattr(status, "run", remember)
     assert cli.main(["temt", *args]) == 0
-    assert seen == [Service("dev-main")]
+    assert cli.main(["temt", *args, "--apps"]) == 0
+    assert seen == [(Service("dev-main"), False), (Service("dev-main"), True)]
 
 
 def test_no_profile_option() -> None:
@@ -723,11 +724,12 @@ def test_the_usage_of_a_target_has_only_its_notes() -> None:
     assert "<options> of app" not in text
     assert "ami delete refuses" not in text
     assert "<columns> is" not in cli.usage("template")
-    # app list は --svc を省くと扱うものが変わるので、ほかの省けるコマンドの注意は書かない
+    # app list は --svc を付けても扱うものが変わらないので、ほかの省けるコマンドの注意は書かない
     text = cli.usage("app")
-    assert "[--svc <svc>] of app list may be left out" in text
+    assert "app list lists the apps that app deploy finds by id" in text
     assert "with it, the command deals only with" not in text
-    assert "[--svc <svc>] of app list" not in cli.usage("instance")
+    assert "app list lists" not in cli.usage("sg")
+    assert "with it, the command deals only with" in cli.usage("service")
     assert "ssh set-port sets the ports sshd listens on" in cli.usage("ssh")
     assert "ssh set-port sets" not in cli.usage("sg")
     assert "service import makes an AMI of a stopped instance" in cli.usage("service")
@@ -1073,12 +1075,13 @@ def test_a_format_goes_anywhere() -> None:
         ),
         (
             ["app", "list", "--profile", "work"],
-            "app list: --profile is not allowed; it does not call AWS without --svc",
+            "app list: --profile is not allowed; it does not call AWS",
         ),
         (
-            ["app", "list", "--region", "us-east-1"],
-            "app list: --region is not allowed; it does not call AWS without --svc",
+            ["app", "list", "--region", "us-east-1", *SVC],
+            "app list: --region is not allowed; it does not call AWS",
         ),
+        (["app", "list", "--apps"], "app list: unexpected argument: --apps"),
     ],
 )
 def test_list_arguments_rejected(args: list[str], message: str) -> None:
@@ -1228,7 +1231,6 @@ def test_main_passes_the_instance_ids_to_terminate(monkeypatch: pytest.MonkeyPat
     "args",
     [
         ["--region", "us-east-1", "instance", "list", *SVC],
-        ["app", "list", "--region", "us-east-1", *SVC],
         ["--region", "us-east-1", "ami", "delete", "a", *SVC],
         ["ami", "prune", *SVC, "--region", "us-east-1"],
         ["--region", "us-east-1", "status", *SVC],
@@ -1330,18 +1332,16 @@ def test_main_runs_service_list_without_boto3(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_main_runs_app_list_without_a_service_and_boto3(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--svc を省いた app list は AWS を呼ばないので、botocore を読み込めなくても動く。
+    """app list は AWS を呼ばないので、botocore を読み込めなくても動く。
 
-    --svc を付ければ、そのサービスの記録も挙げる app.list_apps を呼び、--profile も取る。
+    --svc を付けても、付けないときと同じ手元のアプリを挙げる。サービスのコマンドから打てる。
     """
-    seen: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(manifest, "list_apps", lambda spec: seen.append(("local", spec)))
-    monkeypatch.setattr(app, "list_apps", lambda service, spec: seen.append((service.svc, spec)))
-    assert cli.main(["temt", "app", "list", *SVC, "--profile", "work"]) == 0
-    assert cli.main(["temt", "app", "list", *SVC]) == 0
+    seen: list[str | None] = []
+    monkeypatch.setattr(manifest, "list_apps", seen.append)
     monkeypatch.setitem(sys.modules, "botocore.exceptions", None)
+    assert cli.main(["temt", "app", "list", *SVC]) == 0
     assert cli.main(["temt", "app", "list", "--format", "ID"]) == 0
-    assert seen == [("dev-main", None), ("dev-main", None), ("local", "ID")]
+    assert seen == [None, "ID"]
 
 
 @pytest.mark.parametrize(
@@ -1487,14 +1487,6 @@ def test_app_commands_take_an_app_id_a_key_and_a_value() -> None:
             f"app set: the key {LABEL_RULE}: ",
         ),
         (
-            ["app", "set", *SVC, "jupyter", "deploy=x"],
-            "app set: the key deploy holds the deploy record of temt",
-        ),
-        (
-            ["app", "unset", *SVC, "jupyter", "deploy"],
-            "app unset: the key deploy holds the deploy record of temt",
-        ),
-        (
             ["app", "set", *SVC, "jupyter", "token="],
             "app set: the value must not be empty",
         ),
@@ -1513,24 +1505,24 @@ def test_app_arguments_rejected(args: list[str], message: str) -> None:
 
 def test_main_runs_the_app_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(app, "list_apps", lambda service, spec: seen.append(("list", spec)))
     monkeypatch.setattr(app, "show", lambda service, app: seen.append(("show", app)))
     monkeypatch.setattr(app, "get", lambda service, app, key: seen.append(("get", app, key)))
     monkeypatch.setattr(
         app, "set_value", lambda service, app, key, value: seen.append(("set", app, key, value))
     )
     monkeypatch.setattr(app, "unset", lambda service, app, key: seen.append(("unset", app, key)))
-    assert cli.main(["temt", "app", "list", "--svc", "web", "--format", "ID"]) == 0
     assert cli.main(["temt", "app", "show", "jupyter", "--svc", "web"]) == 0
     assert cli.main(["temt", "app", "get", "--svc", "web", "jupyter", "token"]) == 0
     assert cli.main(["temt", "app", "set", "--svc", "web", "jupyter", "token=abc"]) == 0
     assert cli.main(["temt", "app", "unset", "--svc", "web", "jupyter", "token"]) == 0
+    # 前の temt の記録のキー deploy も、ふつうの値として扱える
+    assert cli.main(["temt", "app", "unset", "--svc", "web", "jupyter", "deploy"]) == 0
     assert seen == [
-        ("list", "ID"),
         ("show", "jupyter"),
         ("get", "jupyter", "token"),
         ("set", "jupyter", "token", "abc"),
         ("unset", "jupyter", "token"),
+        ("unset", "jupyter", "deploy"),
     ]
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 import urllib.parse
 from typing import TYPE_CHECKING, Any
 
@@ -116,17 +117,42 @@ def _role_table(inline: Mapping[str, list[dict[str, Any]]], managed: list[str]) 
     return table
 
 
+def _cannot_replace(path: Path) -> TemtError:
+    """[role] を置き換えられないときの誤り。書き直してからやり直すよう告げる。"""
+    return TemtError(
+        f"cannot replace [{conf.ROLE}] in {printable(tilde(path))}; write it as tables with no "
+        f"other table between them and [{conf.ROLE}] before [[{conf.ROLE}.<policy name>]], and "
+        "run role import again"
+    )
+
+
+def _without_role(text: str) -> dict[str, Any]:
+    """設定ファイルの中身の、[role] のほかの部分の値。"""
+    data = tomllib.loads(text)
+    _ = data.pop(conf.ROLE, None)
+    return data
+
+
 def _rewritten(text: str, path: Path, inline: Mapping[str, Any], managed: list[str]) -> str:
     """設定ファイルの中身の、[role] を丸ごと置き換え、IamInstanceProfile を temt のものに
     したもの。
     """
     document = tomlkit.parse(text)
-    conf.replace_table(
-        document, conf.ROLE, _role_table(inline, managed) if inline or managed else None
-    )
-    written = tomlkit.dumps(document)
+    try:
+        conf.replace_table(
+            document, conf.ROLE, _role_table(inline, managed) if inline or managed else None
+        )
+        written = tomlkit.dumps(document)
+        changed = tomlkit.parse(written)
+        kept = _without_role(written) == _without_role(text)
+    except conf.EDIT_ERRORS:
+        # 他のテーブルを挟んで分けて書いた [role]、[[role.<ポリシー名>]] の後ろの [role]、
+        # インラインテーブルの [role] は、tomlkit では丸ごと置き換えられない
+        raise _cannot_replace(path) from None
+    # ドット付きキーで書いた role. の後ろの最上位の項目は、足したテーブルの中に入ってしまう
+    if not kept:
+        raise _cannot_replace(path)
     profile = conf.launch_template_key(ltdata.PROFILE)
-    changed = tomlkit.parse(written)
     current = (changed.get(conf.LAUNCH_TEMPLATE) or {}).get(ltdata.PROFILE)
     if current is None or isinstance(current, Table):
         # テーブルかドット付きキーで書かれていれば、中の Name を書き換え、Arn を消す。

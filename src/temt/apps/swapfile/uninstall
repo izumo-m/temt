@@ -3,8 +3,7 @@
 # 何度実行してもよい
 set -euo pipefail
 
-here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-. "$here/common.sh"
+. ./common.sh
 
 if is_active; then
     turn_off "run app remove again"

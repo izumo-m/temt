@@ -56,9 +56,8 @@ Observed on real AWS when `start` launches right after `apply` created the role 
 instance profile:
 
 1. EC2 does not know the new instance profile name yet: `run-instances` is refused for
-   a few seconds. `apply` may already have shown this as a launch template warning,
-   when it created the template or a version
-   ([topics/launch-template.md](../topics/launch-template.md#versions)).
+   a few seconds. `apply` does not warn about it when it creates the template or a
+   version in that time ([topics/launch-template.md](../topics/launch-template.md#versions)).
 2. After the role and instance profile are deleted and an `apply` recreates them under
    the same name (`destroy` in the last region that used them, or an `apply` after
    `[role]` was removed, followed by an `apply` with `[role]` again), EC2 may still
@@ -139,13 +138,9 @@ is a usage error. Writing the same ID twice is also a usage error.
    - IDs given: choose those. If a given ID is not among those found, list the ones found
      and exit without doing anything.
 3. Confirm, naming the chosen instances' IDs and states, and the region and account
-   ([cli.md](../cli.md#confirmation)). Before that, if apps were deployed to a chosen
-   instance and not yet baked (deploy records whose `instance` is that ID), warn that
-   they will be lost by terminating, naming them. If apps were removed from a chosen
-   instance without baking (records whose `removed` is that ID) and their `baked_image`
-   is the template's default-version AMI, warn that they come back from the AMI, naming
-   them; the template is read only when such records exist, and if it cannot be read,
-   they are not named. If the records cannot be read, warn and continue.
+   ([cli.md](../cli.md#confirmation)). Unbaked apps are not looked up: that needs the
+   instance running and reachable, and `terminate` must work in any state (the
+   requester).
 4. Terminate each chosen instance and delete its known_hosts
    ([Terminating](../topics/instance.md#terminating)). Do this for all of them even if
    there are two or more.
@@ -214,17 +209,18 @@ The boot_id is read the same way in 4 and 7:
 - In 7, an agent that reported just before going down may return the old boot_id. If it
   is old, it is read again.
 
-The local credentials need `ssm:SendCommand` and `ssm:GetCommandInvocation`. The
+The local credentials need `ssm:SendCommand`, `ssm:GetCommandInvocation`, and
+`ssm:DescribeInstanceInformation`. The
 `[[role.ec2]]` that the scaffold of a new config file writes
 ([conf.md](../../docs/conf.md#role)) includes the permissions Run Command needs on the
 instance side.
 
 ## `status`
 
-`instance show --svc <svc>` (short form `status`)
+`instance show --svc <svc> [--apps]` (short form `status`)
 
 Shows the state of the service's instance. Display only: writes neither the config file
-nor AWS. Shows:
+nor AWS. Without `--apps` it does not connect to the instance, so it stays fast. Shows:
 
 - The launch template's name. If absent, shows that the service is not applied, and
   continues.
@@ -235,12 +231,21 @@ nor AWS. Shows:
 - Each instance's public IPv4 address, or that it has none.
 - Each instance's SSM agent state (`Online`, `ConnectionLost`, `Inactive`). An instance
   whose agent has never registered is shown as not registered.
-- Unbaked apps, only when the launch template exists. Decided from the deploy records by
-  the same rule as `STATE` of [`app list`](app.md#app-list): `unbaked`, `lost`, and
-  `removed` apps are listed in that order, and `removed` ones are marked as still in the
-  AMI until baked. If there are none of them, it shows that all are baked if any app is
-  `baked`, otherwise that there are none. Records for which it is unknown whether they
-  were baked are not counted.
+- With `--apps`, the apps on the instance, read as in
+  [Reading the apps on the instance](app.md#reading-the-apps-on-the-instance), as a table
+  after the instance display, one row per app in app ID order. When it does not read,
+  it shows why and goes on. Reading takes seconds, so it is not done without `--apps`
+  (the requester).
+
+  | Column | Value |
+  | --- | --- |
+  | `ID` | App ID (the directory name) |
+  | `VERSION` | Version in the instance's `manifest.toml`. Followed by `*` when the local app that `deploy` would use by this app ID has another version: deploying and baking it updates the app. Versions are compared only for equality. No `*` without a local app or when either version is unknown |
+  | `BAKED` | `yes` when the record's `instance` is another instance (the app came from the AMI), `no` when it is this one (deployed here and not baked yet), `-` without a readable record |
+  | `DEPLOYED` | The record's `deployed`, or `-` |
+
+  Values come from the instance, so unprintable characters are replaced with `?` as in
+  [List tables](../cli.md#list-tables).
 - App status. The parameters with key `status` under `/<name>`, i.e.
   `/<name>/<app ID>/status` ([apps.md](../../docs/apps.md#アプリの状態)), shown once
   after the instance display, one line per app in app ID order, with the value and the
