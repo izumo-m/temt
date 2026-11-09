@@ -10,7 +10,7 @@ deploy がアプリと一緒に送り、ディレクトリと一緒に入れ替�
 instance が読んだインスタンスでなければ、そのアプリは AMI から来た、つまり焼いてある。
 アプリ名と版は、同じディレクトリの manifest.toml にある。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。
 """
 
 from __future__ import annotations

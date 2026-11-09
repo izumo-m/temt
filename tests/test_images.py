@@ -1007,7 +1007,7 @@ def test_delete_names_every_reason_without_force(stubs: Stubs) -> None:
 
 
 def test_delete_raises_when_aws_refuses(stubs: Stubs, capsys: pytest.CaptureFixture[str]) -> None:
-    """prune と違って捕まえず、cli.run に包ませる。"""
+    """prune と違って捕まえず、cli に包ませる。"""
     identified(stubs)
     by_id(stubs, OLD, OLD_IMAGE)
     templates(stubs)

@@ -1,6 +1,6 @@
 """ssh set-port の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（setport.run か cli.main）を通し、手順の順序と、失敗したときに何を残すかを
+端から端まで（setport.run か temt のコマンド）を通し、手順の順序と、失敗したときに何を残すかを
 確かめる。Stubber は積んだ順にしか応答しないので、応答を積む順が手順の順序を表す。
 インスタンスで動くスクリプトそのものは test_sshd が確かめ、ここではその出力だけを積む。
 """
@@ -14,9 +14,19 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import ANY
-from conftest import CONFIGURED, WHERE, Clock, Stubs, an_instance, identified, reservations, taken
+from conftest import (
+    CONFIGURED,
+    WHERE,
+    Clock,
+    Stubs,
+    an_instance,
+    identified,
+    reservations,
+    run_temt,
+    taken,
+)
 
-from temt import bake, cli, home, setport, sshd, wait
+from temt import bake, home, setport, sshd, wait
 from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path, ssh_dir
 
@@ -1143,7 +1153,7 @@ def test_main_runs_set_port(
 ) -> None:
     through(aws_stubs, [2222, 443], CHANGED.replace("-> 2222", "-> 2222,443"))
 
-    assert cli.main(["temt", "ssh", "set-port", "--svc", "dev-main", "2222", "443", "--yes"]) == 0
+    assert run_temt(["ssh", "set-port", "--svc", "dev-main", "2222", "443", "--yes"]) == 0
 
     aws_stubs.done()
     assert block_port(ready) == "2222"
@@ -1159,10 +1169,10 @@ def test_main_refuses_without_a_terminal(
     monkeypatch.setattr(sys, "stdin", Pipe())
     checked(aws_stubs, an_instance(INSTANCE, "running"))
 
-    assert cli.main(["temt", "ssh", "set-port", "--svc", "dev-main", "2222"]) == 1
+    assert run_temt(["ssh", "set-port", "--svc", "dev-main", "2222"]) == 1
 
     aws_stubs.done()
     assert capsys.readouterr().err == (
-        "temt: cannot ask for confirmation: stdin is not a terminal; pass --yes\n"
+        "Error: cannot ask for confirmation: stdin is not a terminal; pass --yes\n"
     )
     assert block_port(ready) == "22"

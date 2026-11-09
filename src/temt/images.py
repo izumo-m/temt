@@ -20,8 +20,8 @@ bake の AMI は消さない。取れなければ、その AMI を残して次�
 はロックを取らない。
 
 ami list の表は table が、ami prune と ami delete の一覧は msg が標準出力に書き、
-確認の問いかけは標準エラー出力に書く。boto3 を使うので、この module は cli.run が
-呼ばれたときに読み込まれる。botocore の例外もそこで包む。
+確認の問いかけは標準エラー出力に書く。boto3 を使うので、この module は cli のコマンドが
+動くときに読み込まれる。botocore の例外もそこで包む。
 """
 
 from __future__ import annotations

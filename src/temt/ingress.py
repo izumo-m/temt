@@ -1,8 +1,8 @@
 """sg list、sg add、sg remove の本体。設定ファイルの受信規則を見て、書き換える。
 
 AWS は呼ばない。AWS 側を変えるのは apply だけで、ここは設定ファイルの
-[[security-group.ingress]] だけを読み書きする。boto3 を使わないので、cli.run は
-botocore を読み込む前にこれを呼ぶ。cli はこの module を、これらのコマンドを実行する
+[[security-group.ingress]] だけを読み書きする。boto3 を使わないので、cli は
+botocore を読み込まずにこれを呼ぶ。cli はこの module を、これらのコマンドを実行する
 ときにだけ読み込む。問い合わせに使う urllib の読み込みを、ほかのコマンドの起動に
 乗せないためである。
 

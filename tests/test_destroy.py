@@ -1,6 +1,6 @@
 """destroy の本体のテスト。AWS は Stubber で、標準入力と時計は偽物に差し替える。
 
-端から端まで（destroy.run か cli.main）を通し、消す順序と締め切りを確かめる。
+端から端まで（destroy.run か temt のコマンド）を通し、消す順序と締め切りを確かめる。
 """
 
 import fcntl
@@ -21,14 +21,15 @@ from conftest import (
     deadline,
     identified,
     reservations,
+    run_temt,
     taken,
 )
 from types_boto3_ec2.client import EC2Client
 from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 
-from temt import cli, destroy, home, lock, resources, wait
-from temt.msg import TemtError, UsageError
+from temt import destroy, home, lock, resources, wait
+from temt.msg import TemtError
 from temt.names import Service
 from temt.table import tilde
 
@@ -564,7 +565,7 @@ def test_it_finishes_when_the_amis_cannot_be_read(
         expected_params=SERVICE_IMAGES,
     )
 
-    assert cli.main(["temt", "destroy", "--svc", "dev-main", "--yes"]) == 0
+    assert run_temt(["destroy", "--svc", "dev-main", "--yes"]) == 0
 
     aws_stubs.done()
     captured = capsys.readouterr()
@@ -821,7 +822,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     no_instance(aws_stubs)
 
-    assert cli.main(["temt", "destroy", "--svc", "dev-main"]) == 1
+    assert run_temt(["destroy", "--svc", "dev-main"]) == 1
 
     # 探す以外は何も積んでいないので、消していれば Stubber が失敗する。main はそれも
     # 終了コード 1 にするが、Stubber の失敗は conftest が控えていて、テストを落とす
@@ -830,7 +831,7 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     assert configured.known_hosts_dir.is_dir()
     captured = capsys.readouterr()
     assert captured.out == LISTING
-    assert captured.err == PROMPT + "temt: cancelled\n"
+    assert captured.err == PROMPT + "Error: cancelled\n"
 
 
 def test_it_needs_yes_when_stdin_is_not_a_terminal(
@@ -1447,13 +1448,13 @@ def test_it_stops_when_there_is_no_config_file(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """打ち間違えたサービス名ですぐ止まる。片づける相手なので、apply は促さない。"""
-    assert cli.main(["temt", "destroy", "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["destroy", "--svc", "dev-main", "--yes"]) == 1
 
     # Session も作っていないので、AWS には触れていない
     aws_stubs.done()
     assert aws_stubs.passed == []
     err = capsys.readouterr().err
-    assert err == f"temt: no config file: {tilde(service.conf_path)}\n"
+    assert err == f"Error: no config file: {tilde(service.conf_path)}\n"
     assert "apply" not in err
 
 
@@ -1563,12 +1564,3 @@ def test_it_holds_the_lock_while_it_waits(
     assert attempts == [False]
     # ロックファイルは、サービスごとのまま残す
     assert (configured.known_hosts_dir / lock.LOCK_NAME).exists()
-
-
-def test_destroy_takes_yes_and_no_async() -> None:
-    """destroy はつねに完了を待つので、--async は取らない。"""
-    assert cli.parse(["destroy", "--svc", "dev-main"]).yes is False
-    assert cli.parse(["destroy", "--svc", "dev-main", "--yes"]).yes is True
-    assert cli.parse(["destroy", "--svc", "dev-main", "--yes"]).is_async is False
-    with pytest.raises(UsageError, match="destroy: unexpected argument: --async"):
-        cli.parse(["destroy", "--svc", "dev-main", "--async"])

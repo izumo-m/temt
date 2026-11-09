@@ -9,7 +9,7 @@ ssh は ProxyCommand に自分の環境変数を渡すので、TEMT_LOGIN=direct
 決めたリージョンとプロファイルを環境変数で受け取る。ロックは取らない。標準出力は ssh の
 通信路なので、何も書かない。待つあいだの知らせは標準エラー出力に書き、ssh がそのまま画面に出す。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

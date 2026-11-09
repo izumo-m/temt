@@ -1,6 +1,6 @@
 """start の本体のテスト。AWS は Stubber で、待ち合わせの時計は進むものに差し替える。
 
-端から端まで（start.run か cli.main）を通し、手順の順序と締め切りを確かめる。
+端から端まで（start.run か temt のコマンド）を通し、手順の順序と締め切りを確かめる。
 """
 
 import fcntl
@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import ANY
-from conftest import Clock, Stubs, an_instance, deadline, reservations, taken
+from conftest import Clock, Stubs, an_instance, deadline, reservations, run_temt, taken
 
-from temt import aws, cli, conf, home, instances, lock, resources, start, wait
+from temt import aws, conf, home, instances, lock, resources, start, wait
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import Service
@@ -343,7 +343,7 @@ def test_the_profile_option_is_not_written_to_the_config_file(
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
     launched(aws_stubs)
 
-    assert cli.main(["temt", "--profile", "work", "start", "--svc", "dev-main", "--async"]) == 0
+    assert run_temt(["--profile", "work", "start", "--svc", "dev-main", "--async"]) == 0
 
     aws_stubs.done()
     # --profile が効くのは Session を作るときで、設定ファイルは変わらない
@@ -556,11 +556,11 @@ def test_it_shows_the_refusal_from_aws(
         expected_params=BY_ID,
     )
 
-    assert cli.main(["temt", "start", "--svc", "dev-main"]) == 1
+    assert run_temt(["start", "--svc", "dev-main"]) == 1
 
     aws_stubs.done()
     assert capsys.readouterr().err.endswith(
-        f"temt: An error occurred ({code}) when calling the StartInstances operation: "
+        f"Error: An error occurred ({code}) when calling the StartInstances operation: "
         f"{REFUSED}; "
         "see 'temt status --svc dev-main' and start again\n"
     )
@@ -688,7 +688,7 @@ def test_async_returns_as_soon_as_it_launches(
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
     launched(aws_stubs)
 
-    assert cli.main(["temt", "start", "--svc", "dev-main", "--async"]) == 0
+    assert run_temt(["start", "--svc", "dev-main", "--async"]) == 0
 
     aws_stubs.done()
     assert clock.slept == []
@@ -764,7 +764,7 @@ def test_async_does_not_wait_for_an_instance_it_found(
         "describe_instances", reservations(an_instance(INSTANCE, state)), SEARCH
     )
 
-    assert cli.main(["temt", "start", "--svc", "dev-main", "--async"]) == 0
+    assert run_temt(["start", "--svc", "dev-main", "--async"]) == 0
 
     aws_stubs.done()
     assert told(capsys.readouterr().out) == [f"{INSTANCE} is already {state}"]

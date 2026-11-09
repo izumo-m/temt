@@ -3,7 +3,9 @@
 ## Implementation
 
 All client operations are done by the command `temt`, written in Python 3 (3.12 or
-later).
+later). The command line is read with click and follows click's conventions; this file
+records only what temt adds to them. Rationale: the requester's decision, replacing a
+hand-written parser of about 1000 lines whose rules users had to learn.
 
 - A bundled app that `deploy` names by app ID comes from the package of the `temt` that
   runs. The `temt` in `.venv` points at the repository, so what is being edited there is
@@ -77,30 +79,48 @@ The service is selected with `--svc <svc>`:
 
 ## Parsing
 
-- Command-line options may appear anywhere after `temt`, each at most once.
-- Options that take a value (`--svc`, `--profile`, `--region`, `--format`, `--user`,
-  `--description`, `--image-id`) take the next word as the value. The value must not be
-  empty, except that an empty `--description` clears the description.
-- Any other word starting with `-` is read as a command-line option; an unknown one is a
-  usage error. No positional argument starts with `-`. The `<key>=<value>` of `app set`
+- `--svc`, `--profile`, and `--region` may come right after `temt` or after the command
+  (after the verb, or after a short form). The service command puts `--svc` right after
+  `temt`; the `ProxyCommand` puts it after the command. Giving one on both sides is a
+  usage error. Rejected: also between the target and the verb.
+- Every other option comes after the command, since which options exist depends on the
+  verb. Rejected: accepting them right after `temt` too.
+- An option repeated after the command takes its last value (click). Exception: `--svc`
+  repeated right after `temt` is a usage error, since the service command already puts
+  one there; taking the last would act on another service silently.
+- `--svc`, `--profile`, `--region`, `--image-id`, and `--format` must not be empty, since
+  an empty value would be ignored silently. An empty `--description` clears the
+  description.
+- The commands that do not call AWS reject `--profile` and `--region`, on either side.
+- An option that takes a value takes the next word, even one starting with `-`. Any
+  other word starting with `-` is read as an option. The `<key>=<value>` of `app set`
   and the `<name>=<value>` of `deploy` are single positional words that start with the
   name, so the value may start with `-`.
-- There are no one-letter command-line options.
-- Usage errors: the first word other than command-line options is neither a target nor a
-  short form; the word after a target is not a verb of that target; a command-line option
-  the command does not take; a missing or extra positional argument.
+- Usage errors are shown in click's form: the usage line of the command, a hint to its
+  `--help`, and an `Error:` line. click words the errors of the command line itself
+  (unknown commands and options, missing or extra arguments, ports out of range); temt
+  words the checks of values (service names, app IDs, rules, ...). Values from the
+  command line appear with unprintable characters replaced by `?`, or escaped by click
+  (`'\x1b'`).
 
 ## Help and version
 
-- `--help`: prints the usage to stdout and exits without reading the other arguments.
-  If the first word other than command-line options is a target or a short form and
-  `--help` comes after it, only the commands of that target are printed (for a short
-  form, the target of the command it stands for). Otherwise all commands are printed.
-- `--version`: likewise prints the single line `temt <version>` to stdout and exits
-  without reading the other arguments. The version is `version` in the `pyproject.toml`
-  of the installed temt.
-- If both are given, the one that comes first wins.
-- `--help` or `--version` right after an option that takes a value is that value.
+- `--help` prints to stdout the help of where it is placed, before reading the other
+  arguments of that command:
+  - after `temt`: the options of `temt`, each target with its verbs, and the short
+    forms;
+  - after a target: each verb with every argument and option it takes;
+  - after a command or a short form: its usage line and its options.
+- Every help ends with a link to docs/usage.md on GitHub and carries no notes on the
+  commands; the details are left to docs/usage.md. Options carry no description, except
+  `--help` and `--version` (click's). Rationale: the usage that listed every command
+  with its arguments and notes was 90 lines, and the options scrolled out of the
+  terminal.
+- `temt` alone, or a target without a verb, prints that help to stderr and exits with 2
+  (click).
+- `--version` comes right after `temt` and prints `temt, version <version>` (click's
+  form). The version is `version` in the `pyproject.toml` of the installed temt.
+- If both `--help` and `--version` are given right after `temt`, the first wins.
 
 ## Service command
 
@@ -111,7 +131,7 @@ operations can be typed in this form.
 
 - A command that may omit `--svc` behaves, when called through the service command, as
   if `--svc` were given.
-- Giving `--svc` again to the service command is a usage error.
+- Giving `--svc` to the service command is a usage error (on both sides of the command).
 - `temt` does not look at the name it was called by.
 - `proxy` runs as ssh's ProxyCommand; ssh calls `temt` directly, not through the service
   command ([topics/ssh.md](topics/ssh.md)).
@@ -166,7 +186,9 @@ operations can be typed in this form.
   stderr closes early (`| head`, `2>&1 | head`), the rest of that stream is dropped
   silently and the command goes on. The stderr of ssh, and of `install` and `uninstall`
   through it, is not read by temt, so such a reader may still cut ssh off.
-- Progress lines carry the time; error lines carry the program name.
+- Progress lines carry the time; warnings, and the findings of IAM Access Analyzer listed
+  before an error, carry the program name (`temt: warning:`, `temt:`). An error that ends
+  the command is an `Error:` line (click's form).
 - A path under the home directory is shown starting with `~/`
   (`~/.config/temt/<svc>.toml`), in every message, errors from the OS included (the
   requester: shorter, and the same as the ssh side; a shell expands it when pasted).
@@ -194,8 +216,8 @@ operations can be typed in this form.
   ([List tables](#list-tables)), the value of `app get`
   ([commands/app.md](commands/app.md#app-get)), and the changes of `diff`
   ([commands/service.md](commands/service.md#diff)) and of `sg diff`
-  ([commands/sg.md](commands/sg.md#sg-diff)). So do the usage of `--help` and the
-  version of `--version`.
+  ([commands/sg.md](commands/sg.md#sg-diff)). The help of `--help` and the version of
+  `--version` are ASCII.
 
 ### Bytes that cannot be read
 
@@ -221,11 +243,11 @@ file names) are treated the same way everywhere:
 
 ### Exit codes
 
-- 1 for failure, 2 for a usage error.
-- On a usage error, the usage follows the error line on stderr: only the commands of the
-  target if the first word other than command-line options is a target or a short form
-  (for a short form, the target of the command it stands for), otherwise all commands.
-- Interrupted by Ctrl-C: says so and exits with 1.
+- 1 for failure, 2 for a usage error (click's codes).
+- A usage error found while running (an unknown column in `--format`, a `--region` that
+  differs from `AwsRegion`, ...) is shown like those of the command line, with the usage
+  line of the running command ([Parsing](#parsing)).
+- Interrupted by Ctrl-C: click closes the `^C` line, prints `Aborted!`, and exits with 1.
 
 ### External commands
 

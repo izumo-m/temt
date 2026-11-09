@@ -12,7 +12,7 @@ temt-options.env をディレクトリに足して install に渡す（options�
 ディレクトリを tar.gz にして標準入力に流し、インスタンスの上では sudo で動く。途中で
 失敗しても巻き戻さない。install は何度実行してもよいので、もう一度 deploy すれば揃う。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

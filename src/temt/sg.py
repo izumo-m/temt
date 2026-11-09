@@ -6,7 +6,7 @@ sg diff は、次の apply が受信規則をどう変えるかを標準出力�
 いなければ、apply と同じくそのリージョンで選ぶもの）が属する VPC にある <名前> のもので
 ある。設定ファイルだけを扱う sg list、sg add、sg remove は ingress にある。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

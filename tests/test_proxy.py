@@ -1,7 +1,7 @@
 """proxy の本体のテスト。AWS は Stubber で、exec と外部コマンドの確認と ssh -G は偽物に
 差し替える。
 
-端から端まで（proxy.run か cli.main）を通し、読む順序と、exec するコマンドラインか中継する
+端から端まで（proxy.run か temt のコマンド）を通し、読む順序と、exec するコマンドラインか中継する
 接続を確かめる。TCP の接続と中継も偽物に差し替え、実際のソケットは開かない。
 instances.connect 自身は test_instances で、relay.run 自身は test_relay で、ssh -G の読み方は
 test_keys で確かめる。
@@ -22,11 +22,12 @@ from conftest import (
     Stubs,
     an_instance,
     reservations,
+    run_temt,
     taken,
 )
 from types_boto3_ec2_instance_connect.client import EC2InstanceConnectClient
 
-from temt import aws, cli, home, instances, keys, msg, proc, proxy, relay, wait
+from temt import aws, home, instances, keys, msg, proc, proxy, relay, wait
 from temt.msg import TemtError
 from temt.names import Service, defaults_path
 
@@ -307,7 +308,7 @@ def required(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 @pytest.fixture(autouse=True)
 def only_stderr(process_state: None) -> None:
-    """cli.run が proxy の前にするのと同じく、すべてを標準エラー出力に回す。
+    """cli が proxy の前にするのと同じく、すべてを標準エラー出力に回す。
 
     proxy.run を直に呼ぶテストも、本番と同じ出力先で確かめる。process_state がテストの
     後に戻す。
@@ -601,7 +602,7 @@ def test_the_profile_option_comes_before_the_defaults_file(
     _ = required
     write_defaults('AwsProfile = "work"\n')
     ready(aws_stubs)
-    assert cli.main(["temt", "--profile", "other", "proxy", "--svc", "dev-main", "2222"]) == 0
+    assert run_temt(["--profile", "other", "proxy", "--svc", "dev-main", "2222"]) == 0
     assert aws_stubs.passed[0].AwsProfile == "other"
     argv = execs.calls[0][1]
     assert argv[-2:] == ["--profile", "other"]
@@ -618,8 +619,8 @@ def test_a_profile_option_other_than_the_written_one_is_a_usage_error(
     """設定ファイルに書いた AwsProfile は固定で、違う --profile は使い方の誤りにする。"""
     _ = (aws_stubs, required)
     profile(configured, "work")
-    assert cli.main(["temt", "--profile", "other", "proxy", "--svc", "dev-main"]) == 2
-    assert "temt: dev-main has AwsProfile = work; --profile other differs\n" in (
+    assert run_temt(["--profile", "other", "proxy", "--svc", "dev-main"]) == 2
+    assert "Error: dev-main has AwsProfile = work; --profile other differs\n" in (
         capsys.readouterr().err
     )
     assert execs.calls == []
@@ -640,7 +641,7 @@ def test_it_takes_the_region_and_the_profile_passed_by_temt(
     monkeypatch.setenv(proxy.PASSED_REGION_ENV, "us-west-2")
     monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "work")
     ready(aws_stubs)
-    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
+    assert run_temt(["proxy", "--svc", "dev-main"]) == 0
     assert aws_stubs.passed[0].AwsRegion == "us-west-2"
     assert aws_stubs.passed[0].AwsProfile == "work"
     argv = execs.calls[0][1]
@@ -659,8 +660,8 @@ def test_the_command_line_comes_before_what_temt_passed(
     monkeypatch.setenv(proxy.PASSED_REGION_ENV, "us-west-2")
     monkeypatch.setenv(proxy.PASSED_PROFILE_ENV, "work")
     ready(aws_stubs)
-    args = ["temt", "--region", "eu-west-1", "--profile", "other", "proxy", "--svc", "dev-main"]
-    assert cli.main(args) == 0
+    args = ["--region", "eu-west-1", "--profile", "other", "proxy", "--svc", "dev-main"]
+    assert run_temt(args) == 0
     argv = execs.calls[0][1]
     assert argv[-4:] == ["--region", "eu-west-1", "--profile", "other"]
 
@@ -829,12 +830,12 @@ def test_main_writes_the_notices_only_to_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """cli.main から動かせば、待ちの知らせも標準エラー出力に書き、標準出力には何も書かない。
+    """temt のコマンドとして動かせば、待ちの知らせも標準エラー出力に書き、標準出力には何も書かない。
 
     標準出力は ssh の通信路だからである。
     """
     _ = required
-    # cli.run が自ら標準エラー出力に回すことを確かめるため、only_stderr の設定を戻す
+    # cli が自ら標準エラー出力に回すことを確かめるため、only_stderr の設定を戻す
     monkeypatch.setattr(msg, "_only_stderr", False)
     found(aws_stubs, an_instance(INSTANCE, "pending"))
     aws_stubs.ec2.add_response(
@@ -842,7 +843,7 @@ def test_main_writes_the_notices_only_to_stderr(
     )
     agent(aws_stubs, "Online")
     key_sent(aws_stubs)
-    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 0
+    assert run_temt(["proxy", "--svc", "dev-main"]) == 0
     assert execs.calls[0][1] == SSM_ARGV
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -864,7 +865,7 @@ def test_main_passes_the_user_from_ssh(
     found(aws_stubs, an_instance(INSTANCE, "running", address=ADDRESS))
     agent(aws_stubs, "Online")
     key_sent(aws_stubs, {**SEND, "InstanceOSUser": "admin"})
-    assert cli.main(["temt", "proxy", "--svc", "dev-main", "--user", "admin", "22"]) == 0
+    assert run_temt(["proxy", "--svc", "dev-main", "--user", "admin", "22"]) == 0
     assert execs.keys_sent == [1]
     assert ssh_config.asked == [["ssh", "-G", "-l", "admin", NAME]]
 
@@ -874,10 +875,10 @@ def test_main_refuses_a_user_that_breaks_the_rule(
 ) -> None:
     """ユーザー名の規則に合わないユーザーは、AWS を呼ばずに引数の誤りにする。"""
     _ = configured
-    assert cli.main(["temt", "proxy", "--svc", "dev-main", "--user", "Admin"]) == 2
+    assert run_temt(["proxy", "--svc", "dev-main", "--user", "Admin"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "proxy: the user must start with a lowercase letter" in captured.err
+    assert "'--user': 'Admin' must start with a lowercase letter" in captured.err
     assert aws_stubs.passed == []
 
 
@@ -1306,10 +1307,10 @@ def test_main_reports_a_failed_exec(
 
     monkeypatch.setattr(proxy, "execvpe", broken)
     ready(aws_stubs)
-    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 1
+    assert run_temt(["proxy", "--svc", "dev-main"]) == 1
     out, err = capsys.readouterr()
     assert out == ""
-    assert err.startswith("temt: ")
+    assert err.startswith("Error: ")
     assert "No such file or directory" in err
 
 
@@ -1434,12 +1435,12 @@ def test_main_reports_an_error_from_sending_the_key(
         http_status_code=403,
         expected_params=SEND,
     )
-    assert cli.main(["temt", "proxy", "--svc", "dev-main"]) == 1
+    assert run_temt(["proxy", "--svc", "dev-main"]) == 1
     aws_stubs.done()
     out, err = capsys.readouterr()
     assert out == ""
     assert err == (
-        "temt: An error occurred (AuthException) when calling the SendSSHPublicKey operation: "
+        "Error: An error occurred (AuthException) when calling the SendSSHPublicKey operation: "
         "not authorized to perform ec2-instance-connect:SendSSHPublicKey\n"
     )
     assert (execs.calls, relays.calls) == ([], [])

@@ -11,7 +11,7 @@ environment がそれを 1 行で知らせる。新しく書く設定ファイ�
 written_profile もここに置く。AWS が返した時刻や deploy の記録の時刻を表示の
 形にする when と cell_time、応答からタグの値を引く tag もここに置く。
 
-botocore の例外は、AMI が無いことを表す誤りのほかは、ここでは捕まえない。cli.run が
+botocore の例外は、AMI が無いことを表す誤りのほかは、ここでは捕まえない。cli が
 ClientError と BotoCoreError の両方を一度だけ包む。プロファイルが無いときの
 ProfileNotFound は後者である。誤りの名前を取り出す error_code は、そのリソースが
 無いことを見分ける他の module も使う。NO_SUCH_IMAGE は bake も使う。
@@ -115,7 +115,7 @@ def session(values: Conf) -> boto3.Session:
     `if profile_name is not None`）。リージョンは、設定ファイルの AwsRegion、--region、
     共通ファイルの AwsRegion の順に conf.load が決めている。どれも無ければ、ここで
     環境変数、AWS のプロファイルの region、conf.REGION_DEFAULT の順に決め、values にも
-    入れる。環境変数は main が取り除く前に conf.ENV_REGION に控えてある。
+    入れる。環境変数は cli が取り除く前に conf.ENV_REGION に控えてある。
     """
     resolve_region(values)
     return boto3.Session(profile_name=profile(values), region_name=values.AwsRegion)
@@ -149,7 +149,7 @@ def env_session(region: str | None) -> boto3.Session:
     既定の規則で決まる。リージョンは region（--region）、共通ファイルの AwsRegion、
     AWS_REGION、AWS_DEFAULT_REGION、プロファイルの region の順に探す。共通ファイルを
     環境変数より先にするのは、作業中のプロジェクトが設定した環境変数に temt がつられない
-    ようにするためである。環境変数は main が取り除く前に conf.ENV_REGION に控えてある。
+    ようにするためである。環境変数は cli が取り除く前に conf.ENV_REGION に控えてある。
     boto3 は AWS_REGION を読まないので、temt が読んで渡す。決まらなければエラーにする。
     """
     common = conf.common_values()

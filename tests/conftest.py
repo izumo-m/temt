@@ -27,7 +27,7 @@ from types_boto3_iam.client import IAMClient
 from types_boto3_ssm.client import SSMClient
 from types_boto3_sts.client import STSClient
 
-from temt import aws, conf, ingress, lock, msg, names, proc, wait
+from temt import aws, cli, conf, ingress, lock, msg, names, proc, wait
 from temt.conf import Conf
 from temt.names import Service
 
@@ -561,3 +561,15 @@ def commanded(
         {"Status": status, "StandardOutputContent": output, "StandardErrorContent": error},
         {"CommandId": COMMAND_ID, "InstanceId": instance},
     )
+
+
+def run_temt(args: list[str]) -> int:
+    """temt を引数 args（コマンドの名前は除く）で動かし、終了コードを返す。
+
+    click は、終わるときにかならず SystemExit を上げる。
+    """
+    try:
+        cli.cli.main(args, prog_name="temt")
+    except SystemExit as e:
+        return 0 if e.code is None else int(e.code)
+    raise AssertionError("click did not exit")

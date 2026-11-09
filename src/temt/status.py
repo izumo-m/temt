@@ -11,7 +11,7 @@ IPv4 アドレス、SSM エージェントの状態、アプリが SSM パラメ
 instance list は、temt のインスタンス（temt:service タグを持ち、terminated でない
 もの）を 1 台 1 行の表で挙げる。docker の ps にあたる。SSM は見ない。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 
