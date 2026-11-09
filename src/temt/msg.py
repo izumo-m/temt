@@ -18,24 +18,29 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 from typing import TextIO
 
+import click
+
 # 真なら、標準出力に書くものも標準エラー出力に書く。proxy が use_stderr で、diff と
 # sg diff が stderr_only のあいだ立てる
 _only_stderr = False
 
-# エラーの行に付けるプログラム名
+# 警告とエラーの行に付けるプログラム名
 PROG = "temt"
 
 
-class TemtError(Exception):
-    """利用者に見せて終了するエラー。"""
+class TemtError(click.ClickException):
+    """利用者に見せて終了するエラー。click が Error: を付けて標準エラー出力に書き、終了
+    コード 1 で終える。
+    """
 
-    exit_code: int = 1
 
+class UsageError(click.UsageError, TemtError):
+    """引数の誤り。引数を読んだあとで分かるもの。click が、そのとき動いているコマンドの
+    使い方を添えて標準エラー出力に書き、終了コード 2 で終える。
+    """
 
-class UsageError(TemtError):
-    """引数の誤り。"""
-
-    exit_code: int = 2
+    def __init__(self, message: str) -> None:
+        super().__init__(message, click.get_current_context(silent=True))
 
 
 def use_stderr() -> None:
@@ -194,5 +199,5 @@ def warn(text: str) -> None:
 
 
 def error(text: str) -> None:
-    """エラーを知らせる。プログラム名を付ける。"""
+    """エラーを知らせる。プログラム名を付ける。終了につながる誤りは、TemtError で click が書く。"""
     _write(sys.stderr, f"{PROG}: {text}\n")

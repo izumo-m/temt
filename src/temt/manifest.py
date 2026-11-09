@@ -2,7 +2,7 @@
 
 アプリ ID で指したアプリは、conf ディレクトリの apps/ から探し、無ければ temt と一緒に
 配るアプリを使う。app list は、--svc の有無にかかわらず、そうして使えるアプリだけを
-挙げ、AWS は呼ばない。boto3 を使わないので、cli.run は botocore を読み込む前にこれを呼ぶ。
+挙げ、AWS は呼ばない。boto3 を使わないので、cli は botocore を読み込まずにこれを呼ぶ。
 """
 
 from __future__ import annotations

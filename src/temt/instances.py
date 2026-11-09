@@ -6,7 +6,7 @@ start、stop、terminate、reboot、bake、destroy、proxy、status が使う。
 呼ぶのにも使う。
 
 botocore の例外は、起動テンプレートやインスタンスが無いことと、インスタンスの状態が
-要求に合わないことを表す誤りだけをここで扱い、他は cli.run にそのまま渡す。
+要求に合わないことを表す誤りだけをここで扱い、他は cli にそのまま渡す。
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """service import の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（importing.run か cli.main）を通し、手順の順序、コピーする設定の直し方、書いた
+端から端まで（importing.run か temt のコマンド）を通し、手順の順序、コピーする設定の直し方、書いた
 設定ファイルの中身とそれが読めること、止まったときに何も書かないことを確かめる。
 Stubber は積んだ順にしか応答しないので、応答を積む順が手順の順序を表す。
 """
@@ -15,11 +15,11 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import WHERE, Clock, Stubs, identified
+from conftest import WHERE, Clock, Stubs, identified, run_temt
 from types_boto3_ec2.client import EC2Client
 
-from temt import bake, cli, conf, home, importing, lock, wait
-from temt.msg import TemtError, UsageError
+from temt import bake, conf, home, importing, lock, wait
+from temt.msg import TemtError
 from temt.names import Service, defaults_path
 
 NAME = "temt-dev-main"
@@ -707,13 +707,13 @@ def test_it_stops_when_the_config_file_exists(
     """取り込むのは設定ファイルの無いサービスにだけである。AWS には触れない。"""
     before = text_of(configured)
 
-    assert cli.main(["temt", "service", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
+    assert run_temt(["service", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
 
     aws_stubs.done()
     assert aws_stubs.passed == []
     assert text_of(configured) == before
     assert capsys.readouterr().err == (
-        "temt: ~/.config/temt/dev-main.toml exists; service import makes a new service only\n"
+        "Error: ~/.config/temt/dev-main.toml exists; service import makes a new service only\n"
     )
 
 
@@ -803,14 +803,14 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     read(aws_stubs)
 
-    assert cli.main(["temt", "service", "import", "--svc", "dev-main", SOURCE]) == 1
+    assert run_temt(["service", "import", "--svc", "dev-main", SOURCE]) == 1
 
     # create_image は積んでいないので、AMI を作れば Stubber が失敗する
     aws_stubs.done()
     assert not service.conf_path.exists()
     captured = capsys.readouterr()
     assert captured.out == listing(*SHOWN)
-    assert captured.err == PROMPT + "temt: cancelled\n"
+    assert captured.err == PROMPT + "Error: cancelled\n"
 
 
 def test_it_needs_yes_when_stdin_is_not_a_terminal(
@@ -917,9 +917,8 @@ def test_it_writes_the_profile_but_not_the_region_given_on_the_command_line(
     made(aws_stubs)
 
     assert (
-        cli.main(
+        run_temt(
             [
-                "temt",
                 "service",
                 "import",
                 "--svc",
@@ -1037,15 +1036,3 @@ def test_it_stops_when_another_command_holds_the_lock(aws_stubs: Stubs, service:
     # 応答を 1 つも積んでいないので、AWS を読んでいれば Stubber が失敗する
     aws_stubs.done()
     assert not service.conf_path.exists()
-
-
-def test_service_import_takes_one_instance_id() -> None:
-    request = cli.parse(["service", "import", "--svc", "dev-main", SOURCE, "--yes"])
-    assert request.instance_ids == (SOURCE,)
-    assert request.yes is True
-    with pytest.raises(UsageError):
-        cli.parse(["service", "import", "--svc", "dev-main"])
-    with pytest.raises(UsageError, match="service import: the instance id "):
-        cli.parse(["service", "import", "--svc", "dev-main", "web-server"])
-    with pytest.raises(UsageError):
-        cli.parse(["service", "import", "--svc", "dev-main", SOURCE, "i-0fedcba9876543210"])

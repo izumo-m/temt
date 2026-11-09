@@ -14,7 +14,7 @@ ImageId を書いていなければ、使う AMI は build の前に決める（
 Selecting）。--image-id の AMI（given_image）、起動テンプレートの AMI（kept_image）、
 起動テンプレートを作るときに選ぶ AMI（new_image）のどれかで、build に渡す。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。
 """
 
 from __future__ import annotations
@@ -137,17 +137,16 @@ class Built:
     ID は NEW_GROUP）。image は ImageId の AMI で、note は diff の ImageId の行に添えること
     （Image）。vpc_id は NetworkInterfaces の
     DeviceIndex が 0 の要素の SubnetId の VPC で、決まらなければ None。group_id はその
-    VPC にある temt のセキュリティグループの ID で、無ければ None。makes_group は temt の
-    セキュリティグループを作るか（Groups を temt が埋めるか、名前で指すか）、uses_group は
-    起動テンプレートがそれを使うか（ID で書いたものも含む）。root はルートボリュームの
-    要素で、無ければ None。ipv6 は、そのサブネットに IPv6 の CIDR が結び付いているか。
+    VPC にある temt のセキュリティグループの ID で、無ければ None。uses_group は起動
+    テンプレートがそれを使うか（ID で書いたものも含む）で、使うのに無ければ apply が作る。
+    root はルートボリュームの要素で、無ければ None。ipv6 は、そのサブネットに IPv6 の CIDR が
+    結び付いているか。
     """
 
     data: dict[str, Any]
     image: Mapping[str, Any]
     vpc_id: str | None
     group_id: str | None
-    makes_group: bool
     uses_group: bool
     root: Mapping[str, Any] | None
     ipv6: bool = False
@@ -338,16 +337,16 @@ def _group_id(ec2: EC2Client, service: Service, vpc_id: str | None, name: str) -
 
 def _groups(
     ec2: EC2Client, service: Service, data: dict[str, Any], vpc_id: str | None
-) -> tuple[str | None, bool, bool]:
+) -> tuple[str | None, bool]:
     """Groups の名前を ID に直し、temt が埋める Groups を入れる。
 
-    temt のセキュリティグループの ID（無ければ None）、作るか、使うかを返す。作るのは、
-    DeviceIndex が 0 の要素の Groups を temt が埋めるか、Groups が名前で指すときだけ
-    （名前だけで決める）。使うのは、それに加えて、ID で書いた Groups に入っているとき。
+    temt のセキュリティグループの ID（無ければ None）と、起動テンプレートがそれを使うかを
+    返す。使うのは、DeviceIndex が 0 の要素の Groups を temt が埋めるとき、Groups か最上位の
+    SecurityGroups が名前で指すとき、ID で書いた Groups か最上位の SecurityGroupIds に
+    入っているとき。
     """
     temt_id = _temt_group(ec2, service, vpc_id)
     placed = temt_id or NEW_GROUP
-    named = False
     used = False
     for one in data.get(NETWORK_INTERFACES) or []:
         groups = one.get("Groups")
@@ -359,7 +358,7 @@ def _groups(
                 resolved.append(group)
                 used = used or group == temt_id
             elif group == service.name and vpc_id is not None:
-                named = True
+                used = True
                 resolved.append(placed)
             else:
                 resolved.append(_group_id(ec2, service, vpc_id, group))
@@ -382,8 +381,7 @@ def _groups(
             first = primary(data)
         if first is not None:
             first["Groups"] = [placed]  # pyright: ignore[reportIndexIssue]
-    makes = (fills or named) and vpc_id is not None
-    return temt_id, makes, used or makes
+    return temt_id, used or fills
 
 
 def _tags(service: Service, data: dict[str, Any]) -> None:
@@ -426,10 +424,10 @@ def build(
     found = known or subnet(ec2, service, data)
     vpc_id = None if found is None else found.vpc_id
     root = _root(service, data, image.found)
-    group_id, makes, uses = _groups(ec2, service, data, vpc_id)
+    group_id, uses = _groups(ec2, service, data, vpc_id)
     _tags(service, data)
     ipv6 = found is not None and found.ipv6
-    return Built(data, image.found, vpc_id, group_id, makes, uses, root, ipv6, image.note)
+    return Built(data, image.found, vpc_id, group_id, uses, root, ipv6, image.note)
 
 
 def with_group(data: Mapping[str, Any], group_id: str) -> dict[str, Any]:

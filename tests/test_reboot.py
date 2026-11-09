@@ -1,6 +1,6 @@
 """reboot の本体のテスト。AWS は Stubber で、標準入力と時計は偽物に差し替える。
 
-端から端まで（reboot.run か cli.main）を通し、手順の順序と締め切りを確かめる。
+端から端まで（reboot.run か temt のコマンド）を通し、手順の順序と締め切りを確かめる。
 """
 
 import fcntl
@@ -11,9 +11,19 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from conftest import WHERE, Clock, Stubs, an_instance, deadline, identified, reservations, taken
+from conftest import (
+    WHERE,
+    Clock,
+    Stubs,
+    an_instance,
+    deadline,
+    identified,
+    reservations,
+    run_temt,
+    taken,
+)
 
-from temt import aws, cli, home, lock, reboot, wait
+from temt import aws, home, lock, reboot, wait
 from temt.conf import Conf
 from temt.msg import TemtError
 from temt.names import Service
@@ -252,7 +262,7 @@ def test_async_reboots_without_reading_the_boot_id(
     found(aws_stubs)
     rebooted(aws_stubs)
 
-    assert cli.main(["temt", "reboot", "--svc", "dev-main", "--async", "--yes"]) == 0
+    assert run_temt(["reboot", "--svc", "dev-main", "--async", "--yes"]) == 0
 
     aws_stubs.done()
     assert made == ["ec2"]
@@ -272,10 +282,10 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
     found(aws_stubs)
     agent(aws_stubs, "Online")
 
-    assert cli.main(["temt", "reboot", "--svc", "dev-main"]) == 1
+    assert run_temt(["reboot", "--svc", "dev-main"]) == 1
 
     aws_stubs.done()
-    assert capsys.readouterr() == ("", f"{PROMPT}temt: cancelled\n")
+    assert capsys.readouterr() == ("", f"{PROMPT}Error: cancelled\n")
 
 
 def test_it_needs_the_agent_online_to_wait(
@@ -313,12 +323,12 @@ def test_it_shows_only_the_aws_error_when_the_agent_cannot_be_checked(
         expected_params=AGENT,
     )
 
-    assert cli.main(["temt", "reboot", "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["reboot", "--svc", "dev-main", "--yes"]) == 1
 
     aws_stubs.done()
     err = capsys.readouterr().err
     assert err.endswith(
-        "temt: An error occurred (AccessDeniedException) when calling the "
+        "Error: An error occurred (AccessDeniedException) when calling the "
         "DescribeInstanceInformation operation: denied\n"
     )
     assert "--async" not in err
@@ -389,11 +399,11 @@ def test_it_shows_the_refusal_from_aws(
         expected_params=BY_ID,
     )
 
-    assert cli.main(["temt", "reboot", "--svc", "dev-main", "--async", "--yes"]) == 1
+    assert run_temt(["reboot", "--svc", "dev-main", "--async", "--yes"]) == 1
 
     aws_stubs.done()
     assert capsys.readouterr().err.endswith(
-        f"temt: An error occurred ({code}) when calling the RebootInstances operation: "
+        f"Error: An error occurred ({code}) when calling the RebootInstances operation: "
         f"{REFUSED}; see 'temt status --svc dev-main' and reboot again\n"
     )
 
@@ -416,14 +426,14 @@ def test_it_shows_the_refusal_after_reading_the_boot_id(
         expected_params=BY_ID,
     )
 
-    assert cli.main(["temt", "reboot", "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["reboot", "--svc", "dev-main", "--yes"]) == 1
 
     # 手順 7 の問い合わせは積んでいないので、待てば Stubber が失敗する
     aws_stubs.done()
     # 再起動の前に boot_id を読む待ち合わせの 1 回だけ
     assert clock.slept == [5]
     assert capsys.readouterr().err.endswith(
-        "temt: An error occurred (IncorrectInstanceState) when calling the RebootInstances "
+        "Error: An error occurred (IncorrectInstanceState) when calling the RebootInstances "
         f"operation: {REFUSED}; see 'temt status --svc dev-main' and reboot again\n"
     )
 

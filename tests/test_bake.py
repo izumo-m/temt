@@ -1,6 +1,6 @@
 """bake の本体のテスト。AWS は Stubber で、標準入力と時計と時刻は偽物に差し替える。
 
-端から端まで（bake.run か cli.main）を通し、手順の順序と、失敗したときにテンプレートが
+端から端まで（bake.run か temt のコマンド）を通し、手順の順序と、失敗したときにテンプレートが
 どう残るかを確かめる。設定ファイルには、どの場合も書かない。Stubber は積んだ順に
 しか応答しないので、応答を積む順が手順の順序を表す。
 """
@@ -22,12 +22,13 @@ from conftest import (
     deadline,
     identified,
     reservations,
+    run_temt,
     taken,
 )
 from types_boto3_ec2.client import EC2Client
 from types_boto3_ec2.type_defs import BlockDeviceMappingTypeDef
 
-from temt import bake, cli, conf, home, lock, resources, wait
+from temt import bake, conf, home, lock, resources, wait
 from temt.msg import TemtError, UsageError
 from temt.names import Service, defaults_path
 
@@ -1439,10 +1440,10 @@ def test_main_runs_bake(
 ) -> None:
     found(aws_stubs)
 
-    assert cli.main(["temt", "bake", "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["bake", "--svc", "dev-main", "--yes"]) == 1
 
     aws_stubs.done()
-    assert capsys.readouterr().err == f"temt: no instance for {NAME} to bake\n"
+    assert capsys.readouterr().err == f"Error: no instance for {NAME} to bake\n"
 
 
 def test_it_leaves_the_config_file_alone_when_the_instance_cannot_be_stopped(

@@ -159,7 +159,7 @@ def _aligned(lines: Sequence[Sequence[str]]) -> str:
 def out(text: str) -> None:
     """text をそのまま UTF-8 で標準出力に書く。読み手が先に閉じれば、何も言わずにやめる。
 
-    表と、app get の値と、diff の変更と、--help と --version に使う。ロケールの文字コード
+    表と、app get の値と、diff の変更に使う。ロケールの文字コード
     で書くと、ASCII しか書けないロケールでは値を出せないので、UTF-8 のバイト列で書く。
     起動したときから標準出力が閉じていれば（>&-）、読み手がいないので何もしない。
     """

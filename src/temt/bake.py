@@ -10,7 +10,7 @@ app deploy と app remove の --bake も、手順 1 の check_unfixed を何か�
 ssh set-port も同じく check_unfixed を呼び、同じロックを持ったまま、手順 3 の
 check_template と check_size、手順 5〜9 の make を使う。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

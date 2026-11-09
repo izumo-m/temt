@@ -1,13 +1,24 @@
-"""コマンドラインの入口。temt <対象> <動詞> [引数] [コマンドラインオプション] を受け取る。"""
+"""コマンドラインの入口。click で temt <対象> <動詞> [引数] [コマンドラインオプション] を読む。
 
-import re
+対象は click のグループ、動詞はコマンドで、短縮形は、表すコマンドを別の名前で temt に
+足したものである。--svc、--profile、--region だけは、temt の直後にも、コマンドの後ろにも
+置ける。サービスのコマンドは --svc を temt の直後に置き、ssh の ProxyCommand はコマンドの
+後ろに置く。
+
+コマンドの関数には docstring を書かない。click が使い方に出すので、コメントで書く。
+"""
+
+import functools
+import os
 import sys
-from collections.abc import Iterator
-from dataclasses import dataclass, replace
-from importlib import metadata
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, TypeVar
+
+import click
+from click.core import ParameterSource
 
 from temt import conf, msg, options
-from temt.conf import RULE_PORT
 from temt.msg import TemtError, UsageError
 from temt.names import (
     INSTANCE_ID_RULE,
@@ -21,1050 +32,868 @@ from temt.names import (
     is_label,
     is_user_name,
 )
-from temt.table import aws_error, os_error, out, printable, tilde
+from temt.table import aws_error, os_error, printable, tilde
 
-# コマンドは <対象> <動詞> の 2 語で表す
-SERVICE_APPLY = "service apply"
-SERVICE_DIFF = "service diff"
-SERVICE_DESTROY = "service destroy"
-SERVICE_LIST = "service list"
-SERVICE_IMPORT = "service import"
-INSTANCE_START = "instance start"
-INSTANCE_STOP = "instance stop"
-INSTANCE_TERMINATE = "instance terminate"
-INSTANCE_REBOOT = "instance reboot"
-INSTANCE_SHOW = "instance show"
-INSTANCE_LIST = "instance list"
-AMI_BAKE = "ami bake"
-AMI_LIST = "ami list"
-AMI_PRUNE = "ami prune"
-AMI_DELETE = "ami delete"
-TEMPLATE_SHOW = "template show"
-ROLE_IMPORT = "role import"
-ROLE_DELETE = "role delete"
-SG_LIST = "sg list"
-SG_ADD = "sg add"
-SG_REMOVE = "sg remove"
-SG_DIFF = "sg diff"
-SG_SHOW = "sg show"
-APP_LIST = "app list"
-APP_SHOW = "app show"
-APP_GET = "app get"
-APP_SET = "app set"
-APP_UNSET = "app unset"
-APP_DEPLOY = "app deploy"
-APP_REMOVE = "app remove"
-SSH_PROXY = "ssh proxy"
-SSH_SET_PORT = "ssh set-port"
-COMMANDS = (
-    SERVICE_APPLY,
-    SERVICE_DIFF,
-    SERVICE_DESTROY,
-    SERVICE_LIST,
-    SERVICE_IMPORT,
-    INSTANCE_START,
-    INSTANCE_STOP,
-    INSTANCE_TERMINATE,
-    INSTANCE_REBOOT,
-    INSTANCE_SHOW,
-    INSTANCE_LIST,
-    AMI_BAKE,
-    AMI_LIST,
-    AMI_PRUNE,
-    AMI_DELETE,
-    TEMPLATE_SHOW,
-    ROLE_IMPORT,
-    ROLE_DELETE,
-    SG_LIST,
-    SG_ADD,
-    SG_REMOVE,
-    SG_DIFF,
-    SG_SHOW,
-    APP_LIST,
-    APP_SHOW,
-    APP_GET,
-    APP_SET,
-    APP_UNSET,
-    APP_DEPLOY,
-    APP_REMOVE,
-    SSH_PROXY,
-    SSH_SET_PORT,
-)
-# 対象の名前。コマンドの 1 語め
-TARGETS = tuple(dict.fromkeys(command.split()[0] for command in COMMANDS))
-# 短縮形と、それが表すコマンド
-SHORT_FORMS = {
-    "apply": SERVICE_APPLY,
-    "diff": SERVICE_DIFF,
-    "destroy": SERVICE_DESTROY,
-    "start": INSTANCE_START,
-    "stop": INSTANCE_STOP,
-    "terminate": INSTANCE_TERMINATE,
-    "reboot": INSTANCE_REBOOT,
-    "status": INSTANCE_SHOW,
-    "bake": AMI_BAKE,
-    "deploy": APP_DEPLOY,
-    "proxy": SSH_PROXY,
-}
-# 完了を待たない --async を取るコマンド。bake と destroy はつねに完了を待つ
-ASYNC_COMMANDS = (INSTANCE_START, INSTANCE_STOP, INSTANCE_TERMINATE, INSTANCE_REBOOT)
-# 確認を省く --yes を取るコマンド
-YES_COMMANDS = (
-    SERVICE_APPLY,
-    INSTANCE_STOP,
-    INSTANCE_TERMINATE,
-    INSTANCE_REBOOT,
-    AMI_BAKE,
-    SERVICE_DESTROY,
-    SERVICE_IMPORT,
-    AMI_PRUNE,
-    AMI_DELETE,
-    ROLE_IMPORT,
-    ROLE_DELETE,
-    APP_DEPLOY,
-    APP_REMOVE,
-    SSH_SET_PORT,
-)
-# 終わったあとに AMI にする --bake を取るコマンド
-BAKE_COMMANDS = (APP_DEPLOY, APP_REMOVE)
-# 指されているか、指されているか分からないか、pending でも消す --force を取るコマンド
-FORCE_COMMANDS = (AMI_DELETE,)
-# アプリ ID（app deploy はパスも）を 1 つ取り、--user を取るコマンド
-TARGET_COMMANDS = BAKE_COMMANDS
-# アプリの後ろに <名前>=<値> のオプションを取り、前の記録のオプションを引き継がない
-# --reset を取るコマンド
-APP_OPTION_COMMANDS = (APP_DEPLOY,)
-# 接続先のポートを取るコマンド
-PORT_COMMANDS = (SSH_PROXY,)
-# sshd が待ち受けるポートを 1 つ以上取るコマンド
-PORTS_COMMANDS = (SSH_SET_PORT,)
-# --svc を省けるコマンド。付ければ、そのサービスのものだけを扱う。ほかのコマンドは
-# --svc が要る
-OPTIONAL_SERVICE_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, AMI_PRUNE, AMI_DELETE, APP_LIST)
-# AWS を呼ばないコマンド。--profile も --region も取らない。app list は --svc を付けても
-# 同じ手元のアプリを挙げる。付けるのは、サービスのコマンドから打てるようにするためである
-LOCAL_COMMANDS = (SERVICE_LIST, SG_LIST, SG_ADD, SG_REMOVE, APP_LIST)
-# 受信規則の <ポート> と <CIDR> を取るコマンド
-RULE_COMMANDS = (SG_ADD, SG_REMOVE)
-# 規則の説明を与える --description を取るコマンド
-DESCRIPTION_COMMANDS = (SG_ADD,)
-# 動詞の後ろに AMI の ID か名前を取るコマンド
-IMAGE_COMMANDS = (AMI_DELETE,)
-# 起動テンプレートの AMI を選ぶ --image-id を取るコマンド
-IMAGE_ID_COMMANDS = (SERVICE_APPLY, SERVICE_DIFF)
-# 動詞の後ろにインスタンス ID を 0 個以上取るコマンド
-INSTANCE_ID_COMMANDS = (INSTANCE_TERMINATE,)
-# 動詞の後ろに、取り込むインスタンスの ID を 1 つ取るコマンド
-SOURCE_COMMANDS = (SERVICE_IMPORT,)
-# 動詞の後ろに、IAM のロールの名前か ARN を 1 つ取るコマンド
-ROLE_COMMANDS = (ROLE_IMPORT,)
-# 表を出し、出す列を選ぶ --format を取るコマンド
-LIST_COMMANDS = (SERVICE_LIST, INSTANCE_LIST, AMI_LIST, APP_LIST, SG_LIST)
-# 動詞の後ろにアプリ ID、キー、値を取るコマンドと、取る引数の名前。並びは引数の順。
-# app set はキーと値を <キー>=<値> の 1 語で取る
-KEY_VALUE = "<key>=<value>"
-APP_ARGS = {
-    APP_SHOW: ("app id",),
-    APP_GET: ("app id", "key"),
-    APP_SET: ("app id", KEY_VALUE),
-    APP_UNSET: ("app id", "key"),
-}
-# インスタンスから Run Command で読み、入っているアプリも出す --apps を取るコマンド
-APPS_COMMANDS = (INSTANCE_SHOW,)
-SVC_OPTION = "--svc"
-# 使うプロファイルを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
-# 付けたコマンドでは、設定ファイルに AwsProfile が無いときだけ使い、あれば同じ値でなければ
-# ならない
-PROFILE_OPTION = "--profile"
-# 使うリージョンを選ぶコマンドラインオプション。AWS を呼ぶコマンドはどれも取る。--svc を
-# 付けたコマンドでは、設定ファイルに AwsRegion が無いときだけ使い、あれば同じ値でなければ
-# ならない
-REGION_OPTION = "--region"
-FORMAT_OPTION = "--format"
-# install と uninstall を実行するインスタンスのユーザーを選ぶコマンドラインオプション
-USER_OPTION = "--user"
-DESCRIPTION_OPTION = "--description"
-IMAGE_ID_OPTION = "--image-id"
-ASYNC_OPTION = "--async"
-YES_OPTION = "--yes"
-BAKE_OPTION = "--bake"
-FORCE_OPTION = "--force"
-RESET_OPTION = "--reset"
-APPS_OPTION = "--apps"
-# 使い方を出して終わるコマンドラインオプション。ほかの引数は読まない。対象より後ろなら、
-# その対象の使い方を出す
-HELP_OPTION = "--help"
-# temt のバージョンを出して終わるコマンドラインオプション。ほかの引数は読まない
-VERSION_OPTION = "--version"
-# 先に見つけたほうで終わるコマンドラインオプション
-EARLY_OPTIONS = (HELP_OPTION, VERSION_OPTION)
-# 直後の語を値とするコマンドラインオプション
-VALUE_OPTIONS = (
-    SVC_OPTION,
-    PROFILE_OPTION,
-    REGION_OPTION,
-    FORMAT_OPTION,
-    USER_OPTION,
-    DESCRIPTION_OPTION,
-    IMAGE_ID_OPTION,
-)
-# 値を取らないコマンドラインオプション
-SWITCH_OPTIONS = (ASYNC_OPTION, YES_OPTION, BAKE_OPTION, FORCE_OPTION, RESET_OPTION, APPS_OPTION)
-# 値を空にできるコマンドラインオプション。空の --description は説明を消す
-EMPTY_OK_OPTIONS = (DESCRIPTION_OPTION,)
-# 一部のコマンドだけが取るコマンドラインオプションと、それを取るコマンド。--svc、--profile、
-# --region は、parse がサービスと AWS を呼ぶかどうかから確かめる
-COMMAND_OPTIONS = {
-    FORMAT_OPTION: LIST_COMMANDS,
-    USER_OPTION: (*TARGET_COMMANDS, SSH_PROXY),
-    DESCRIPTION_OPTION: DESCRIPTION_COMMANDS,
-    IMAGE_ID_OPTION: IMAGE_ID_COMMANDS,
-    ASYNC_OPTION: ASYNC_COMMANDS,
-    YES_OPTION: YES_COMMANDS,
-    BAKE_OPTION: BAKE_COMMANDS,
-    FORCE_OPTION: FORCE_COMMANDS,
-    RESET_OPTION: APP_OPTION_COMMANDS,
-    APPS_OPTION: APPS_COMMANDS,
-}
-# 使い方に書く、動詞より後ろの引数と、そのコマンドだけが取るコマンドラインオプション。
-# --svc は区分から足す
-SYNOPSES = {
-    SERVICE_APPLY: "[--image-id <ami id or name>] [--yes]",
-    SERVICE_DIFF: "[--image-id <ami id or name>]",
-    SERVICE_DESTROY: "[--yes]",
-    SERVICE_LIST: "[--format <columns>]",
-    SERVICE_IMPORT: "<instance id> [--yes]",
-    INSTANCE_START: "[--async]",
-    INSTANCE_STOP: "[--async] [--yes]",
-    INSTANCE_TERMINATE: "[<id>...] [<options>]",
-    INSTANCE_REBOOT: "[--async] [--yes]",
-    INSTANCE_SHOW: "[--apps]",
-    INSTANCE_LIST: "[--format <columns>]",
-    AMI_BAKE: "[--yes]",
-    AMI_LIST: "[--format <columns>]",
-    AMI_PRUNE: "[--yes]",
-    AMI_DELETE: "<ami id or name> [--force] [--yes]",
-    TEMPLATE_SHOW: "",
-    ROLE_IMPORT: "<role name or arn> [--yes]",
-    ROLE_DELETE: "[--yes]",
-    SG_LIST: "[--format <columns>]",
-    SG_ADD: "<port> [<cidr>] [--description <text>]",
-    SG_REMOVE: "<port> [<cidr>]",
-    SG_DIFF: "",
-    SG_SHOW: "",
-    APP_LIST: "[--format <columns>]",
-    APP_SHOW: "<app id>",
-    APP_GET: "<app id> <key>",
-    APP_SET: f"<app id> {KEY_VALUE}",
-    APP_UNSET: "<app id> <key>",
-    APP_DEPLOY: "<app> [<name>=<value>...] [<options>]",
-    APP_REMOVE: "<app id> [<options>]",
-    SSH_PROXY: "[port] [--user <user>]",
-    SSH_SET_PORT: "<port>... [--yes]",
-}
-# 使い方で、短縮形の代わりにコマンドの行へ添える書き添え
-REMARKS = {SERVICE_LIST: "(no --profile/--region)"}
-# 使い方の末尾に書く注意と、それに関わるコマンド。対象の使い方には、その対象のコマンド
-# に関わる注意だけを書く
-NOTES = (
-    (
-        tuple(c for c in OPTIONAL_SERVICE_COMMANDS if c != APP_LIST),
-        "[--svc <svc>] may be left out; with it, the command deals only with the\nservice.",
-    ),
-    (LIST_COMMANDS, "<columns> is a comma-separated list of column names, such as ID,STATE."),
-    (
-        (SG_LIST, *RULE_COMMANDS),
-        """\
-<port> of sg add and sg remove is a port or a range with an optional /tcp or
-/udp, such as 22, 8000-8010 or 53/udp, or icmp. Without <cidr>, they use the
-egress IP address of this machine. sg list reads the config file and
-defaults.toml; sg add and sg remove edit only the config file. They take no
---profile or --region; run apply to update the security group.""",
-    ),
-    (
-        INSTANCE_ID_COMMANDS,
-        """\
-<id> of instance terminate is an instance id, such as i-0123456789abcdef0;
-without any, it terminates every instance of the service. Its <options> are
-[--async] [--yes].""",
-    ),
-    (
-        (AMI_DELETE,),
-        """\
-ami delete refuses an AMI that a launch template uses or that is still pending,
-and any AMI while a launch template version cannot be resolved, unless --force
-is given.""",
-    ),
-    (
-        (APP_LIST,),
-        """\
-app list lists the apps that app deploy finds by id (in the apps directory
-beside the config files, and those that come with temt), with or without
---svc, and takes no --profile or --region. instance show --apps lists the apps
-on the running instance.""",
-    ),
-    ((APP_SET,), "<value> of app set may contain '=' and start with '-'."),
-    (
-        SOURCE_COMMANDS,
-        """\
-service import makes an AMI of a stopped instance and a new config file that
-launches the same instance; run apply next. It takes --region for the region of
-the instance, and changes nothing on the instance.""",
-    ),
-    (
-        (ROLE_IMPORT, ROLE_DELETE),
-        """\
-role import rewrites [role] and IamInstanceProfile of the config file to move a
-copy of the instance role under temt; run diff and apply next. role delete
-deletes the instance role and instance profile temt-<svc>.""",
-    ),
-    (
-        PORTS_COMMANDS,
-        """\
-ssh set-port sets the ports sshd listens on through Run Command, bakes the
-instance, and writes the first port to Port of the Host block.""",
-    ),
-    (
-        TARGET_COMMANDS,
-        """\
-<app> of app deploy is an app id, or a path if it has a '/'. An app id names a
-directory in the apps directory beside the config files, or else an app that
-comes with temt.
-<name>=<value> of app deploy sets an app option, which the app declares in its
-manifest.toml; <name>= sets it back to the default. app deploy keeps the app
-options of the last deploy unless --reset is given; app show lists them.
-<options> of app deploy and app remove are [--user <user>] [--bake] [--yes], and
-[--reset] for app deploy. --user runs install or uninstall as that user on the
-instance; app deploy defaults to user in manifest.toml, app remove to the user
-that ran install or else user in manifest.toml, and both to root.""",
-    ),
-)
-# 使い方の、コマンドラインオプションの説明の行
-HELP_LINE = "  --help              print this message; after <target>, the help for it"
-VERSION_LINE = "  --version           print the version of temt"
-SVC_LINE = "  --svc <svc>         the service (its config file)"
-PROFILE_LINE = "  --profile <name>    the AWS profile, while the config file has no AwsProfile"
-REGION_LINE = "  --region <region>   the AWS region, while the config file has no AwsRegion"
-
-
-def _synopsis(command: str) -> str:
-    """コマンドの行の左側を作る。--svc は、区分に合わせて動詞の直後に書く。"""
-    svc = f"{SVC_OPTION} <svc>"
-    words = [command, f"[{svc}]" if command in OPTIONAL_SERVICE_COMMANDS else svc]
-    if SYNOPSES[command]:
-        words.append(SYNOPSES[command])
-    return "  " + " ".join(words)
-
-
-def _table(groups: list[list[str]]) -> list[str]:
-    """コマンドの行を、組ごとに空行で区切って並べる。短縮形か書き添えは、すべての行で
-    桁を揃えて右に書く。短縮形があれば、見出しの右に列の見出しを書く。
-    """
-    short = {command: form for form, command in SHORT_FORMS.items()}
-    tables = [
-        [(_synopsis(c), short.get(c) or REMARKS.get(c, "")) for c in group] for group in groups
-    ]
-    width = max((len(left) for rows in tables for left, right in rows if right), default=0) + 2
-    has_short = any(c in short for group in groups for c in group)
-    lines = [f"{'commands:':<{width}} short form:" if has_short else "commands:"]
-    for i, rows in enumerate(tables):
-        if i:
-            lines.append("")
-        lines += [f"{left:<{width}} {right}".rstrip() for left, right in rows]
-    return lines
-
-
-def _notes(commands: list[str]) -> list[str]:
-    """そのコマンドに関わる注意を並べる。"""
-    return [note for related, note in NOTES if any(c in related for c in commands)]
-
-
-def usage(target: str | None = None) -> str:
-    """使い方を作る。target を与えれば、その対象のコマンドだけを書く。"""
-    if target is None:
-        lines = [
-            "usage: temt <target> <verb> [args] [options]",
-            "       temt <short form> [args] [options]",
-            "       temt-<svc> <target> <verb> [args] [options]   (temt ... --svc <svc>)",
-            "       temt-<svc> <short form> [args] [options]      (temt ... --svc <svc>)",
-            "",
-            "options may come anywhere after the program name:",
-            HELP_LINE,
-            VERSION_LINE,
-            SVC_LINE,
-            PROFILE_LINE,
-            REGION_LINE,
-            "",
-            *_table([[c for c in COMMANDS if c.split()[0] == t] for t in TARGETS]),
-            "",
-            *_notes(list(COMMANDS)),
-        ]
-        return "\n".join(lines) + "\n"
-    commands = [c for c in COMMANDS if c.split()[0] == target]
-    lines = [
-        f"usage: temt {target} <verb> [args] [options]",
-        f"       temt-<svc> {target} <verb> [args] [options]   (temt ... --svc <svc>)",
-        "",
-        "options may come anywhere after the program name:",
-        HELP_LINE,
-        VERSION_LINE,
-        SVC_LINE,
-        PROFILE_LINE,
-        REGION_LINE,
-        "",
-        *_table([commands]),
-    ]
-    notes = _notes(commands)
-    if notes:
-        lines += ["", *notes]
-    return "\n".join(lines) + "\n"
-
-
-USAGE = usage()
+DOCS_URL = "https://github.com/izumo-m/temt/blob/main/docs/usage.md"
+# 使い方の末尾に書く、詳しい使い方の文書の場所
+EPILOG = f"More: {DOCS_URL}"
 DEFAULT_PORT = 22
 PORT_MAX = 65535
-PORT_RE = re.compile(r"[0-9]{1,5}")
+PORT = click.IntRange(1, PORT_MAX)
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
-@dataclass(frozen=True)
-class Request:
-    """実行する 1 つのコマンド。"""
+class _Text(click.ParamType):
+    """空でない値。utf8 なら、AWS に送れるよう、UTF-8 であることも求める。"""
 
-    # COMMANDS のどれか。短縮形で呼ばれても、それが表すコマンドになる
-    command: str
-    # --svc で選ばれたサービス。省かれていれば None
-    service: Service | None
-    # --profile で選ばれたプロファイル。省かれていれば None
-    profile: str | None = None
-    # --region で選ばれたリージョン。省かれていれば None
-    region: str | None = None
-    # ami delete が取る AMI の ID か名前と、IMAGE_ID_COMMANDS の --image-id の値
-    image: str | None = None
-    # INSTANCE_ID_COMMANDS が取るインスタンス ID。並びは打たれた順。省かれていれば空
-    instance_ids: tuple[str, ...] = ()
-    # --format の値。LIST_COMMANDS だけが取り、列の名前は各コマンドが確かめる
-    format: str | None = None
-    # APP_ARGS のコマンドが取るアプリ ID、キー、値。app は、TARGET_COMMANDS では
-    # 取ったアプリ ID で、app deploy ではパスのこともある
-    app: str | None = None
-    app_key: str | None = None
-    value: str | None = None
-    is_async: bool = False
-    yes: bool = False
-    bake: bool = False
-    force: bool = False
-    # --user の値。TARGET_COMMANDS と ssh proxy が取る。省かれていれば None
-    user: str | None = None
-    # APP_OPTION_COMMANDS が取るオプションの名前と値。並びは打たれた順。値が None なら、
-    # <名前>= で既定に戻す
-    options: tuple[tuple[str, str | None], ...] = ()
-    # --reset。APP_OPTION_COMMANDS だけが取る
-    reset: bool = False
-    # --apps。APPS_COMMANDS だけが取る
-    apps: bool = False
-    port: int = DEFAULT_PORT
-    # PORTS_COMMANDS が取る、sshd が待ち受けるポート。並びは打たれた順
-    ports: tuple[int, ...] = ()
-    # RULE_COMMANDS が取る受信規則。プロトコルとポートの範囲（icmp では None）、正規化した
-    # CIDR。CIDR を省けば None で、グローバル IP アドレスから作る
-    protocol: str | None = None
-    rule_port: RULE_PORT = None
-    cidr: str | None = None
-    # sg add の --description の値。省かれていれば None で、空なら説明を消す
-    description: str | None = None
+    name = "text"
+
+    def __init__(self, *, utf8: bool = False) -> None:
+        self.utf8 = utf8
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if value == "":
+            self.fail("must not be empty", param, ctx)
+        if self.utf8 and not options.is_utf8(value):
+            self.fail(f"'{printable(value)}' is not valid UTF-8", param, ctx)
+        return value
 
 
-def _words(args: list[str]) -> Iterator[str]:
-    """コマンドラインオプションを除いた語と、--help と --version を、並んだ順に返す。
-    値を取るコマンドラインオプションの直後の語は、値として読み飛ばす。
-    """
-    rest = iter(args)
-    for arg in rest:
-        if arg in VALUE_OPTIONS:
-            _ = next(rest, None)
-        elif arg in EARLY_OPTIONS or not arg.startswith("-"):
-            yield arg
+class _ServiceName(click.ParamType):
+    """--svc。サービス名の規則で確かめ、サービスにする。"""
 
+    name = "svc"
 
-def _usage_for(first: str | None) -> str:
-    """コマンドラインオプションを除いた 1 語め first から決まる使い方。対象の名前か
-    短縮形なら、その対象の使い方とし、そうでなければすべてのコマンドの使い方とする。
-    """
-    if first in SHORT_FORMS:
-        return usage(SHORT_FORMS[first].split()[0])
-    return usage(first) if first in TARGETS else USAGE
-
-
-def version() -> str:
-    """--version で出す行。番号は、入れた temt の pyproject.toml の version である。"""
-    return f"{PREFIX} {metadata.version('temt')}\n"
-
-
-def _early(args: list[str]) -> str | None:
-    """--help か --version があれば、先に見つけたほうで出す文を返す。無ければ None。
-
-    --help が対象か短縮形より後ろにあれば、その対象の使い方とする。
-    """
-    first: str | None = None
-    for word in _words(args):
-        if word == VERSION_OPTION:
-            return version()
-        if word == HELP_OPTION:
-            return _usage_for(first)
-        if first is None:
-            first = word
-    return None
-
-
-def _split(args: list[str]) -> tuple[dict[str, str], list[str], str | None]:
-    """引数をコマンドラインオプションと位置引数に分ける。コマンドラインオプションは
-    どこに置いてもよく、それぞれ 1 回まで受け付ける。
-
-    値を取るコマンドラインオプションは、直後の語を値とする。それ以外で - で始まる語は
-    コマンドラインオプションとして読み、知らないものは誤りとする。返すのは、
-    コマンドラインオプションごとの値（値を取らないものは空）、位置引数の並び、最初に
-    見つけた誤りである。誤りは、parse がコマンドの名前を添えて知らせられるよう、ここでは
-    上げずに読み進める。
-    """
-    cli_options: dict[str, str] = {}
-    words: list[str] = []
-    problems: list[str] = []
-    rest = iter(args)
-    for arg in rest:
-        if not arg.startswith("-"):
-            words.append(arg)
-        elif arg not in VALUE_OPTIONS and arg not in SWITCH_OPTIONS:
-            problems.append(f"unknown option: {printable(arg)}")
-        elif arg in cli_options:
-            problems.append(f"repeated argument: {arg}")
-            if arg in VALUE_OPTIONS:
-                _ = next(rest, None)
-        elif arg in SWITCH_OPTIONS:
-            cli_options[arg] = ""
-        else:
-            value = next(rest, None)
-            if value is None or (not value and arg not in EMPTY_OK_OPTIONS):
-                problems.append(f"missing value for {arg}")
-            else:
-                cli_options[arg] = value
-    return cli_options, words, next(iter(problems), None)
-
-
-def _command(words: list[str]) -> tuple[str, str, list[str]]:
-    """先頭のコマンドを読み、コマンド、打たれたとおりの名前、残りの位置引数を返す。
-
-    打たれたとおりの名前は、引数の誤りを知らせるときに使う。
-    """
-    if not words:
-        raise UsageError("missing command")
-    word = words[0]
-    if word in SHORT_FORMS:
-        return SHORT_FORMS[word], word, words[1:]
-    if word not in TARGETS:
-        raise UsageError(f"unknown command: {printable(word)}")
-    if len(words) < 2 or not words[1]:
-        raise UsageError(f"{word}: missing verb")
-    command = f"{word} {words[1]}"
-    if command not in COMMANDS:
-        raise UsageError(f"{word}: unknown verb: {printable(words[1])}")
-    return command, command, words[2:]
-
-
-def _service(command: str, typed: str, svc: str | None) -> Service | None:
-    """--svc の値から、サービスを決める。省いたときは None。"""
-    if svc is None:
-        if command in OPTIONAL_SERVICE_COMMANDS:
-            return None
-        raise UsageError(f"{typed}: missing {SVC_OPTION}")
-    return Service(svc)
-
-
-def _check_options(command: str, typed: str, cli_options: dict[str, str]) -> None:
-    """そのコマンドが取らないコマンドラインオプションを誤りとする。"""
-    if command in LOCAL_COMMANDS:
-        for option in (PROFILE_OPTION, REGION_OPTION):
-            if option in cli_options:
-                raise UsageError(f"{typed}: {option} is not allowed; it does not call AWS")
-    for option in cli_options:
-        if option in COMMAND_OPTIONS and command not in COMMAND_OPTIONS[option]:
-            raise UsageError(f"{typed}: unexpected argument: {option}")
-
-
-def _one(typed: str, words: list[str], what: str) -> str:
-    """位置引数をちょうど 1 つ読む。空の語は無いものとする。"""
-    if not words or not words[0]:
-        raise UsageError(f"{typed}: missing {what}")
-    if len(words) > 1:
-        raise UsageError(f"{typed}: unexpected argument: {printable(words[1])}")
-    return words[0]
-
-
-def _port(typed: str, words: list[str]) -> int:
-    """接続先のポートを返す。省かれていれば 22 とする。"""
-    if not words:
-        return DEFAULT_PORT
-    if len(words) > 1:
-        raise UsageError(f"{typed}: unexpected argument: {printable(words[1])}")
-    if not PORT_RE.fullmatch(words[0]) or not 1 <= int(words[0]) <= PORT_MAX:
-        raise UsageError(
-            f"{typed}: port must be a number from 1 to {PORT_MAX}: {printable(words[0])}"
-        )
-    return int(words[0])
-
-
-def _ports(typed: str, words: list[str]) -> tuple[int, ...]:
-    """ssh set-port のポートを読む。1 つ以上で、重ねない。"""
-    if not words:
-        raise UsageError(f"{typed}: missing port")
-    ports: list[int] = []
-    for word in words:
-        if not PORT_RE.fullmatch(word) or not 1 <= int(word) <= PORT_MAX:
-            raise UsageError(
-                f"{typed}: port must be a number from 1 to {PORT_MAX}: {printable(word)}"
-            )
-        if int(word) in ports:
-            raise UsageError(f"{typed}: repeated port: {printable(word)}")
-        ports.append(int(word))
-    return tuple(ports)
-
-
-def _rule(
-    typed: str, words: list[str], description: str | None
-) -> tuple[str, RULE_PORT, str | None]:
-    """sg add と sg remove の <ポート> と <CIDR> を読み、sg add の --description を確かめる。
-
-    プロトコル、ポートの範囲、正規化した CIDR（省かれていれば None）を返す。
-    """
-    if not words or not words[0]:
-        raise UsageError(f"{typed}: missing port")
-    if len(words) > 2:
-        raise UsageError(f"{typed}: unexpected argument: {printable(words[2])}")
-    try:
-        protocol, port = conf.parse_port(words[0])
-    except ValueError as e:
-        raise UsageError(f"{typed}: the port {e}: {printable(words[0])}") from None
-    cidr = None
-    if len(words) > 1:
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if isinstance(value, Service):
+            return value
         try:
-            cidr = conf.cidr(words[1])
-        except ValueError as e:
-            raise UsageError(f"{typed}: {e}") from None
-    if description is not None:
+            return Service(value)
+        except UsageError as e:
+            self.fail(e.message, param, ctx)
+
+
+class _Label(click.ParamType):
+    """アプリ ID とキー。"""
+
+    name = "label"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if not is_label(value):
+            self.fail(f"'{printable(value)}' {LABEL_RULE}", param, ctx)
+        return value
+
+
+class _UserName(click.ParamType):
+    """--user。install と uninstall を実行するインスタンスのユーザー。"""
+
+    name = "user"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if not is_user_name(value):
+            self.fail(f"'{printable(value)}' {USER_NAME_RULE}", param, ctx)
+        return value
+
+
+class _InstanceId(click.ParamType):
+    """インスタンス ID。"""
+
+    name = "instance_id"
+
+    def get_metavar(self, param: click.Parameter, ctx: click.Context) -> str | None:
+        return "INSTANCE_ID"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if not is_instance_id(value):
+            self.fail(f"'{printable(value)}' {INSTANCE_ID_RULE}", param, ctx)
+        return value
+
+
+class _RulePort(click.ParamType):
+    """sg add と sg remove の <ポート>。プロトコルとポートの範囲（icmp では None）にする。"""
+
+    name = "port"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if isinstance(value, tuple):
+            return value
         try:
-            conf.check_description(description)
+            return conf.parse_port(value)
         except ValueError as e:
-            raise UsageError(f"{typed}: {e}") from None
-    return protocol, port, cidr
+            self.fail(f"'{printable(value)}' {e}", param, ctx)
 
 
-def _instance_ids(typed: str, words: list[str]) -> tuple[str, ...]:
-    """instance terminate のインスタンス ID を読む。省いてもよい。"""
-    for i, word in enumerate(words):
-        if not is_instance_id(word):
-            raise UsageError(f"{typed}: the instance id {INSTANCE_ID_RULE}: {printable(word)}")
-        if word in words[:i]:
-            raise UsageError(f"{typed}: repeated instance id: {word}")
-    return tuple(words)
+class _Cidr(click.ParamType):
+    """sg add と sg remove の <CIDR>。正規化する。"""
+
+    name = "cidr"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        try:
+            return conf.cidr(value)
+        except ValueError as e:
+            self.fail(str(e), param, ctx)
 
 
-def _app(command: str, typed: str, words: list[str]) -> tuple[str, str | None, str | None]:
-    """アプリ ID、キー、値を読む。APP_ARGS の数だけ取り、それより多ければ誤りとする。
+class _Description(click.ParamType):
+    """sg add の --description。空なら説明を消す。"""
 
-    app set は <キー>=<値> を最初の = で分ける。キーの規則に = は無いので、値は = を
+    name = "text"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        try:
+            conf.check_description(value)
+        except ValueError as e:
+            self.fail(str(e), param, ctx)
+        return value
+
+
+class _KeyValue(click.ParamType):
+    """app set の <キー>=<値>。最初の = で分ける。キーの規則に = は無いので、値は = を
     含んでもよい。
     """
-    wanted = APP_ARGS[command]
-    if len(words) < len(wanted):
-        raise UsageError(f"{typed}: missing {wanted[len(words)]}")
-    if len(words) > len(wanted):
-        raise UsageError(f"{typed}: unexpected argument: {printable(words[len(wanted)])}")
-    app = words[0]
-    if not is_label(app):
-        raise UsageError(f"{typed}: the app id {LABEL_RULE}: {printable(app)}")
-    if len(words) < 2:
-        return app, None, None
-    key, value = words[1], None
-    if command == APP_SET:
-        key, sep, value = words[1].partition("=")
+
+    name = "key_value"
+
+    def get_metavar(self, param: click.Parameter, ctx: click.Context) -> str | None:
+        return "KEY=VALUE"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if isinstance(value, tuple):
+            return value
+        key, sep, text = value.partition("=")
         if not sep:
-            raise UsageError(f"{typed}: give the value as {KEY_VALUE}: {printable(words[1])}")
-    if not is_label(key):
-        raise UsageError(f"{typed}: the key {LABEL_RULE}: {printable(key)}")
-    if value is not None:
-        if not value:
+            self.fail(f"'{printable(value)}' must be KEY=VALUE", param, ctx)
+        if not is_label(key):
+            self.fail(f"'{printable(key)}' {LABEL_RULE}", param, ctx)
+        if not text:
             # SSM は空の値を受け付けない
-            raise UsageError(f"{typed}: the value must not be empty")
-        if not options.is_utf8(value):
+            self.fail("the value must not be empty", param, ctx)
+        if not options.is_utf8(text):
             # そのまま書くと、app get が出せない値になる
-            raise UsageError(f"{typed}: the value is not valid UTF-8")
-    return app, key, value
+            self.fail("the value is not valid UTF-8", param, ctx)
+        return key, text
 
 
-def _target(command: str, typed: str, words: list[str]) -> str:
-    """app deploy と app remove が取るアプリ ID を読む。app deploy は / を含めばパスとし、
-    最後の要素をアプリ ID として規則で確かめる。
-
-    app deploy はアプリの後ろにオプションを取るので、1 語めだけを読む。
-    """
-    if command in APP_OPTION_COMMANDS:
-        target = _one(typed, words[:1], "app id or path")
-        if "/" not in target and "=" in target:
-            raise UsageError(
-                f"{typed}: give the app id or path before the app options: {printable(target)}"
-            )
-    else:
-        target = _one(typed, words, "app id")
-    if command == APP_DEPLOY and "/" in target:
-        name = app_dir(target).name
-        if not is_label(name):
-            raise UsageError(
-                f"{typed}: the app id {LABEL_RULE}: {printable(name)} "
-                f"(the last part of {printable(target)})"
-            )
-    elif not is_label(target):
-        raise UsageError(f"{typed}: the app id {LABEL_RULE}: {printable(target)}")
-    return target
-
-
-def _app_options(typed: str, words: list[str]) -> tuple[tuple[str, str | None], ...]:
-    """app deploy のアプリの後ろの <名前>=<値> を読む。
+class _AppOption(click.ParamType):
+    """app deploy のアプリの後ろの <名前>=<値>。
 
     最初の = で分ける。名前の規則に = は無いので、値は = を含んでもよい。値は加工せず、
     - で始まる値もそのまま受け取る。空の値は、その名前を既定に戻す指定で None とする。
     名前が宣言されているかと、値が pattern に合うかは、deploy が manifest.toml と照らす。
     """
-    found: dict[str, str | None] = {}
-    for word in words:
-        name, sep, value = word.partition("=")
+
+    name = "app_option"
+
+    def get_metavar(self, param: click.Parameter, ctx: click.Context) -> str | None:
+        return "NAME=VALUE"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if isinstance(value, tuple):
+            return value
+        name, sep, text = value.partition("=")
         if not sep:
-            raise UsageError(f"{typed}: give the app option as <name>=<value>: {printable(word)}")
+            self.fail(f"'{printable(value)}' must be NAME=VALUE", param, ctx)
         if not is_label(name):
-            raise UsageError(f"{typed}: the app option name {LABEL_RULE}: {printable(name)}")
-        if name in found:
-            raise UsageError(f"{typed}: repeated app option: {name}")
-        if not options.is_utf8(value):
+            self.fail(f"'{printable(name)}' {LABEL_RULE}", param, ctx)
+        if not options.is_utf8(text):
             # UTF-8 でないバイト列は、Python が対にならないサロゲートとして読む
-            raise UsageError(f"{typed}: the value of {name} is not valid UTF-8")
-        if options.has_control(value):
-            raise UsageError(f"{typed}: the value of {name} {options.VALUE_RULE}")
-        found[name] = value or None
-    return tuple(found.items())
+            self.fail(f"the value of {name} is not valid UTF-8", param, ctx)
+        if options.has_control(text):
+            self.fail(f"the value of {name} {options.VALUE_RULE}", param, ctx)
+        return name, text or None
 
 
-def _image(typed: str, image: str) -> str:
-    """AMI の ID か名前を確かめる。"""
-    if not options.is_utf8(image):
-        # AWS に送れない
-        raise UsageError(f"{typed}: the AMI id or name is not valid UTF-8: {printable(image)}")
-    return image
+class _DeployApp(click.ParamType):
+    """app deploy のアプリ。/ を含めばパスとし、最後の要素をアプリ ID として規則で確かめる。"""
+
+    name = "app"
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if "/" in value:
+            name = app_dir(value).name
+            if not is_label(name):
+                self.fail(
+                    f"'{printable(name)}' (the last part of '{printable(value)}') {LABEL_RULE}",
+                    param,
+                    ctx,
+                )
+        elif "=" in value:
+            self.fail(
+                f"give the app id or path before the app options: '{printable(value)}'", param, ctx
+            )
+        elif not is_label(value):
+            self.fail(f"'{printable(value)}' {LABEL_RULE}", param, ctx)
+        return value
 
 
-def _user(typed: str, user: str | None) -> str | None:
-    """--user の値をユーザー名の規則で確かめる。"""
-    if user is not None and not is_user_name(user):
-        raise UsageError(f"{typed}: the user {USER_NAME_RULE}: {printable(user)}")
-    return user
+TEXT = _Text()
+AWS_TEXT = _Text(utf8=True)
+SERVICE = _ServiceName()
+LABEL = _Label()
 
 
-def parse(args: list[str]) -> Request:
-    """引数から、実行する要求を作る。"""
-    cli_options, words, problem = _split(args)
-    try:
-        command, typed, words = _command(words)
-    except UsageError:
-        # コマンドラインオプションの誤りは、コマンドが読めなくても知らせる。
-        # コマンドの誤りより先に起きている
-        if problem is not None:
-            raise UsageError(problem) from None
-        raise
-    if problem is not None:
-        raise UsageError(f"{typed}: {problem}")
-    service = _service(command, typed, cli_options.get(SVC_OPTION))
-    _check_options(command, typed, cli_options)
-    request = Request(
-        command,
-        service,
-        profile=cli_options.get(PROFILE_OPTION),
-        region=cli_options.get(REGION_OPTION),
-        format=cli_options.get(FORMAT_OPTION),
-        is_async=ASYNC_OPTION in cli_options,
-        yes=YES_OPTION in cli_options,
-        bake=BAKE_OPTION in cli_options,
-        force=FORCE_OPTION in cli_options,
-        user=_user(typed, cli_options.get(USER_OPTION)),
-        reset=RESET_OPTION in cli_options,
-        apps=APPS_OPTION in cli_options,
+def _unique(ctx: click.Context, param: click.Parameter, values: tuple[Any, ...]) -> Any:
+    """並びの引数のコールバック。同じものを 2 度与えれば誤りとする。<名前>=<値> は名前で比べる。"""
+    seen: list[Any] = []
+    for value in values:
+        key = value[0] if isinstance(value, tuple) else value
+        if key in seen:
+            raise click.BadParameter(f"'{key}' is given twice", ctx, param)
+        seen.append(key)
+    return values
+
+
+def _single(ctx: click.Context, param: click.Parameter, values: tuple[Any, ...]) -> Any:
+    """temt の直後の --svc のコールバック。重ねれば誤りとする。
+
+    サービスのコマンドは temt --svc <svc> "$@" なので、利用者が --svc を付けると重なる。
+    click のとおり後の値を使うと、黙って別のサービスを扱ってしまう。
+    """
+    if len(values) > 1:
+        raise click.UsageError(f"{param.opts[0]} is given more than once.", ctx)
+    return values[0] if values else None
+
+
+def _from_root(name: str) -> Callable[[], Any]:
+    """コマンドの後ろの --svc、--profile、--region の既定。temt の直後に置いた値とする。"""
+    return lambda: click.get_current_context().find_root().params.get(name)
+
+
+def _once(ctx: click.Context, param: click.Parameter, value: Any) -> Any:
+    """コマンドの後ろの --svc、--profile、--region のコールバック。temt の直後にも置いて
+    いれば誤りとする。
+
+    既定は temt の直後に置いた値で、どちらにも無ければ None になる。click は None を値が
+    無いとはみなさないので、要るかどうかはここで確かめる。
+    """
+    name = param.name or ""
+    given = ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE
+    if given and ctx.find_root().params.get(name) is not None:
+        raise click.UsageError(f"{param.opts[0]} is given both before and after the command.", ctx)
+    if param.required and value is None:
+        raise click.MissingParameter(ctx=ctx, param=param)
+    return value
+
+
+def _svc(*, required: bool = True) -> Callable[[F], F]:
+    """--svc。required でなければ省け、省けばすべてのサービスのものを扱う。"""
+    return click.option(
+        "--svc",
+        "service",
+        type=SERVICE,
+        required=required,
+        default=_from_root("service"),
+        callback=_once,
     )
-    if command in IMAGE_COMMANDS:
-        return replace(request, image=_image(typed, _one(typed, words, "AMI id or name")))
-    if IMAGE_ID_OPTION in cli_options:
-        request = replace(request, image=_image(typed, cli_options[IMAGE_ID_OPTION]))
-    if command in INSTANCE_ID_COMMANDS:
-        return replace(request, instance_ids=_instance_ids(typed, words))
-    if command in SOURCE_COMMANDS:
-        source = _one(typed, words, "instance id")
-        if not is_instance_id(source):
-            raise UsageError(f"{typed}: the instance id {INSTANCE_ID_RULE}: {printable(source)}")
-        return replace(request, instance_ids=(source,))
-    if command in ROLE_COMMANDS:
-        role = _one(typed, words, "role name or ARN")
-        if not options.is_utf8(role):
-            raise UsageError(f"{typed}: the role name is not valid UTF-8: {printable(role)}")
-        return replace(request, app=role)
-    if command in TARGET_COMMANDS:
-        request = replace(request, app=_target(command, typed, words))
-        if command in APP_OPTION_COMMANDS:
-            request = replace(request, options=_app_options(typed, words[1:]))
-        return request
-    if command in APP_ARGS:
-        app, key, value = _app(command, typed, words)
-        return replace(request, app=app, app_key=key, value=value)
-    if command in RULE_COMMANDS:
-        description = cli_options.get(DESCRIPTION_OPTION)
-        protocol, port, cidr = _rule(typed, words, description)
-        return replace(
-            request, protocol=protocol, rule_port=port, cidr=cidr, description=description
-        )
-    if command in PORT_COMMANDS:
-        return replace(request, port=_port(typed, words))
-    if command in PORTS_COMMANDS:
-        return replace(request, ports=_ports(typed, words))
-    if words:
-        raise UsageError(f"{typed}: unexpected argument: {printable(words[0])}")
-    return request
 
 
 def _profile_hint(service: Service | None) -> str:
     """資格情報でつまずいたときに、プロファイルを選べる場所を伝える。"""
     if service is None:
         return (
-            f"give {PROFILE_OPTION}, write AwsProfile in {printable(tilde(defaults_path()))}, "
+            f"give --profile, write AwsProfile in {printable(tilde(defaults_path()))}, "
             f"or set AWS_PROFILE"
         )
     if conf.written(service, "AwsProfile"):
         # 設定ファイルに書いた AwsProfile は固定で、--profile でも環境変数でも替わらない
         return f"check AwsProfile in {printable(tilde(service.conf_path))}"
     return (
-        f"give {PROFILE_OPTION}, set AWS_PROFILE, or write AwsProfile in "
+        f"give --profile, set AWS_PROFILE, or write AwsProfile in "
         f"{printable(tilde(conf.source(service, 'AwsProfile')))}"
     )
 
 
-def _run_service(request: Request) -> None:
-    """--svc が要るコマンドを実行する。"""
-    from temt import (
-        apply,
-        bake,
-        destroy,
-        importing,
-        proxy,
-        reboot,
-        role,
-        setport,
-        sg,
-        show,
-        start,
-        status,
-        stop,
-        terminate,
-    )
+def _aws(f: Callable[..., None]) -> Callable[..., None]:
+    """AWS を呼ぶコマンド。--profile と --region を足し、AWS の誤りを包む。
 
-    service = request.service
-    if service is None:
-        # parse がサービスを必ず決めるので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing service")
-    if request.command in (*APP_ARGS, *TARGET_COMMANDS):
-        _run_app(request, service)
-    elif request.command == SERVICE_APPLY:
-        apply.run(service, image=request.image, yes=request.yes)
-    elif request.command == SERVICE_DIFF:
-        apply.diff(service, image=request.image)
-    elif request.command == SERVICE_DESTROY:
-        destroy.run(service, yes=request.yes)
-    elif request.command == INSTANCE_START:
-        start.run(service, is_async=request.is_async)
-    elif request.command == INSTANCE_STOP:
-        stop.run(service, is_async=request.is_async, yes=request.yes)
-    elif request.command == INSTANCE_TERMINATE:
-        terminate.run(service, ids=request.instance_ids, is_async=request.is_async, yes=request.yes)
-    elif request.command == INSTANCE_REBOOT:
-        reboot.run(service, is_async=request.is_async, yes=request.yes)
-    elif request.command == INSTANCE_SHOW:
-        status.run(service, apps=request.apps)
-    elif request.command == AMI_BAKE:
-        bake.run(service, yes=request.yes)
-    elif request.command == SERVICE_IMPORT:
-        importing.run(service, request.instance_ids[0], yes=request.yes)
-    elif request.command == ROLE_IMPORT and request.app is not None:
-        role.import_role(service, request.app, yes=request.yes)
-    elif request.command == ROLE_DELETE:
-        role.delete(service, yes=request.yes)
-    elif request.command == TEMPLATE_SHOW:
-        show.template(service)
-    elif request.command == SG_DIFF:
-        sg.diff(service)
-    elif request.command == SG_SHOW:
-        sg.show(service)
-    elif request.command == SSH_PROXY:
-        proxy.run(service, request.port, request.user)
-    elif request.command == SSH_SET_PORT:
-        setport.run(service, request.ports, yes=request.yes)
-    else:
-        # parse が COMMANDS の中だけを通すので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"not implemented: {request.command}")
-
-
-def _run_app(request: Request, service: Service) -> None:
-    """app のコマンドを実行する。"""
-    from temt import app, deploy
-
-    app_id, key, value = request.app, request.app_key, request.value
-    if app_id is None:
-        # parse がアプリ ID を必ず読むので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing app id")
-    if request.command == APP_SHOW:
-        app.show(service, app_id)
-    elif request.command == APP_GET and key is not None:
-        app.get(service, app_id, key)
-    elif request.command == APP_SET and key is not None and value is not None:
-        app.set_value(service, app_id, key, value)
-    elif request.command == APP_UNSET and key is not None:
-        app.unset(service, app_id, key)
-    elif request.command == APP_DEPLOY:
-        deploy.run(
-            service,
-            app_id,
-            user=request.user,
-            baking=request.bake,
-            yes=request.yes,
-            given=dict(request.options),
-            reset=request.reset,
-        )
-    elif request.command == APP_REMOVE:
-        deploy.remove(service, app_id, user=request.user, baking=request.bake, yes=request.yes)
-    else:
-        raise TemtError(f"not implemented: {request.command}")
-
-
-def _run_local(request: Request) -> None:
-    """AWS を呼ばないコマンドを実行する。"""
-    if request.command == SERVICE_LIST:
-        from temt import services
-
-        services.list_services(request.service, request.format)
-        return
-    if request.command == APP_LIST:
-        from temt import manifest
-
-        manifest.list_apps(request.format)
-        return
-    from temt import ingress
-
-    service = request.service
-    if service is None:
-        # parse がサービスを必ず決めるので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing service")
-    if request.command == SG_LIST:
-        ingress.list_rules(service, request.format)
-        return
-    protocol = request.protocol
-    if protocol is None:
-        # parse が RULE_COMMANDS の <ポート> を必ず読むので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing port")
-    if request.command == SG_ADD:
-        ingress.add(service, protocol, request.rule_port, request.cidr, request.description)
-    elif request.command == SG_REMOVE:
-        ingress.remove(service, protocol, request.rule_port, request.cidr)
-    else:
-        raise TemtError(f"not implemented: {request.command}")
-
-
-def _run_ami_delete(request: Request) -> None:
-    """ami delete を実行する。"""
-    from temt import images
-
-    if request.image is None:
-        # parse が IMAGE_COMMANDS の ID か名前を必ず読むので、振り分けを書き忘れない限り来ない
-        raise TemtError(f"{request.command}: missing AMI id or name")
-    images.delete(
-        request.image, request.service, request.region, force=request.force, yes=request.yes
-    )
-
-
-def run(request: Request) -> int:
-    """要求を実行し、終了コードを返す。
-
-    AWS を使う module は、この中で読み込む。module の先頭で読み込むと、boto3 が
-    無いときに main が動く前に落ちる。botocore の例外も、ここで一度だけ包む。
+    使うプロファイルとリージョンは、--profile、--region と設定ファイルで決めるので、値は
+    conf に渡し、f には渡さない。AWS を使う module は f の中で読み込む。module の先頭で
+    読み込むと、boto3 が無いときに AWS を呼ばないコマンドまで動かなくなる。
     """
-    # どのプロファイルとリージョンを使うかは、--profile、--region と設定ファイルで決める
-    conf.OPTION_PROFILE = request.profile
-    conf.OPTION_REGION = request.region
-    if request.command == SSH_PROXY:
-        # ProxyCommand の標準出力は ssh の通信路なので、何も書かない
-        msg.use_stderr()
-    if request.command in LOCAL_COMMANDS:
-        # AWS を呼ばないので、boto3 が無くても動くよう、読み込む前に済ませる
-        _run_local(request)
-        return 0
 
-    from botocore.exceptions import (
-        BotoCoreError,
-        ClientError,
-        NoCredentialsError,
-        ProfileNotFound,
-    )
+    @functools.wraps(f)
+    def run(*, profile: str | None, region: str | None, **kwargs: Any) -> None:
+        conf.OPTION_PROFILE = profile
+        conf.OPTION_REGION = region
+        from botocore.exceptions import (
+            BotoCoreError,
+            ClientError,
+            NoCredentialsError,
+            ProfileNotFound,
+        )
 
-    from temt import images, status
+        try:
+            f(**kwargs)
+        except (ProfileNotFound, NoCredentialsError) as e:
+            raise TemtError(f"{aws_error(e)}; {_profile_hint(kwargs.get('service'))}") from e
+        except (ClientError, BotoCoreError) as e:
+            raise TemtError(aws_error(e)) from e
 
-    try:
-        if request.command == INSTANCE_LIST:
-            status.list_instances(request.service, request.region, request.format)
-        elif request.command == AMI_LIST:
-            images.list_images(request.service, request.region, request.format)
-        elif request.command == AMI_PRUNE:
-            images.prune(request.service, request.region, yes=request.yes)
-        elif request.command == AMI_DELETE:
-            _run_ami_delete(request)
-        else:
-            _run_service(request)
-    except (ProfileNotFound, NoCredentialsError) as e:
-        raise TemtError(f"{aws_error(e)}; {_profile_hint(request.service)}") from e
-    except (ClientError, BotoCoreError) as e:
-        raise TemtError(aws_error(e)) from e
-    return 0
+    # click は、下に書いたオプションほど後ろに並べる
+    for flag, metavar in (("--region", "REGION"), ("--profile", "PROFILE")):
+        name = flag.removeprefix("--")
+        run = click.option(
+            flag, type=TEXT, metavar=metavar, default=_from_root(name), callback=_once
+        )(run)
+    return run
 
 
-def main(argv: list[str] | None = None) -> int:
-    """引数を解釈してコマンドを実行し、終了コードを返す。argv は sys.argv と同じ形。"""
-    argv = list(sys.argv) if argv is None else argv
+def _local(f: Callable[..., None]) -> Callable[..., None]:
+    """AWS を呼ばないコマンド。temt の直後に置いた --profile と --region も誤りとする。"""
+
+    @functools.wraps(f)
+    def run(**kwargs: Any) -> None:
+        ctx = click.get_current_context()
+        for flag in ("--profile", "--region"):
+            if ctx.find_root().params.get(flag.removeprefix("--")) is not None:
+                raise click.UsageError(f"{flag} is not allowed; it does not call AWS.", ctx)
+        f(**kwargs)
+
+    return run
+
+
+_yes = click.option("--yes", is_flag=True)
+_async = click.option("--async", "is_async", is_flag=True)
+_format = click.option("--format", "columns", type=TEXT, metavar="COLUMNS")
+_user = click.option("--user", type=_UserName())
+_bake = click.option("--bake", is_flag=True)
+
+
+def _epilog(formatter: click.HelpFormatter) -> None:
+    """使い方の末尾に、詳しい使い方の文書の場所を書く。"""
+    formatter.write_paragraph()
+    with formatter.indentation():
+        formatter.write_text(EPILOG)
+
+
+def _synopsis(command: click.Command, ctx: click.Context) -> str:
+    """対象の使い方に書く、動詞の後ろに取る引数とコマンドラインオプション。"""
+    pieces: list[str] = []
+    for param in command.params:
+        if isinstance(param, click.Argument):
+            pieces.append(param.make_metavar(ctx))
+        elif isinstance(param, click.Option) and not param.hidden:
+            word = param.opts[0]
+            if not param.is_flag:
+                word += f" {param.make_metavar(ctx)}"
+            pieces.append(word if param.required else f"[{word}]")
+    return " ".join(pieces)
+
+
+class _Command(click.Command):
+    """コマンド。"""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as e:
+            # click は余分な引数を、表示できない文字もそのまま誤りに入れる。値の誤り
+            # （BadParameter など）は、temt の文か、click が repr で書いた文で、そのままでよい
+            if type(e) is not click.UsageError:
+                raise
+            raise click.UsageError(printable(e.message), e.ctx) from None
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        _epilog(formatter)
+
+
+class _Target(click.Group):
+    """対象。動詞を登録した順に、取る引数とコマンドラインオプションを添えて並べる。"""
+
+    command_class = _Command
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return list(self.commands)
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        rows = [(name, _synopsis(command, ctx)) for name, command in self.commands.items()]
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        _epilog(formatter)
+
+
+class _Root(click.Group):
+    """temt。対象ごとに動詞を並べ、短縮形を添える。"""
+
+    group_class = _Target
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        targets = {n: c for n, c in self.commands.items() if isinstance(c, click.Group)}
+        with formatter.section("Commands"):
+            formatter.write_dl([(name, " ".join(t.commands)) for name, t in targets.items()])
+        # 動詞と同じ名前の短縮形は対象ごとにまとめ、違うものは表すコマンドを添える
+        same: dict[str, list[str]] = {}
+        others: list[str] = []
+        for form, command in self.commands.items():
+            target = next((n for n, t in targets.items() if command in t.commands.values()), None)
+            if target is None:
+                continue
+            if form == command.name:
+                same.setdefault(target, []).append(form)
+            else:
+                others.append(f"{form} ({target} {command.name})")
+        with formatter.section("Short forms"):
+            formatter.write_text(
+                ", ".join([*(f"{' '.join(f)} ({t})" for t, f in same.items()), *others])
+            )
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        _epilog(formatter)
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except BrokenPipeError:
+            # 読み手が先に閉じた。click が何も言わずに終える
+            raise
+        except OSError as e:
+            # ファイルやディレクトリの読み書きの失敗
+            raise TemtError(os_error(e)) from e
+        except ImportError as e:
+            # boto3 などが入っていないとき。取り込みは各コマンドの中で行う
+            raise TemtError(f"{e}; reinstall temt") from e
+
+
+@click.group(cls=_Root, name=PREFIX)
+@click.option("--svc", "service", type=SERVICE, multiple=True, callback=_single)
+@click.option("--profile", type=TEXT, metavar="PROFILE")
+@click.option("--region", type=TEXT, metavar="REGION")
+@click.version_option(package_name=PREFIX)
+def cli(**_options: Any) -> None:
     # どのリージョンを使うかは temt が決めて渡す
     conf.take_region_env()
-    text = _early(argv[1:])
-    if text is not None:
-        out(text)
-        return 0
-    try:
-        return run(parse(argv[1:]))
-    except UsageError as e:
-        msg.error(str(e))
-        # --help も --version も無いので、_words の最初の語は、
-        # コマンドラインオプションを除いた 1 語めである
-        msg.tell(_usage_for(next(_words(argv[1:]), None)), side=True)
-        return e.exit_code
-    except TemtError as e:
-        msg.error(str(e))
-        return e.exit_code
-    except ImportError as e:
-        # boto3 などが入っていないとき。取り込みは run の中で行う
-        msg.error(f"{e}; reinstall temt")
-        return TemtError.exit_code
-    except OSError as e:
-        # ファイルやディレクトリの読み書きの失敗。プログラム名を付けて知らせる
-        msg.error(os_error(e))
-        return TemtError.exit_code
-    except KeyboardInterrupt:
-        # Ctrl-C は端末に ^C だけを出すので、行を閉じてから知らせる
-        msg.tell("\n", side=True)
-        msg.error("interrupted")
-        return TemtError.exit_code
+
+
+@cli.group("service")
+def service_group() -> None:
+    pass
+
+
+@service_group.command("apply")
+@_svc()
+@click.option("--image-id", "image", type=AWS_TEXT, metavar="AMI")
+@_yes
+@_aws
+def service_apply(service: Service, image: str | None, yes: bool) -> None:
+    from temt import apply
+
+    apply.run(service, image=image, yes=yes)
+
+
+@service_group.command("diff")
+@_svc()
+@click.option("--image-id", "image", type=AWS_TEXT, metavar="AMI")
+@_aws
+def service_diff(service: Service, image: str | None) -> None:
+    from temt import apply
+
+    apply.diff(service, image=image)
+
+
+@service_group.command("destroy")
+@_svc()
+@_yes
+@_aws
+def service_destroy(service: Service, yes: bool) -> None:
+    from temt import destroy
+
+    destroy.run(service, yes=yes)
+
+
+@service_group.command("list")
+@_svc(required=False)
+@_format
+@_local
+def service_list(service: Service | None, columns: str | None) -> None:
+    from temt import services
+
+    services.list_services(service, columns)
+
+
+@service_group.command("import")
+@_svc()
+@click.argument("instance_id", type=_InstanceId())
+@_yes
+@_aws
+def service_import(service: Service, instance_id: str, yes: bool) -> None:
+    from temt import importing
+
+    importing.run(service, instance_id, yes=yes)
+
+
+@cli.group("instance")
+def instance_group() -> None:
+    pass
+
+
+@instance_group.command("start")
+@_svc()
+@_async
+@_aws
+def instance_start(service: Service, is_async: bool) -> None:
+    from temt import start
+
+    start.run(service, is_async=is_async)
+
+
+@instance_group.command("stop")
+@_svc()
+@_async
+@_yes
+@_aws
+def instance_stop(service: Service, is_async: bool, yes: bool) -> None:
+    from temt import stop
+
+    stop.run(service, is_async=is_async, yes=yes)
+
+
+@instance_group.command("terminate")
+@_svc()
+@click.argument("instance_ids", nargs=-1, type=_InstanceId(), callback=_unique)
+@_async
+@_yes
+@_aws
+def instance_terminate(
+    service: Service, instance_ids: tuple[str, ...], is_async: bool, yes: bool
+) -> None:
+    from temt import terminate
+
+    terminate.run(service, ids=instance_ids, is_async=is_async, yes=yes)
+
+
+@instance_group.command("reboot")
+@_svc()
+@_async
+@_yes
+@_aws
+def instance_reboot(service: Service, is_async: bool, yes: bool) -> None:
+    from temt import reboot
+
+    reboot.run(service, is_async=is_async, yes=yes)
+
+
+@instance_group.command("show")
+@_svc()
+@click.option("--apps", is_flag=True)
+@_aws
+def instance_show(service: Service, apps: bool) -> None:
+    from temt import status
+
+    status.run(service, apps=apps)
+
+
+@instance_group.command("list")
+@_svc(required=False)
+@_format
+@_aws
+def instance_list(service: Service | None, columns: str | None) -> None:
+    from temt import status
+
+    status.list_instances(service, conf.OPTION_REGION, columns)
+
+
+@cli.group("ami")
+def ami_group() -> None:
+    pass
+
+
+@ami_group.command("bake")
+@_svc()
+@_yes
+@_aws
+def ami_bake(service: Service, yes: bool) -> None:
+    from temt import bake
+
+    bake.run(service, yes=yes)
+
+
+@ami_group.command("list")
+@_svc(required=False)
+@_format
+@_aws
+def ami_list(service: Service | None, columns: str | None) -> None:
+    from temt import images
+
+    images.list_images(service, conf.OPTION_REGION, columns)
+
+
+@ami_group.command("prune")
+@_svc(required=False)
+@_yes
+@_aws
+def ami_prune(service: Service | None, yes: bool) -> None:
+    from temt import images
+
+    images.prune(service, conf.OPTION_REGION, yes=yes)
+
+
+@ami_group.command("delete")
+@_svc(required=False)
+@click.argument("ami", type=AWS_TEXT)
+@click.option("--force", is_flag=True)
+@_yes
+@_aws
+def ami_delete(service: Service | None, ami: str, force: bool, yes: bool) -> None:
+    from temt import images
+
+    images.delete(ami, service, conf.OPTION_REGION, force=force, yes=yes)
+
+
+@cli.group("template")
+def template_group() -> None:
+    pass
+
+
+@template_group.command("show")
+@_svc()
+@_aws
+def template_show(service: Service) -> None:
+    from temt import show
+
+    show.template(service)
+
+
+@cli.group("role")
+def role_group() -> None:
+    pass
+
+
+@role_group.command("import")
+@_svc()
+@click.argument("role", type=AWS_TEXT)
+@_yes
+@_aws
+def role_import(service: Service, role: str, yes: bool) -> None:
+    from temt import role as roles
+
+    roles.import_role(service, role, yes=yes)
+
+
+@role_group.command("delete")
+@_svc()
+@_yes
+@_aws
+def role_delete(service: Service, yes: bool) -> None:
+    from temt import role as roles
+
+    roles.delete(service, yes=yes)
+
+
+@cli.group("sg")
+def sg_group() -> None:
+    pass
+
+
+@sg_group.command("list")
+@_svc()
+@_format
+@_local
+def sg_list(service: Service, columns: str | None) -> None:
+    from temt import ingress
+
+    ingress.list_rules(service, columns)
+
+
+@sg_group.command("add")
+@_svc()
+@click.argument("port", type=_RulePort())
+@click.argument("cidr", type=_Cidr(), required=False)
+@click.option("--description", type=_Description())
+@_local
+def sg_add(
+    service: Service,
+    port: tuple[str, conf.RULE_PORT],
+    cidr: str | None,
+    description: str | None,
+) -> None:
+    from temt import ingress
+
+    ingress.add(service, *port, cidr, description)
+
+
+@sg_group.command("remove")
+@_svc()
+@click.argument("port", type=_RulePort())
+@click.argument("cidr", type=_Cidr(), required=False)
+@_local
+def sg_remove(service: Service, port: tuple[str, conf.RULE_PORT], cidr: str | None) -> None:
+    from temt import ingress
+
+    ingress.remove(service, *port, cidr)
+
+
+@sg_group.command("diff")
+@_svc()
+@_aws
+def sg_diff(service: Service) -> None:
+    from temt import sg
+
+    sg.diff(service)
+
+
+@sg_group.command("show")
+@_svc()
+@_aws
+def sg_show(service: Service) -> None:
+    from temt import sg
+
+    sg.show(service)
+
+
+@cli.group("app")
+def app_group() -> None:
+    pass
+
+
+# app list は --svc を付けても同じ手元のアプリを挙げる。付けられるのは、サービスの
+# コマンドから打てるようにするためである
+@app_group.command("list")
+@_svc(required=False)
+@_format
+@_local
+def app_list(service: Service | None, columns: str | None) -> None:
+    from temt import manifest
+
+    manifest.list_apps(columns)
+
+
+@app_group.command("show")
+@_svc()
+@click.argument("app_id", type=LABEL)
+@_aws
+def app_show(service: Service, app_id: str) -> None:
+    from temt import app
+
+    app.show(service, app_id)
+
+
+@app_group.command("get")
+@_svc()
+@click.argument("app_id", type=LABEL)
+@click.argument("key", type=LABEL)
+@_aws
+def app_get(service: Service, app_id: str, key: str) -> None:
+    from temt import app
+
+    app.get(service, app_id, key)
+
+
+@app_group.command("set")
+@_svc()
+@click.argument("app_id", type=LABEL)
+@click.argument("pair", type=_KeyValue())
+@_aws
+def app_set(service: Service, app_id: str, pair: tuple[str, str]) -> None:
+    from temt import app
+
+    app.set_value(service, app_id, *pair)
+
+
+@app_group.command("unset")
+@_svc()
+@click.argument("app_id", type=LABEL)
+@click.argument("key", type=LABEL)
+@_aws
+def app_unset(service: Service, app_id: str, key: str) -> None:
+    from temt import app
+
+    app.unset(service, app_id, key)
+
+
+@app_group.command("deploy")
+@_svc()
+@click.argument("app", type=_DeployApp())
+@click.argument("app_options", nargs=-1, type=_AppOption(), callback=_unique)
+@_user
+@_bake
+@click.option("--reset", is_flag=True)
+@_yes
+@_aws
+def app_deploy(
+    service: Service,
+    app: str,
+    app_options: tuple[tuple[str, str | None], ...],
+    user: str | None,
+    bake: bool,
+    reset: bool,
+    yes: bool,
+) -> None:
+    from temt import deploy
+
+    deploy.run(service, app, user=user, baking=bake, yes=yes, given=dict(app_options), reset=reset)
+
+
+@app_group.command("remove")
+@_svc()
+@click.argument("app_id", type=LABEL)
+@_user
+@_bake
+@_yes
+@_aws
+def app_remove(service: Service, app_id: str, user: str | None, bake: bool, yes: bool) -> None:
+    from temt import deploy
+
+    deploy.remove(service, app_id, user=user, baking=bake, yes=yes)
+
+
+@cli.group("ssh")
+def ssh_group() -> None:
+    pass
+
+
+# ssh の ProxyCommand として動く。ssh は temt proxy --svc <svc> --user '%r' %p を呼ぶ
+@ssh_group.command("proxy")
+@_svc()
+@click.argument("port", type=PORT, default=DEFAULT_PORT, required=False)
+@_user
+@_aws
+def ssh_proxy(service: Service, port: int, user: str | None) -> None:
+    from temt import proxy
+
+    # ProxyCommand の標準出力は ssh の通信路なので、何も書かない
+    msg.use_stderr()
+    proxy.run(service, port, user)
+
+
+@ssh_group.command("set-port")
+@_svc()
+@click.argument("ports", nargs=-1, required=True, type=PORT, metavar="PORT...", callback=_unique)
+@_yes
+@_aws
+def ssh_set_port(service: Service, ports: tuple[int, ...], yes: bool) -> None:
+    from temt import setport
+
+    setport.run(service, ports, yes=yes)
+
+
+# 短縮形と、それが表すコマンド
+SHORT_FORMS = {
+    "apply": service_apply,
+    "diff": service_diff,
+    "destroy": service_destroy,
+    "start": instance_start,
+    "stop": instance_stop,
+    "terminate": instance_terminate,
+    "reboot": instance_reboot,
+    "status": instance_show,
+    "bake": ami_bake,
+    "deploy": app_deploy,
+    "proxy": ssh_proxy,
+}
+for _form, _command in SHORT_FORMS.items():
+    cli.add_command(_command, _form)
+
+
+def main() -> None:
+    """temt の入口。呼ばれた名前によらず、使い方には temt と書く。
+
+    起動したときから標準エラー出力が閉じていれば（2>&-）、click はエラーを標準出力に
+    書いてしまうので、/dev/null に回して捨てる。
+    """
+    if sys.stderr is None:
+        sys.stderr = Path(os.devnull).open("w", encoding="utf-8")  # noqa: SIM115
+    cli.main(prog_name=PREFIX)

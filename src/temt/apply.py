@@ -9,7 +9,7 @@ apply（run）は、すべての手順の差分を先に検出し（_detect）�
 検出した差分で更新する（_update）。diff は検出だけを行い、変更を標準出力に書く。どちらも
 --image-id で、起動テンプレートの AMI を選び直せる。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

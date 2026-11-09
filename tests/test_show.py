@@ -1,6 +1,6 @@
 """template show の本体のテスト。AWS は Stubber で差し替える。
 
-端から端まで（show.template か cli.main）を通し、表示の形を確かめる。instance show は
+端から端まで（show.template か temt のコマンド）を通し、表示の形を確かめる。instance show は
 test_status.py が確かめる。
 """
 
@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from conftest import Stubs
+from conftest import Stubs, run_temt
 
-from temt import cli, show
+from temt import show
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -443,7 +443,7 @@ def test_main_runs_it(
     aws_stubs: Stubs, configured: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     a_template(aws_stubs)
-    assert cli.main(["temt", "template", "show", "--svc", "dev-main"]) == 0
+    assert run_temt(["template", "show", "--svc", "dev-main"]) == 0
     aws_stubs.done()
     out, err = capsys.readouterr()
     assert err == ""

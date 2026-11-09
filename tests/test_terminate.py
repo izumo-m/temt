@@ -1,6 +1,6 @@
 """terminate の本体のテスト。AWS は Stubber で、標準入力と時計は偽物に差し替える。
 
-端から端まで（terminate.run か cli.main）を通し、手順の順序と締め切りを確かめる。
+端から端まで（terminate.run か temt のコマンド）を通し、手順の順序と締め切りを確かめる。
 """
 
 import fcntl
@@ -10,9 +10,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import WHERE, Clock, Stubs, an_instance, deadline, identified, reservations, taken
+from conftest import (
+    WHERE,
+    Clock,
+    Stubs,
+    an_instance,
+    deadline,
+    identified,
+    reservations,
+    run_temt,
+    taken,
+)
 
-from temt import cli, home, instances, lock, terminate, wait
+from temt import home, instances, lock, terminate, wait
 from temt.msg import TemtError
 from temt.names import Service
 
@@ -150,14 +160,14 @@ def test_it_changes_nothing_when_the_answer_is_not_y(
         SEARCH,
     )
 
-    assert cli.main(["temt", "terminate", "--svc", "dev-main"]) == 1
+    assert run_temt(["terminate", "--svc", "dev-main"]) == 1
 
     # 探す以外は何も積んでいないので、変えていれば Stubber が失敗する
     aws_stubs.done()
     assert file.exists()
     err = capsys.readouterr().err
     assert err.startswith(PROMPT)
-    assert err.endswith("temt: cancelled\n")
+    assert err.endswith("Error: cancelled\n")
 
 
 def test_it_cancels_at_the_end_of_input(
@@ -176,10 +186,10 @@ def test_it_cancels_at_the_end_of_input(
         SEARCH,
     )
 
-    assert cli.main(["temt", "terminate", "--svc", "dev-main"]) == 1
+    assert run_temt(["terminate", "--svc", "dev-main"]) == 1
 
     aws_stubs.done()
-    assert capsys.readouterr().err == f"{PROMPT}\ntemt: cancelled\n"
+    assert capsys.readouterr().err == f"{PROMPT}\nError: cancelled\n"
 
 
 def test_it_needs_yes_when_stdin_is_not_a_terminal(
@@ -387,7 +397,7 @@ def test_it_keeps_the_known_hosts_when_the_request_fails(
         expected_params=BY_ID,
     )
 
-    assert cli.main(["temt", "terminate", "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["terminate", "--svc", "dev-main", "--yes"]) == 1
 
     aws_stubs.done()
     assert file.exists()
@@ -407,7 +417,7 @@ def test_async_returns_before_the_wait(
     )
     aws_stubs.ec2.add_response("terminate_instances", terminating(INSTANCE), BY_ID)
 
-    assert cli.main(["temt", "terminate", "--svc", "dev-main", "--async", "--yes"]) == 0
+    assert run_temt(["terminate", "--svc", "dev-main", "--async", "--yes"]) == 0
 
     aws_stubs.done()
     assert not file.exists()
@@ -567,7 +577,7 @@ def test_it_terminates_nothing_when_an_instance_it_is_given_is_not_found(
         SEARCH,
     )
 
-    assert cli.main(["temt", "terminate", "--svc", "dev-main", OTHER, missing, "--yes"]) == 1
+    assert run_temt(["terminate", "--svc", "dev-main", OTHER, missing, "--yes"]) == 1
 
     # 探す以外は何も積んでいないので、変えていれば Stubber が失敗する
     aws_stubs.done()
@@ -577,7 +587,7 @@ def test_it_terminates_nothing_when_an_instance_it_is_given_is_not_found(
     # 見つかったものを挙げてから、エラーを出す
     assert err == (
         f"instances tagged temt:service=dev-main:\n  {INSTANCE} (running)\n  {OTHER} (stopped)\n"
-        f"temt: no instance {missing} for {NAME}; nothing was terminated; "
+        f"Error: no instance {missing} for {NAME}; nothing was terminated; "
         "see 'temt status --svc dev-main' and terminate again\n"
     )
 
@@ -593,10 +603,10 @@ def test_it_fails_when_it_is_given_an_instance_but_finds_none(
     _ = configured
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
 
-    assert cli.main(["temt", "terminate", INSTANCE, "--svc", "dev-main", "--yes"]) == 1
+    assert run_temt(["terminate", INSTANCE, "--svc", "dev-main", "--yes"]) == 1
 
     aws_stubs.done()
     assert capsys.readouterr().err == (
-        f"temt: no instance {INSTANCE} for {NAME}; nothing was terminated; "
+        f"Error: no instance {INSTANCE} for {NAME}; nothing was terminated; "
         "see 'temt status --svc dev-main' and terminate again\n"
     )

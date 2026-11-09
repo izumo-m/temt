@@ -5,7 +5,7 @@
 スクリプト（sshd.script）を動かし、焼き（bake と同じ）、Host ブロックの Port を書き換え、
 受信規則の変え方を案内する。失敗しても元に戻さず、焼かず、Port も書き換えない。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

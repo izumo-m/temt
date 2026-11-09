@@ -1,6 +1,6 @@
 """role import と role delete の本体のテスト。AWS は Stubber で、標準入力は偽物に差し替える。
 
-端から端まで（role.import_role、role.delete か cli.main）を通す。role import は AWS を
+端から端まで（role.import_role、role.delete か temt のコマンド）を通す。role import は AWS を
 読むだけで書き換えるのは設定ファイルだけなので、書いた中身と、それが読めることを確かめる。
 role delete は、消してよいことを確かめる手順と、消す順序を確かめる。
 """
@@ -13,10 +13,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from conftest import REGION, WHERE, Stubs, an_instance, identified, reservations
+from conftest import REGION, WHERE, Stubs, an_instance, identified, reservations, run_temt
 
-from temt import cli, conf, ltbuild, resources, role
-from temt.msg import TemtError, UsageError
+from temt import conf, ltbuild, resources, role
+from temt.msg import TemtError
 from temt.names import Service, defaults_path
 from temt.table import tilde
 
@@ -696,11 +696,11 @@ def test_import_changes_nothing_when_the_answer_is_not_y(
     monkeypatch.setattr(sys, "stdin", Terminal("n\n"))
     source_read(aws_stubs, {"S3Access": S3_POLICY})
 
-    assert cli.main(["temt", "role", "import", "--svc", "dev-main", SOURCE]) == 1
+    assert run_temt(["role", "import", "--svc", "dev-main", SOURCE]) == 1
 
     aws_stubs.done()
     assert text_of(imported) == IMPORTED
-    assert capsys.readouterr().err == IMPORT_PROMPT + "temt: cancelled\n"
+    assert capsys.readouterr().err == IMPORT_PROMPT + "Error: cancelled\n"
 
 
 def test_import_needs_yes_when_stdin_is_not_a_terminal(
@@ -742,13 +742,14 @@ def test_import_needs_the_config_file(
     aws_stubs: Stubs, service: Service, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """role import は設定ファイルを書き換えるだけなので、無ければ AWS を読まずに止める。"""
-    assert cli.main(["temt", "role", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
+    assert run_temt(["role", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 1
 
     aws_stubs.done()
     assert aws_stubs.passed == []
     assert not service.conf_path.exists()
     assert capsys.readouterr().err == (
-        f"temt: no config file: {tilde(service.conf_path)}; run 'temt apply --svc dev-main' first\n"
+        f"Error: no config file: {tilde(service.conf_path)}; "
+        "run 'temt apply --svc dev-main' first\n"
     )
 
 
@@ -834,20 +835,11 @@ def test_import_runs_from_the_command_line(
 ) -> None:
     source_read(aws_stubs, {"S3Access": S3_POLICY, "kms_decrypt": KMS_POLICY}, (MANAGED, CUSTOMER))
 
-    assert cli.main(["temt", "role", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 0
+    assert run_temt(["role", "import", "--svc", "dev-main", SOURCE, "--yes"]) == 0
 
     aws_stubs.done()
     assert text_of(imported) == REWRITTEN
     assert told(capsys.readouterr().out)[-1] == LEFT_HINT
-
-
-def test_import_takes_one_role() -> None:
-    assert cli.parse(["role", "import", "--svc", "dev-main", SOURCE]).app == SOURCE
-    assert cli.parse(["role", "import", "--svc", "dev-main", SOURCE, "--yes"]).yes is True
-    with pytest.raises(UsageError):
-        cli.parse(["role", "import", "--svc", "dev-main"])
-    with pytest.raises(UsageError):
-        cli.parse(["role", "import", "--svc", "dev-main", SOURCE, "other"])
 
 
 # role delete
@@ -1311,13 +1303,13 @@ def test_delete_changes_nothing_when_the_answer_is_not_y(
     in_profiles(aws_stubs)
     role_held(aws_stubs)
 
-    assert cli.main(["temt", "role", "delete", "--svc", "dev-main"]) == 1
+    assert run_temt(["role", "delete", "--svc", "dev-main"]) == 1
 
     # 消す呼び出しは積んでいないので、消していれば Stubber が失敗する
     aws_stubs.done()
     captured = capsys.readouterr()
     assert captured.out == listing(PROFILE_LINE, ROLE_LINE)
-    assert captured.err == DELETE_PROMPT + "temt: cancelled\n"
+    assert captured.err == DELETE_PROMPT + "Error: cancelled\n"
 
 
 def test_delete_runs_from_the_command_line(
@@ -1331,7 +1323,7 @@ def test_delete_runs_from_the_command_line(
     profile_deleted(aws_stubs)
     role_deleted(aws_stubs)
 
-    assert cli.main(["temt", "role", "delete", "--svc", "dev-main", "--yes"]) == 0
+    assert run_temt(["role", "delete", "--svc", "dev-main", "--yes"]) == 0
 
     aws_stubs.done()
     assert told(capsys.readouterr().out)[-2:] == [
@@ -1368,9 +1360,3 @@ def test_delete_tells_to_run_role_delete_again(aws_stubs: Stubs, imported: Servi
         "nothing is attached to it, IAM may not show the change yet, so run role delete "
         "again; otherwise detach it by hand and run role delete again"
     )
-
-
-def test_delete_takes_no_argument() -> None:
-    assert cli.parse(["role", "delete", "--svc", "dev-main", "--yes"]).yes is True
-    with pytest.raises(UsageError, match="role delete: unexpected argument: web-role"):
-        cli.parse(["role", "delete", "--svc", "dev-main", SOURCE])

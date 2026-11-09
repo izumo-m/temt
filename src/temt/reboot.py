@@ -7,7 +7,7 @@ boot_id は Run Command（send-command）で読む。
 
 起動テンプレートの有無は確かめない。再起動はテンプレートを使わないからである。
 
-boto3 を使うので、この module は cli.run が呼ばれたときに読み込まれる。botocore の
+boto3 を使うので、この module は cli のコマンドが動くときに読み込まれる。botocore の
 例外もそこで包む。
 """
 

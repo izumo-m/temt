@@ -1,6 +1,6 @@
 """instance show（短縮形 status）と instance list の本体のテスト。AWS は Stubber で差し替える。
 
-instance show は端から端まで（status.run か cli.main）を通し、表示の形を確かめる。
+instance show は端から端まで（status.run か temt のコマンド）を通し、表示の形を確かめる。
 """
 
 from datetime import UTC, datetime, timedelta, timezone
@@ -17,9 +17,10 @@ from conftest import (
     commanded,
     online,
     reservations,
+    run_temt,
 )
 
-from temt import aws, cli, conf, instances, resources, status
+from temt import aws, conf, instances, resources, status
 from temt.msg import TemtError, UsageError
 from temt.names import Service, user_apps_dir
 
@@ -302,7 +303,7 @@ def test_main_runs_it(
     applied(aws_stubs)
     aws_stubs.ec2.add_response("describe_instances", reservations(), SEARCH)
     statuses(aws_stubs)
-    assert cli.main(["temt", "--profile", "work", "status", "--svc", "dev-main"]) == 0
+    assert run_temt(["--profile", "work", "status", "--svc", "dev-main"]) == 0
     aws_stubs.done()
     # --profile はその実行だけに効き、設定ファイルには書かない
     assert conf.OPTION_PROFILE == "work"
