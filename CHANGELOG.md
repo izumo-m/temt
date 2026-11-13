@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `ami prune` が確認の前に挙げる AMI の見出しを、`not used by any launch template:` にした。
+
 ## 3.0.0 - 2026-11-09
 
 ### Breaking changes
