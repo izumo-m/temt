@@ -350,7 +350,7 @@ def test_prune_deregisters_the_images_no_template_uses(
     assert terminal.reads == 1
     captured = capsys.readouterr()
     assert captured.out.startswith(
-        "deregister:\n"
+        "not used by any launch template:\n"
         f"  {LOOSE}  temt-api-2609021200       failed     2026-09-02 12:00:00\n"
         f"  {OLD}  temt-dev-main-2609011200  available  2026-09-01 12:00:00\n"
     )

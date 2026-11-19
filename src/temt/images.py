@@ -308,7 +308,7 @@ def prune(service: Service | None, region: str | None, *, yes: bool) -> None:
         msg.tell("no AMIs to deregister\n")
         return
     rows = [_row(one) for one in doomed]
-    msg.tell("deregister:\n")
+    msg.tell("not used by any launch template:\n")
     msg.columns(rows)
     _confirm(session, svc, f"deregister {_count(len(doomed))} and their snapshots", yes=yes)
     left: list[str] = []
